@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Injection Admin 8080</title>
+    <style>
+      body { margin: 0; font-family: Arial, sans-serif; background: #0b1220; color: #e2e8f0; }
+      .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
+      .card { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+      label { display: block; font-size: 12px; margin-bottom: 4px; color: #93c5fd; }
+      input, select, button { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; }
+      button { cursor: pointer; background: #0ea5e9; color: #0b1220; font-weight: bold; }
+      .row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 10px; }
+      .col-3 { grid-column: span 3; } .col-4 { grid-column: span 4; } .col-6 { grid-column: span 6; } .col-8 { grid-column: span 8; } .col-12 { grid-column: span 12; }
+      .muted { color: #94a3b8; font-size: 12px; }
+      .good { color: #22c55e; } .warn { color: #f59e0b; } .bad { color: #ef4444; }
+      .canvas-wrap { position: relative; border: 1px solid #334155; border-radius: 10px; overflow: hidden; width: fit-content; max-width: 100%; }
+      .canvas-viewport { overflow: auto; border: 1px solid #1e293b; border-radius: 10px; max-height: 70vh; }
+      .canvas-inner { position: relative; transform-origin: top left; }
+      #snap { display: block; max-width: 100%; height: auto; }
+      #overlay { position: absolute; top: 0; left: 0; }
+      .btn-gray { background: #334155; color: #e2e8f0; }
+      .btn-green { background: #22c55e; color: #052e16; }
+      .btn-orange { background: #f59e0b; color: #422006; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h2>Ayar / Kalibrasyon Paneli (8080)</h2>
+      <p class="muted">Izleme paneli ayri (8000). Bu sayfada RTSP, ROI, threshold, eksen ve acik/kapali pozisyon ayarlanir.</p>
+
+      <div class="card">
+        <div class="row">
+          <div class="col-3">
+            <label>Kamera</label>
+            <select id="cameraSelect"></select>
+          </div>
+          <div class="col-6">
+            <label>RTSP URL</label>
+            <input id="rtspUrl" placeholder="rtsp://user:pass@ip:554/stream2" />
+          </div>
+          <div class="col-3">
+            <label>Durum</label>
+            <div id="cameraStatus" class="muted">-</div>
+          </div>
+          <div class="col-3">
+            <label>Genislik</label>
+            <input id="camWidth" type="number" min="160" max="1920" />
+          </div>
+          <div class="col-3">
+            <label>Hedef FPS</label>
+            <input id="camFps" type="number" min="1" max="30" />
+          </div>
+          <div class="col-3">
+            <label>Aktif</label>
+            <select id="camEnabled"><option value="true">true</option><option value="false">false</option></select>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="saveCamBtn">Kamera Ayarini Kaydet</button>
+          </div>
+          <div class="col-3"><button id="testCamBtn" class="btn-orange">Kamera Test</button></div>
+          <div class="col-9"><div id="camMsg" class="muted"></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div class="col-3">
+            <label>Makine</label>
+            <select id="machineSelect"></select>
+          </div>
+          <div class="col-3">
+            <label>Yon (axis)</label>
+            <select id="axisDir">
+              <option value="lr">Sol -> Sag</option>
+              <option value="rl">Sag -> Sol</option>
+            </select>
+          </div>
+          <div class="col-3">
+            <label>ROI Aci (derece)</label>
+            <input id="roiAngle" type="number" step="1" min="-180" max="180" value="0" />
+          </div>
+          <div class="col-3">
+            <label>Threshold Modu</label>
+            <select id="thresholdMode">
+              <option value="fixed">fixed</option>
+              <option value="adaptive">adaptive</option>
+            </select>
+          </div>
+          <div class="col-3">
+            <label>Prominence esigi (peak - bg)</label>
+            <input id="thMin" type="number" min="0" max="255" />
+          </div>
+          <div class="col-3">
+            <label>Esik Offset (+/-)</label>
+            <input id="thOffset" type="number" min="-120" max="120" step="1" value="0" />
+          </div>
+          <div class="col-3">
+            <label>Cizgi Kalinligi (px)</label>
+            <input id="lineThickness" type="number" min="1" max="51" step="2" value="7" />
+          </div>
+          <div class="col-3">
+            <label>Reflektor Uzunluk Min (sample)</label>
+            <input id="lenMin" type="number" min="1" max="2000" />
+          </div>
+          <div class="col-3">
+            <label>Reflektor Uzunluk Max (sample)</label>
+            <input id="lenMax" type="number" min="1" max="2000" />
+          </div>
+          <div class="col-3">
+            <label>Kalibrasyon Sure (sn)</label>
+            <input id="lenCalibSec" type="number" min="3" max="60" step="1" value="12" />
+          </div>
+          <div class="col-3" style="display:none">
+            <label>Threshold Max (kullanilmiyor)</label>
+            <input id="thMax" type="number" min="0" max="255" />
+          </div>
+          <div class="col-3">
+            <label>Open 1D</label>
+            <input id="open1d" type="number" step="0.01" min="0" max="1" />
+          </div>
+          <div class="col-3">
+            <label>Closed 1D</label>
+            <input id="closed1d" type="number" step="0.01" min="0" max="1" />
+          </div>
+          <div class="col-3">
+            <label>Hysteresis</label>
+            <input id="hys" type="number" step="0.01" min="0" max="0.5" />
+          </div>
+          <div class="col-3">
+            <label>Makine Aktif</label>
+            <select id="machineEnabled"><option value="true">true</option><option value="false">false</option></select>
+          </div>
+          <div class="col-3"><button id="saveMachineBtn">Makine Parametre Kaydet</button></div>
+          <div class="col-3"><button id="learnLenBtn" class="btn-orange">Uzunluk Kalibrasyon Baslat</button></div>
+          <div class="col-3"><button id="reloadSnapBtn" class="btn-gray">Snapshot Yenile</button></div>
+          <div class="col-6"><div id="machineMsg" class="muted"></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Takip Cizgisi Ayari</h3>
+        <p class="muted">Sistem sadece sari takip cizgisi + kalinlik bandini kullanir. ROI sekli sadece cizgiyi hizalamak icin yardimcidir.</p>
+        <div class="row" style="margin-bottom:8px;">
+          <div class="col-3"><button id="zoomOutBtn" class="btn-gray">- Zoom</button></div>
+          <div class="col-3"><button id="zoomInBtn" class="btn-gray">+ Zoom</button></div>
+          <div class="col-3"><button id="zoomResetBtn" class="btn-gray">Zoom Sifirla</button></div>
+          <div class="col-3"><label>Zoom <span id="zoomLabel">100%</span></label><input id="zoomSlider" type="range" min="50" max="400" step="10" value="100" /></div>
+        </div>
+        <div class="canvas-viewport" id="canvasViewport">
+          <div class="canvas-wrap canvas-inner" id="canvasInner">
+            <img id="snap" />
+            <canvas id="overlay"></canvas>
+          </div>
+        </div>
+        <div class="row" style="margin-top: 8px;">
+          <div class="col-3"><button id="clearRoiBtn" class="btn-gray">Cizimi Temizle</button></div>
+          <div class="col-3"><button id="saveRoiBtn" class="btn-green">Cizgi Kaydet</button></div>
+          <div class="col-6"><div id="roiMsg" class="muted"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const API = `${location.protocol}//${location.hostname}:8000`;
+      let cameras = [];
+      let machines = [];
+      let roiPoly = null; // [{x,y},...4]
+      let interaction = { mode: null, start: null, basePoly: null, cornerIdx: -1, rotateBaseAngle: 0, rotateStart: 0 };
+      let viewZoom = 1.0;
+
+      const HANDLE_R = 7;
+      const MIN_HALF_SIZE_PX = 0.8;
+      const ROTATE_HANDLE_DIST = 28;
+
+      const cameraSelect = document.getElementById('cameraSelect');
+      const machineSelect = document.getElementById('machineSelect');
+      const snap = document.getElementById('snap');
+      const overlay = document.getElementById('overlay');
+      const canvasInner = document.getElementById('canvasInner');
+      const canvasViewport = document.getElementById('canvasViewport');
+      const ctx = overlay.getContext('2d');
+
+      function q(id){ return document.getElementById(id); }
+      function setMsg(id, text, cls='muted'){ const el=q(id); el.className=cls; el.textContent=text; }
+
+      async function jget(path){
+        const r = await fetch(API + path); if(!r.ok) throw new Error(await r.text()); return r.json();
+      }
+      async function jpatch(path, body){
+        const r = await fetch(API + path,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        if(!r.ok) throw new Error(await r.text()); return r.json();
+      }
+      async function jpost(path, body){
+        const r = await fetch(API + path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        if(!r.ok) throw new Error(await r.text()); return r.json();
+      }
+
+      function camById(id){ return cameras.find(c=>c.id===Number(id)); }
+      function machineById(id){ return machines.find(m=>m.id===Number(id)); }
+      function normalizeThresholdMode(mode){
+        const m = String(mode || 'fixed').toLowerCase();
+        if(m === 'adaptive' || m === 'learned') return 'adaptive';
+        return 'fixed';
+      }
+      function clonePoly(poly){ return poly ? poly.map(p=>({x:p.x,y:p.y})) : null; }
+      function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+
+      function getMouse(e){
+        const r = overlay.getBoundingClientRect();
+        return { x: (e.clientX - r.left)/viewZoom, y: (e.clientY - r.top)/viewZoom };
+      }
+
+      function applyZoom(){
+        canvasInner.style.transform = `scale(${viewZoom})`;
+        q('zoomSlider').value = String(Math.round(viewZoom * 100));
+        q('zoomLabel').textContent = `${Math.round(viewZoom * 100)}%`;
+      }
+
+      function polyCenter(poly){
+        const cx = poly.reduce((s,p)=>s+p.x,0)/poly.length;
+        const cy = poly.reduce((s,p)=>s+p.y,0)/poly.length;
+        return {x:cx,y:cy};
+      }
+
+      function angleOfPoly(poly){
+        if(!poly || poly.length < 2) return 0;
+        const a = Math.atan2(poly[1].y - poly[0].y, poly[1].x - poly[0].x) * 180 / Math.PI;
+        return a;
+      }
+
+      function rotatePoint(p, c, deg){
+        const a = deg * Math.PI / 180;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const dx = p.x - c.x, dy = p.y - c.y;
+        return { x: c.x + dx*ca - dy*sa, y: c.y + dx*sa + dy*ca };
+      }
+
+      function rotatePoly(poly, center, deg){
+        return poly.map(p=>rotatePoint(p, center, deg));
+      }
+
+      function rotateHandle(poly){
+        const topMid = { x:(poly[0].x + poly[1].x)/2, y:(poly[0].y + poly[1].y)/2 };
+        const c = polyCenter(poly);
+        const vx = topMid.x - c.x, vy = topMid.y - c.y;
+        const len = Math.hypot(vx, vy) || 1;
+        return { x: topMid.x + (vx/len)*ROTATE_HANDLE_DIST, y: topMid.y + (vy/len)*ROTATE_HANDLE_DIST };
+      }
+
+      function handleRadiusPx(){
+        return Math.max(1.4, HANDLE_R / Math.max(0.5, viewZoom));
+      }
+
+      function hitRadiusPx(){
+        return Math.max(2.2, (HANDLE_R + 4) / Math.max(0.5, viewZoom));
+      }
+
+      function pointInPoly(pt, poly){
+        let inside = false;
+        for(let i=0, j=poly.length-1; i<poly.length; j=i++){
+          const xi=poly[i].x, yi=poly[i].y, xj=poly[j].x, yj=poly[j].y;
+          const inter = ((yi>pt.y)!==(yj>pt.y)) && (pt.x < (xj-xi)*(pt.y-yi)/(yj-yi+1e-9)+xi);
+          if(inter) inside = !inside;
+        }
+        return inside;
+      }
+
+      function axisFromPoly(poly){
+        if(!poly || poly.length !== 4) return null;
+        // Use the long-edge midline so short-edge (ROI width) changes do not
+        // change the detector path.
+        const lineLen01 = Math.hypot(poly[1].x-poly[0].x, poly[1].y-poly[0].y);
+        const lineLen03 = Math.hypot(poly[3].x-poly[0].x, poly[3].y-poly[0].y);
+        let a, b;
+        if(lineLen01 >= lineLen03){
+          a = { x:(poly[0].x + poly[3].x)/2, y:(poly[0].y + poly[3].y)/2 };
+          b = { x:(poly[1].x + poly[2].x)/2, y:(poly[1].y + poly[2].y)/2 };
+        } else {
+          a = { x:(poly[0].x + poly[1].x)/2, y:(poly[0].y + poly[1].y)/2 };
+          b = { x:(poly[2].x + poly[3].x)/2, y:(poly[2].y + poly[3].y)/2 };
+        }
+        const dir = (document.getElementById('axisDir').value || 'lr');
+        if(dir === 'rl'){ const tmp=a; a=b; b=tmp; }
+        return { a, b };
+      }
+
+      function drawRoi(){
+        ctx.clearRect(0,0,overlay.width,overlay.height);
+        if(!roiPoly || roiPoly.length !== 4) return;
+
+        // ROI polygon is hidden by default to avoid confusion:
+        // detector uses only the yellow tracking line + thickness band.
+        if(interaction.mode){
+          ctx.strokeStyle = 'rgba(34,197,94,0.35)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(roiPoly[0].x, roiPoly[0].y);
+          for(let i=1;i<roiPoly.length;i++) ctx.lineTo(roiPoly[i].x, roiPoly[i].y);
+          ctx.closePath();
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        const axis = axisFromPoly(roiPoly);
+        if(!axis) return;
+        const a = axis.a;
+        const b = axis.b;
+
+        // Thickness band visualization
+        const thick = Math.max(1, Number(q('lineThickness')?.value || 7));
+        const ux = b.x - a.x, uy = b.y - a.y;
+        const ulen = Math.hypot(ux, uy) || 1;
+        const nx = -uy/ulen, ny = ux/ulen;
+        const hw = thick/2;
+        ctx.fillStyle = 'rgba(245,158,11,0.18)';
+        ctx.beginPath();
+        ctx.moveTo(a.x + nx*hw, a.y + ny*hw);
+        ctx.lineTo(b.x + nx*hw, b.y + ny*hw);
+        ctx.lineTo(b.x - nx*hw, b.y - ny*hw);
+        ctx.lineTo(a.x - nx*hw, a.y - ny*hw);
+        ctx.closePath();
+        ctx.fill();
+
+        // The yellow center line is the active detector path
+        ctx.strokeStyle = '#facc15';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        // closed / open end markers
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath(); ctx.arc(a.x, a.y, 5, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#22c55e';
+        ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, Math.PI*2); ctx.fill();
+
+        // Show edit handles only while editing so the user sees just the line
+        // in idle state.
+        if(interaction.mode){
+          const hr = handleRadiusPx();
+          for(const p of roiPoly){
+            ctx.fillStyle = 'rgba(34,197,94,0.8)';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, hr, 0, Math.PI*2);
+            ctx.fill();
+          }
+
+          const rh = rotateHandle(roiPoly);
+          const topMid = { x:(roiPoly[0].x + roiPoly[1].x)/2, y:(roiPoly[0].y + roiPoly[1].y)/2 };
+          ctx.strokeStyle = '#f59e0b';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(topMid.x, topMid.y);
+          ctx.lineTo(rh.x, rh.y);
+          ctx.stroke();
+          ctx.fillStyle = '#f59e0b';
+          ctx.beginPath();
+          ctx.arc(rh.x, rh.y, hr, 0, Math.PI*2);
+          ctx.fill();
+        }
+      }
+
+      function toNorm(poly){
+        if(!poly || overlay.width===0 || overlay.height===0) return null;
+        return poly.map(p=>[
+          clamp(p.x/overlay.width, 0, 1),
+          clamp(p.y/overlay.height, 0, 1),
+        ]);
+      }
+
+      function fromNorm(normPoly){
+        if(!normPoly || normPoly.length !== 4) return null;
+        return normPoly.map(([x,y])=>({ x:x*overlay.width, y:y*overlay.height }));
+      }
+
+      function syncAngleInputFromPoly(){
+        if(!roiPoly) return;
+        q('roiAngle').value = String(Math.round(angleOfPoly(roiPoly)));
+      }
+
+      function setAngleAbsolute(targetDeg){
+        if(!roiPoly) return;
+        const cur = angleOfPoly(roiPoly);
+        const d = targetDeg - cur;
+        const c = polyCenter(roiPoly);
+        roiPoly = rotatePoly(roiPoly, c, d);
+        drawRoi();
+      }
+
+      function newRectPoly(a,b){
+        const x0 = Math.min(a.x,b.x), x1 = Math.max(a.x,b.x);
+        const y0 = Math.min(a.y,b.y), y1 = Math.max(a.y,b.y);
+        return [{x:x0,y:y0},{x:x1,y:y0},{x:x1,y:y1},{x:x0,y:y1}];
+      }
+
+      function nearestCornerIdx(pt){
+        if(!roiPoly) return -1;
+        let idx=-1, best=1e9;
+        roiPoly.forEach((p,i)=>{
+          const d = Math.hypot(pt.x-p.x, pt.y-p.y);
+          if(d < best){ best=d; idx=i; }
+        });
+        return best <= hitRadiusPx() ? idx : -1;
+      }
+
+      function hitRotateHandle(pt){
+        if(!roiPoly) return false;
+        const rh = rotateHandle(roiPoly);
+        return Math.hypot(pt.x-rh.x, pt.y-rh.y) <= hitRadiusPx();
+      }
+
+      async function loadAll(){
+        cameras = await jget('/api/cameras');
+        machines = await jget('/api/machines');
+
+        cameraSelect.innerHTML = cameras.map(c=>`<option value="${c.id}">${c.name} (#${c.id})</option>`).join('');
+        machineSelect.innerHTML = machines.map(m=>`<option value="${m.id}">${m.name} (#${m.id})</option>`).join('');
+
+        if(cameras.length) cameraSelect.value = String(cameras[0].id);
+        if(machines.length) machineSelect.value = String(machines[0].id);
+        onCameraChange();
+        await refreshSnapshot();
+        onMachineChange();
+      }
+
+      function onCameraChange(){
+        const c = camById(cameraSelect.value);
+        if(!c) return;
+        q('rtspUrl').value = c.rtsp_url || '';
+        q('camWidth').value = c.target_width;
+        q('camFps').value = c.target_fps;
+        q('camEnabled').value = String(c.enabled);
+        q('cameraStatus').textContent = c.status || '-';
+      }
+
+      function onMachineChange(){
+        const m = machineById(machineSelect.value);
+        if(!m) return;
+        q('thMin').value = m.threshold_min;
+        q('thOffset').value = Number(m.threshold_offset || 0);
+        q('lineThickness').value = Number(m.line_thickness || 7);
+        q('lenMin').value = m.reflector_len_min ?? '';
+        q('lenMax').value = m.reflector_len_max ?? '';
+        q('thMax').value = m.threshold_max;
+        q('thresholdMode').value = normalizeThresholdMode(m.threshold_mode);
+        q('open1d').value = m.open_position_1d;
+        q('closed1d').value = m.closed_position_1d;
+        q('hys').value = m.hysteresis;
+        q('machineEnabled').value = String(m.enabled);
+        try{
+          const roi = JSON.parse(m.roi_polygon || '[]');
+          roiPoly = fromNorm(roi);
+          if(roiPoly) syncAngleInputFromPoly();
+        }catch(_e){ roiPoly = null; }
+        drawRoi();
+      }
+
+      async function refreshSnapshot(){
+        const c = camById(cameraSelect.value); if(!c) return;
+        snap.src = `${API}/api/cameras/${c.id}/snapshot.jpg?t=${Date.now()}`;
+        await new Promise(res=>{ snap.onload=res; snap.onerror=res; });
+        overlay.width = snap.clientWidth;
+        overlay.height = snap.clientHeight;
+        onMachineChange();
+      }
+
+      overlay.addEventListener('mousedown', (e)=>{
+        const pt = getMouse(e);
+        interaction.start = pt;
+        interaction.basePoly = clonePoly(roiPoly);
+        interaction.cornerIdx = -1;
+        interaction.mode = null;
+
+        if(roiPoly){
+          if(hitRotateHandle(pt)){
+            interaction.mode = 'rotate';
+            const c = polyCenter(roiPoly);
+            interaction.rotateBaseAngle = angleOfPoly(roiPoly);
+            interaction.rotateStart = Math.atan2(pt.y-c.y, pt.x-c.x) * 180 / Math.PI;
+            return;
+          }
+          const ci = nearestCornerIdx(pt);
+          if(ci >= 0){
+            interaction.mode = 'corner';
+            interaction.cornerIdx = ci;
+            return;
+          }
+          if(pointInPoly(pt, roiPoly)){
+            interaction.mode = 'drag';
+            return;
+          }
+        }
+        interaction.mode = 'draw';
+        roiPoly = newRectPoly(pt, pt);
+        drawRoi();
+      });
+
+      overlay.addEventListener('mousemove', (e)=>{
+        if(!interaction.mode || !interaction.start) return;
+        const pt = getMouse(e);
+
+        if(interaction.mode === 'draw'){
+          roiPoly = newRectPoly(interaction.start, pt);
+          syncAngleInputFromPoly();
+          drawRoi();
+          return;
+        }
+        if(!interaction.basePoly) return;
+
+        if(interaction.mode === 'drag'){
+          const dx = pt.x - interaction.start.x;
+          const dy = pt.y - interaction.start.y;
+          roiPoly = interaction.basePoly.map(p=>({x:p.x+dx,y:p.y+dy}));
+          drawRoi();
+          return;
+        }
+        if(interaction.mode === 'rotate'){
+          const c = polyCenter(interaction.basePoly);
+          const cur = Math.atan2(pt.y-c.y, pt.x-c.x) * 180 / Math.PI;
+          const d = cur - interaction.rotateStart;
+          roiPoly = rotatePoly(interaction.basePoly, c, d);
+          syncAngleInputFromPoly();
+          drawRoi();
+          return;
+        }
+        if(interaction.mode === 'corner'){
+          const i = interaction.cornerIdx;
+          const opp = (i + 2) % 4;
+          const c = {
+            x: (interaction.basePoly[opp].x + interaction.basePoly[i].x)/2,
+            y: (interaction.basePoly[opp].y + interaction.basePoly[i].y)/2,
+          };
+          // Keep current orientation, resize in local axis.
+          const ang = angleOfPoly(interaction.basePoly);
+          const a = -ang * Math.PI / 180;
+          function toLocal(p){
+            const dx=p.x-c.x, dy=p.y-c.y;
+            return { x: dx*Math.cos(a)-dy*Math.sin(a), y: dx*Math.sin(a)+dy*Math.cos(a) };
+          }
+          function toWorld(lp){
+            const b = ang * Math.PI / 180;
+            return { x: c.x + lp.x*Math.cos(b)-lp.y*Math.sin(b), y: c.y + lp.x*Math.sin(b)+lp.y*Math.cos(b) };
+          }
+          const base = interaction.basePoly.map(toLocal);
+          const pNow = toLocal(pt);
+          // Update size by dragged corner sign.
+          const sx = Math.sign(base[i].x) || 1;
+          const sy = Math.sign(base[i].y) || 1;
+          // Allow shrinking almost to a point; keep only a tiny epsilon to avoid degenerate math.
+          const hx = Math.max(MIN_HALF_SIZE_PX, Math.abs(pNow.x));
+          const hy = Math.max(MIN_HALF_SIZE_PX, Math.abs(pNow.y));
+          const rect = [
+            {x:-hx,y:-hy},
+            {x:hx,y:-hy},
+            {x:hx,y:hy},
+            {x:-hx,y:hy},
+          ];
+          // If dragged corner indicates inversion, keep orientation but allow opposite corner growth.
+          if(sx < 0){ rect[0].x = -Math.abs(rect[0].x); rect[3].x = -Math.abs(rect[3].x); rect[1].x = Math.abs(rect[1].x); rect[2].x = Math.abs(rect[2].x); }
+          if(sy < 0){ rect[0].y = -Math.abs(rect[0].y); rect[1].y = -Math.abs(rect[1].y); rect[2].y = Math.abs(rect[2].y); rect[3].y = Math.abs(rect[3].y); }
+          roiPoly = rect.map(toWorld);
+          drawRoi();
+        }
+      });
+
+      window.addEventListener('mouseup', ()=>{ interaction.mode = null; interaction.start = null; interaction.basePoly = null; interaction.cornerIdx = -1; });
+      window.addEventListener('mouseup', drawRoi);
+      q('roiAngle').addEventListener('input', ()=>{ setAngleAbsolute(Number(q('roiAngle').value || 0)); });
+      q('zoomOutBtn').addEventListener('click', ()=>{ viewZoom = Math.max(0.5, viewZoom - 0.1); applyZoom(); });
+      q('zoomInBtn').addEventListener('click', ()=>{ viewZoom = Math.min(4.0, viewZoom + 0.1); applyZoom(); });
+      q('zoomResetBtn').addEventListener('click', ()=>{ viewZoom = 1.0; applyZoom(); });
+      q('zoomSlider').addEventListener('input', ()=>{ viewZoom = Number(q('zoomSlider').value)/100; applyZoom(); });
+      canvasViewport.addEventListener('wheel', (e)=>{
+        if(!e.ctrlKey) return;
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? 0.1 : -0.1;
+        viewZoom = Math.max(0.5, Math.min(4.0, viewZoom + delta));
+        applyZoom();
+      }, { passive: false });
+
+      q('saveCamBtn').onclick = async ()=>{
+        try{
+          const id = Number(cameraSelect.value);
+          await jpatch(`/api/cameras/${id}`, {
+            rtsp_url: q('rtspUrl').value.trim(),
+            target_width: Number(q('camWidth').value || 640),
+            target_fps: Number(q('camFps').value || 8),
+            enabled: q('camEnabled').value === 'true',
+          });
+          setMsg('camMsg','Kamera ayari kaydedildi','good');
+          await loadAll();
+        }catch(e){ setMsg('camMsg',String(e),'bad'); }
+      };
+      q('testCamBtn').onclick = async ()=>{
+        try{
+          const id = Number(cameraSelect.value);
+          const res = await jpost(`/api/cameras/${id}/test`, {});
+          setMsg('camMsg', `Test: ${res.rtsp_configured ? 'RTSP tanimli' : 'RTSP bos'}`, res.rtsp_configured ? 'good' : 'warn');
+          await refreshSnapshot();
+        }catch(e){ setMsg('camMsg',String(e),'bad'); }
+      };
+
+      q('saveMachineBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          const updated = await jpatch(`/api/machines/${id}`, {
+            threshold_mode: q('thresholdMode').value,
+            threshold_min: Number(q('thMin').value),
+            threshold_offset: Number(q('thOffset').value || 0),
+            line_thickness: Number(q('lineThickness').value || 7),
+            reflector_len_min: q('lenMin').value ? Number(q('lenMin').value) : null,
+            reflector_len_max: q('lenMax').value ? Number(q('lenMax').value) : null,
+            threshold_max: Number(q('thMax').value),
+            open_position_1d: Number(q('open1d').value),
+            closed_position_1d: Number(q('closed1d').value),
+            hysteresis: Number(q('hys').value),
+            enabled: q('machineEnabled').value === 'true',
+          });
+          const idx = machines.findIndex(m=>m.id===id);
+          if(idx >= 0) machines[idx] = updated;
+          q('thresholdMode').value = normalizeThresholdMode(updated.threshold_mode);
+          setMsg('machineMsg','Makine parametreleri kaydedildi','good');
+        }catch(e){ setMsg('machineMsg',String(e),'bad'); }
+      };
+
+      q('reloadSnapBtn').onclick = refreshSnapshot;
+      q('learnLenBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          const sec = Number(q('lenCalibSec').value || 12);
+          setMsg('machineMsg', `Kalibrasyon basladi (${sec}s). Reflektoru cizgi boyunca gezdir...`, 'warn');
+          const res = await jpost(`/api/calibration/machines/${id}/learn_reflector_length`, {
+            duration_s: sec,
+            min_samples: Math.max(20, Math.floor(sec * 8)),
+          });
+          q('lenMin').value = String(res.reflector_len_min);
+          q('lenMax').value = String(res.reflector_len_max);
+          setMsg('machineMsg', `Kalibrasyon tamam: len ${res.reflector_len_min}-${res.reflector_len_max} (ornek=${res.sample_count})`, 'good');
+          await loadAll();
+        }catch(e){
+          setMsg('machineMsg',String(e),'bad');
+        }
+      };
+      q('clearRoiBtn').onclick = ()=>{ roiPoly = null; drawRoi(); };
+      q('axisDir').addEventListener('change', drawRoi);
+      q('lineThickness').addEventListener('input', drawRoi);
+      q('saveRoiBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          const roi = toNorm(roiPoly);
+          if(!roi || roi.length !== 4){ throw new Error('Once ROI ciz'); }
+          await jpost(`/api/machines/${id}/roi`, roi);
+
+          const axis = axisFromPoly(roiPoly);
+          if(!axis){ throw new Error('Axis hesaplanamadi'); }
+          const p0 = axis.a;
+          const p1 = axis.b;
+          const n0 = [clamp(p0.x/overlay.width,0,1), clamp(p0.y/overlay.height,0,1)];
+          const n1 = [clamp(p1.x/overlay.width,0,1), clamp(p1.y/overlay.height,0,1)];
+          await jpatch(`/api/machines/${id}`, { axis_p0: JSON.stringify(n0), axis_p1: JSON.stringify(n1) });
+          setMsg('roiMsg','Takip cizgisi kaydedildi','good');
+        }catch(e){ setMsg('roiMsg',String(e),'bad'); }
+      };
+
+      cameraSelect.onchange = async ()=>{ onCameraChange(); await refreshSnapshot(); };
+      machineSelect.onchange = onMachineChange;
+
+      applyZoom();
+      loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
+    </script>
+  </body>
+</html>

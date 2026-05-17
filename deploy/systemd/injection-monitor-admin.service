@@ -1,0 +1,17 @@
+[Unit]
+Description=Injection molding admin panel (FastAPI 8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/injection-monitor/backend
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/injection-monitor/backend/.venv/bin/uvicorn admin_app:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

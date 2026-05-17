@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn==0.32.1
+sqlalchemy==2.0.36
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-multipart==0.0.17
+opencv-python-headless==4.10.0.84
+numpy>=1.26.4,<3
+
+# Python 3.10+ (Bookworm / modern Windows). SQLAlchemy 2 + PEP 585 generics are not supported on 3.8.
