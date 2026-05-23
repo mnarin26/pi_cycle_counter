@@ -532,7 +532,20 @@
         await new Promise(res=>{ snap.onload=res; snap.onerror=res; });
         overlay.width = snap.clientWidth;
         overlay.height = snap.clientHeight;
-        onMachineChange();
+        drawRoi();
+      }
+
+      async function saveMachineCameraAssignment(){
+        const id = Number(machineSelect.value);
+        const camId = Number(machineCameraSelect.value);
+        if(!id || !camId) return;
+        const updated = await jpatch(`/api/machines/${id}`, { camera_id: camId });
+        const idx = machines.findIndex(m=>m.id===id);
+        if(idx >= 0) machines[idx] = updated;
+        const prev = id;
+        refreshMachineOptions();
+        machineSelect.value = String(prev);
+        populateCameraOptions(machineCameraSelect, camId);
       }
 
       overlay.addEventListener('mousedown', (e)=>{
@@ -756,7 +769,16 @@
 
       cameraSelect.onchange = onCameraChange;
       machineSelect.onchange = async ()=>{ onMachineChange(); await refreshSnapshot(); };
-      machineCameraSelect.onchange = refreshSnapshot;
+      machineCameraSelect.onchange = async ()=>{
+        try{
+          await saveMachineCameraAssignment();
+          setMsg('machineMsg', `Goruntu kamerasi kaydedildi (#${machineCameraSelect.value})`, 'good');
+          await refreshSnapshot();
+        }catch(e){
+          setMsg('machineMsg', String(e), 'bad');
+          onMachineChange();
+        }
+      };
 
       applyZoom();
       loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
