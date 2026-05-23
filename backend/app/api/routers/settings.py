@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.db.models import AppSetting
+from app.services.reset_production import wipe_production_history
 
 router = APIRouter()
 
@@ -37,3 +38,12 @@ def patch_setting(key: str, body: dict = Body(...), db: Session = Depends(get_db
     row.value_json = json.dumps(cur)
     db.commit()
     return {"key": key, "value": cur}
+
+
+@router.post("/maintenance/reset-production-data")
+def reset_production_data(db: Session = Depends(get_db)):
+    """
+    Clears runtime production history while keeping machine/camera configuration.
+    """
+    stats = wipe_production_history(db)
+    return {"ok": True, **stats}

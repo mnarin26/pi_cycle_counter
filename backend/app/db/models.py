@@ -54,6 +54,7 @@ class Machine(Base):
     line_thickness: Mapped[int] = mapped_column(Integer, default=7)  # perpendicular sampling window for 1D line probe
     reflector_len_min: Mapped[int | None] = mapped_column(Integer, nullable=True)  # learned lower bound in line samples
     reflector_len_max: Mapped[int | None] = mapped_column(Integer, nullable=True)  # learned upper bound in line samples
+    occlusion_grace_ms: Mapped[int] = mapped_column(Integer, default=300)
     debounce_ms: Mapped[int] = mapped_column(Integer, default=80)
     stability_confirm_ms: Mapped[int] = mapped_column(Integer, default=500)
     open_position_1d: Mapped[float] = mapped_column(Float, default=0.85)
@@ -111,6 +112,8 @@ class Cycle(Base):
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
     mold_name_snapshot: Mapped[str | None] = mapped_column(String(256), nullable=True)
     raw_state_trace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_counted: Mapped[bool] = mapped_column(Boolean, default=True)
+    exclude_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Event(Base):

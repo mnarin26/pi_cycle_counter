@@ -6,9 +6,9 @@ import { CalibrationPage } from "./pages/Calibration";
 import { DashboardPage } from "./pages/Dashboard";
 import { EventsPage } from "./pages/Events";
 import { LiveViewPage } from "./pages/LiveView";
+import { MachineDetailPage } from "./pages/MachineDetail";
 import { MachinesPage } from "./pages/Machines";
 import { MoldsPage } from "./pages/Molds";
-import { SettingsPage } from "./pages/Settings";
 
 export default function App() {
   return (
@@ -19,10 +19,10 @@ export default function App() {
             <Route index element={<DashboardPage />} />
             <Route path="live" element={<LiveViewPage />} />
             <Route path="machines" element={<MachinesPage />} />
+            <Route path="machines/:id" element={<MachineDetailPage />} />
             <Route path="molds" element={<MoldsPage />} />
             <Route path="analytics" element={<AnalyticsPage />} />
             <Route path="events" element={<EventsPage />} />
-            <Route path="settings" element={<SettingsPage />} />
             <Route path="calibration" element={<CalibrationPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

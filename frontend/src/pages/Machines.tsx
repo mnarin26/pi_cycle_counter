@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { apiGet, apiPatch } from "../api/client";
+import { apiGet } from "../api/client";
 import { useLiveSnapshot } from "../hooks/useLiveSnapshot";
 
 type Machine = {
@@ -23,7 +23,8 @@ export function MachinesPage() {
 
   async function load() {
     try {
-      setRows(await apiGet<Machine[]>("/api/machines"));
+      const all = await apiGet<Machine[]>("/api/machines");
+      setRows(all.filter((m) => m.enabled));
       setErr(null);
     } catch (e) {
       setErr(String(e));
@@ -34,7 +35,7 @@ export function MachinesPage() {
     load();
   }, []);
 
-  const snapById = new Map(snapshot.machines.map((m) => [m.id, m]));
+  const snapById = new Map(snapshot.machines.filter((m) => m.state !== "DISABLED").map((m) => [m.id, m]));
 
   return (
     <div>
@@ -49,7 +50,6 @@ export function MachinesPage() {
               <th className="p-3">Kamera</th>
               <th className="p-3">Eşik</th>
               <th className="p-3">Sinyal (peak/bg)</th>
-              <th className="p-3">Aktif</th>
             </tr>
           </thead>
           <tbody>
@@ -85,18 +85,6 @@ export function MachinesPage() {
                       lmin != null && lmax != null ? ` len ${seg} (${lmin}-${lmax})` : ` len ${seg}`;
                     return `${peak}/${bg}  Δ${prom}${lenTxt}`;
                   })()}
-                </td>
-                <td className="p-3">
-                  <button
-                    type="button"
-                    className="min-h-[44px] min-w-[80px] rounded bg-slate-700 px-3"
-                    onClick={async () => {
-                      await apiPatch(`/api/machines/${m.id}`, { enabled: !m.enabled });
-                      load();
-                    }}
-                  >
-                    {m.enabled ? "Kapat" : "Aç"}
-                  </button>
                 </td>
               </tr>
             ))}

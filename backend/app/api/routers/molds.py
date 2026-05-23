@@ -1,15 +1,30 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.db.models import Event, Mold, MoldMachine
+from app.db.models import Event, Cycle, Machine, Mold, MoldMachine
 
 router = APIRouter()
+
+
+def _range_start(range_: str) -> datetime:
+    now = datetime.now(timezone.utc)
+    if range_ == "daily":
+        return now - timedelta(days=1)
+    if range_ == "weekly":
+        return now - timedelta(days=7)
+    if range_ == "monthly":
+        return now - timedelta(days=31)
+    if range_ == "yearly":
+        return now - timedelta(days=365)
+    return now - timedelta(days=31)
 
 
 class MoldOut(BaseModel):
@@ -38,6 +53,67 @@ class ConfirmMatchBody(BaseModel):
 @router.get("", response_model=list[MoldOut])
 def list_molds(db: Session = Depends(get_db)):
     return db.query(Mold).order_by(Mold.id.desc()).limit(200).all()
+
+
+@router.get("/usage")
+def mold_usage(
+    db: Session = Depends(get_db),
+    range: str = "monthly",
+    from_ts: datetime | None = Query(None, alias="from"),
+    to_ts: datetime | None = Query(None, alias="to"),
+):
+    start = from_ts or _range_start(range)
+    end = to_ts or datetime.now(timezone.utc)
+    if end <= start:
+        end = start + timedelta(seconds=1)
+
+    machine_names = {m.id: m.name for m in db.query(Machine).all()}
+    molds = {m.id: m for m in db.query(Mold).all()}
+    rows = (
+        db.query(Cycle)
+        .filter(
+            Cycle.t_end >= start,
+            Cycle.t_end <= end,
+            Cycle.mold_id.is_not(None),
+            Cycle.is_counted.is_(True),
+        )
+        .all()
+    )
+    grouped: dict[int, dict] = defaultdict(lambda: {"total": 0, "machines": defaultdict(int), "times": []})
+    for c in rows:
+        if c.mold_id is None:
+            continue
+        grouped[c.mold_id]["total"] += 1
+        grouped[c.mold_id]["machines"][c.machine_id] += 1
+        grouped[c.mold_id]["times"].append(float(c.cycle_time_s))
+
+    out = []
+    for mold_id, agg in sorted(grouped.items(), key=lambda kv: kv[1]["total"], reverse=True):
+        mold = molds.get(mold_id)
+        times = agg["times"]
+        out.append(
+            {
+                "mold_id": mold_id,
+                "mold_name": (mold.name if mold else None) or "İsimsiz kalıp",
+                "status": mold.status if mold else "unknown",
+                "total_cycles": agg["total"],
+                "avg_cycle_s": round(sum(times) / len(times), 3) if times else 0.0,
+                "machines": [
+                    {
+                        "machine_id": mid,
+                        "machine_name": machine_names.get(mid, f"Makine #{mid}"),
+                        "cycle_count": cnt,
+                    }
+                    for mid, cnt in sorted(agg["machines"].items(), key=lambda kv: kv[1], reverse=True)
+                ],
+            }
+        )
+    return {
+        "range": range,
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "rows": out,
+    }
 
 
 @router.post("/{mold_id}/name", response_model=MoldOut)

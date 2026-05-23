@@ -186,8 +186,10 @@ def find_peak_on_profile(
     return LineProbeResult(True, position_01, (cx, cy), peak, background, prominence, segment_len, int(prominence_min))
 
 
-_ADAPTIVE_FLOOR = 8  # absolute minimum prominence even if scene is flat (noise gate)
+_ADAPTIVE_FLOOR = 12  # absolute minimum prominence even if scene is flat (noise gate)
 _ADAPTIVE_RATIO = 0.5  # require at least 50% of (max - median) — guarantees the actual peak passes
+# Reject argmax-on-noise when the 1D profile is almost flat (no real reflector bump).
+_MIN_MAX_MEDIAN_SPREAD = 16.0
 
 
 def line_peak_position(
@@ -211,6 +213,8 @@ def line_peak_position(
       This means: if the scene contains a real peak, the half of its relative
       height is the bar to clear — peak (= 100%) always passes. If the scene
       is flat, _ADAPTIVE_FLOOR rejects ambient noise.
+    A hard `max-median` spread check also rejects nearly flat profiles so random
+    argmax does not synthesize a reflector.
     """
     h, w = frame_bgr.shape[:2]
     p0n = _parse_xy(axis_p0_json)
@@ -232,6 +236,14 @@ def line_peak_position(
         prom_min = max(0, adaptive_prom + offset)
     else:
         prom_min = max(0, int(prominence_min_fixed) + offset)
+
+    line_med = float(np.median(smooth))
+    line_peak = float(np.max(smooth))
+    if line_peak - line_med < _MIN_MAX_MEDIAN_SPREAD:
+        pk_i = int(round(line_peak))
+        bg_i = int(round(line_med))
+        prom_i = max(0, pk_i - bg_i)
+        return LineProbeResult(False, None, None, pk_i, bg_i, prom_i, 0, int(prom_min))
 
     len_min = int(reflector_len_min) if reflector_len_min is not None and int(reflector_len_min) > 0 else None
     len_max = int(reflector_len_max) if reflector_len_max is not None and int(reflector_len_max) > 0 else None

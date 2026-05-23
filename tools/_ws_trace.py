@@ -80,13 +80,15 @@ def main() -> int:
                 c = m.get("centroid")
                 cs = "None" if not c else "({},{})".format(int(c["x"]), int(c["y"]))
                 parts.append(
-                    "#{} {:>8} thr>={} pos={} ctr={} conf={}".format(
+                    "#{} {:>8} thr>={} pos={} ctr={} conf={} emit={} cyc={}".format(
                         m["id"],
                         m["state"],
                         m.get("threshold_active_min"),
                         m.get("position_01"),
                         cs,
                         round(m.get("confidence", 0), 2),
+                        m.get("dbg_cycle_emit_count"),
+                        m.get("cycle_time_last"),
                     )
                 )
             print("t={}s  {}".format(i, " | ".join(parts)))

@@ -8,7 +8,6 @@ const nav = [
   ["/molds", "Kalıplar"],
   ["/analytics", "Analitik"],
   ["/events", "Olaylar"],
-  ["/settings", "Ayarlar"],
   ["/calibration", "Kalibrasyon"],
 ];
 

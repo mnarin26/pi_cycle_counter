@@ -14,6 +14,7 @@ from app.db.models import Cycle, Event, Machine, Mold, MoldMachine, json_dumps
 
 WINDOW = 12
 BIN_WIDTH = 0.1
+LONG_STOP_MOLD_CHANGE_S = 20 * 60
 
 
 def _confidence_from_samples(values: list[float]) -> float:
@@ -26,6 +27,21 @@ def _confidence_from_samples(values: list[float]) -> float:
         return 0.5
 
 
+def _detect_shift_reason(previous_values: list[float], current_value: float) -> str:
+    if len(previous_values) < 4:
+        return "insufficient_history"
+    base = statistics.mean(previous_values[-4:])
+    jump_threshold = max(0.8, base * 0.2)
+    if abs(current_value - base) >= jump_threshold:
+        return "sudden_change"
+    recent = previous_values[-5:]
+    if len(recent) >= 5:
+        non_decreasing = all(recent[i] <= recent[i + 1] for i in range(len(recent) - 1))
+        if non_decreasing and (recent[-1] - recent[0]) >= max(0.5, base * 0.12):
+            return "gradual_drift"
+    return "unknown_pattern"
+
+
 def suggest_or_match_cycles(
     db: Session,
     machine: Machine,
@@ -35,6 +51,20 @@ def suggest_or_match_cycles(
     """Returns list of side-effect descriptions; caller applies DB changes."""
     actions: list[dict[str, Any]] = []
     mid = machine.id
+    prev_cycle = (
+        db.query(Cycle)
+        .filter(Cycle.machine_id == mid)
+        .order_by(Cycle.t_end.desc())
+        .first()
+    )
+    now_utc = datetime.now(timezone.utc)
+    downtime_s = None
+    if prev_cycle and prev_cycle.t_end:
+        prev_end = prev_cycle.t_end
+        if prev_end.tzinfo is None:
+            prev_end = prev_end.replace(tzinfo=timezone.utc)
+        downtime_s = (now_utc - prev_end).total_seconds()
+    previous_window = list(rolling.get(mid, []))
     rolling.setdefault(mid, []).append(cycle_s)
     rolling[mid] = rolling[mid][-WINDOW:]
 
@@ -44,9 +74,9 @@ def suggest_or_match_cycles(
         if mold and mold.status == "ignored":
             mold = None
 
-    if mold and mold.status == "active" and mold.name:
+    if mold and mold.avg_cycle_s > 0 and mold.tolerance_s > 0:
         d = abs(cycle_s - mold.avg_cycle_s)
-        if d <= mold.tolerance_s:
+        if d <= max(0.05, mold.tolerance_s):
             actions.append(
                 {
                     "type": "update_mold_weighted",
@@ -55,20 +85,56 @@ def suggest_or_match_cycles(
                 }
             )
             return actions
+        # During normal production flow, do not ask user immediately.
+        # Unknown/mold-change decisions are evaluated only after long stop.
+        if downtime_s is None or downtime_s < LONG_STOP_MOLD_CHANGE_S:
+            return actions
+
+        # Long stop is present: decide exactly one branch.
+        clear_change = d >= max(0.8, mold.tolerance_s * 2.0)
+        if clear_change:
+            actions.append({"type": "set_machine_mold", "mold_id": None})
+            actions.append(
+                {
+                    "type": "event",
+                    "event": {
+                        "type": "mold_change_likely",
+                        "machine_id": mid,
+                        "payload": json_dumps(
+                            {
+                                "message": "Long stop before cycle. Mold change likely.",
+                                "prev_mold_id": mold.id,
+                                "cycle_s": cycle_s,
+                                "avg_s": mold.avg_cycle_s,
+                                "delta_s": d,
+                                "downtime_s": round(downtime_s, 1),
+                                "threshold_s": LONG_STOP_MOLD_CHANGE_S,
+                            }
+                        ),
+                    },
+                }
+            )
+            return actions
+
+        reason = _detect_shift_reason(previous_window, cycle_s)
+        actions.append({"type": "set_machine_mold", "mold_id": None})
         actions.append(
             {
                 "type": "event",
                 "event": {
-                    "type": "mold_match_prompt",
+                    "type": "mold_unknown_prompt",
                     "machine_id": mid,
                     "payload": json_dumps(
                         {
-                            "message": "Possible match detected. Use existing mold?",
-                            "mold_id": mold.id,
+                            "message": "Long-stop end is ambiguous. Please confirm: fault slowdown or mold change?",
+                            "prev_mold_id": mold.id,
                             "mold_name": mold.name,
                             "cycle_s": cycle_s,
                             "avg_s": mold.avg_cycle_s,
                             "delta_s": d,
+                            "downtime_s": round(downtime_s, 1),
+                            "reason": reason,
+                            "threshold_s": LONG_STOP_MOLD_CHANGE_S,
                         }
                     ),
                 },
@@ -175,6 +241,8 @@ def handle_cycle_completion(
     actions = suggest_or_match_cycles(db, machine, cycle_s, rolling)
     mold_id = machine.current_mold_id
     mold = db.get(Mold, mold_id) if mold_id else None
+    is_counted = True
+    exclude_reason: str | None = None
 
     for a in actions:
         if a["type"] == "update_mold_weighted":
@@ -182,6 +250,8 @@ def handle_cycle_completion(
             if m:
                 apply_weighted_average(db, m, a["new_sample"])
                 link_mold_machine(db, m.id, machine.id)
+        elif a["type"] == "set_machine_mold":
+            machine.current_mold_id = a.get("mold_id")
         elif a["type"] == "create_candidate_mold":
             nm = Mold(
                 name=None,
@@ -200,6 +270,9 @@ def handle_cycle_completion(
         elif a["type"] == "event":
             ev = a["event"]
             db.add(Event(type=ev["type"], machine_id=ev.get("machine_id"), payload=ev.get("payload")))
+            if ev["type"] in {"mold_unknown_prompt", "mold_change_likely"}:
+                is_counted = False
+                exclude_reason = "unknown_or_mold_change"
 
     db.flush()
     machine = db.get(Machine, machine.id)
@@ -207,6 +280,10 @@ def handle_cycle_completion(
     mold = db.get(Mold, mold_id) if mold_id else None
     if mold and mold.status == "active" and mold.name:
         mold_name_snapshot = mold.name
+
+    if cycle_s >= max(1.0, float(machine.no_movement_timeout_s or 120.0)):
+        is_counted = False
+        exclude_reason = "long_stop_or_no_movement"
 
     c = Cycle(
         machine_id=machine.id,
@@ -216,6 +293,8 @@ def handle_cycle_completion(
         t_end=t_end,
         confidence=confidence,
         mold_name_snapshot=mold_name_snapshot,
+        is_counted=is_counted,
+        exclude_reason=exclude_reason,
     )
     db.add(c)
 
@@ -223,6 +302,8 @@ def handle_cycle_completion(
         m2 = db.get(Mold, mold_id)
         if m2 and m2.avg_cycle_s > 0 and m2.tolerance_s > 0:
             if abs(cycle_s - m2.avg_cycle_s) > max(m2.tolerance_s * 4, 1.5):
+                c.is_counted = False
+                c.exclude_reason = "abnormal_cycle"
                 db.add(
                     Event(
                         type="abnormal_cycle",

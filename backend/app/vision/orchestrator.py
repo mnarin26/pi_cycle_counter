@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -41,6 +42,10 @@ from app.vision.state_machine import ClampStateMachine, StateMachineConfig
 
 logger = logging.getLogger(__name__)
 
+# After occlusion_grace_ms with no raw peak, wait this much longer then drop to UNKNOWN
+# (avoids "OPEN" sticking when the reflector is gone but the state machine latched a zone).
+_LOST_SIGNAL_EXTRA_S = 0.45
+
 
 @dataclass
 class MachineRuntime:
@@ -51,6 +56,11 @@ class MachineRuntime:
     no_move_warned: bool = False
     perf: PerformanceMonitor = field(default_factory=PerformanceMonitor)
     last_cycle_s: float | None = None
+    last_found_mono: float = 0.0
+    hold_pos_01: float | None = None
+    hold_centroid_xy: tuple[float, float] | None = None
+    dbg_cycle_emit_count: int = 0
+    dbg_last_confirmed: str = "UNKNOWN"
 
 
 class VisionOrchestrator(threading.Thread):
@@ -176,6 +186,8 @@ class VisionOrchestrator(threading.Thread):
                             "line_thickness": m.line_thickness,
                             "reflector_len_min": m.reflector_len_min,
                             "reflector_len_max": m.reflector_len_max,
+                            "occlusion_hold": False,
+                            "dbg_cycle_emit_count": 0,
                         }
                 self._machine_snapshot_cache = cache
             finally:
@@ -208,15 +220,35 @@ class VisionOrchestrator(threading.Thread):
             reflector_len_max=m.reflector_len_max,
         )
 
+        # Extra guard: line_pipeline can still accept a single-sample glitch as "found";
+        # that keeps last_found_mono fresh and locks OPEN/CLOSED. Real stripe is wider post-blur.
+        effective_found = bool(result.found)
+        if effective_found and result.segment_len == 1 and result.prominence < 42:
+            effective_found = False
+
         pos: float | None = None
         centroid_xy: tuple[float, float] | None = None
-        if result.found:
+        occlusion_hold = False
+        now_mono = time.monotonic()
+        if effective_found:
             pos = result.position_01
             centroid_xy = result.centroid_px
-            rt.last_move_mono = time.monotonic()
+            rt.last_move_mono = now_mono
+            rt.last_found_mono = now_mono
+            rt.hold_pos_01 = pos
+            rt.hold_centroid_xy = centroid_xy
             rt.no_move_warned = False
         else:
-            if time.monotonic() - rt.last_move_mono > m.no_movement_timeout_s and not rt.no_move_warned:
+            grace_s = max(0.0, float(m.occlusion_grace_ms or 0) / 1000.0)
+            if (
+                rt.hold_pos_01 is not None
+                and rt.last_found_mono > 0
+                and (now_mono - rt.last_found_mono) <= grace_s
+            ):
+                occlusion_hold = True
+                pos = rt.hold_pos_01
+                centroid_xy = rt.hold_centroid_xy
+            if now_mono - rt.last_move_mono > m.no_movement_timeout_s and not rt.no_move_warned:
                 rt.no_move_warned = True
                 try:
                     self.out_queue.put_nowait(
@@ -232,15 +264,56 @@ class VisionOrchestrator(threading.Thread):
                 except queue.Full:
                     pass
 
+        if (
+            not effective_found
+            and not occlusion_hold
+            and rt.last_found_mono > 0
+            and (now_mono - rt.last_found_mono)
+            > max(0.0, float(m.occlusion_grace_ms or 0) / 1000.0) + _LOST_SIGNAL_EXTRA_S
+        ):
+            rt.sm.reset()
+            rt.hold_pos_01 = None
+            rt.hold_centroid_xy = None
+            rt.last_found_mono = 0.0
+            pos = None
+            centroid_xy = None
+
         now_ms = time.monotonic() * 1000.0
         confirmed = rt.sm.step(pos, now_ms)
         rt.last_pos = pos
+        # #region agent log
+        if m.id == 3 and confirmed.value != rt.dbg_last_confirmed:
+            logger.info(
+                "[DBG][H9] machine_state_transition mid=%s from=%s to=%s raw_found=%s eff_found=%s pos=%s prom=%s seg=%s",
+                m.id,
+                rt.dbg_last_confirmed,
+                confirmed.value,
+                result.found,
+                effective_found,
+                pos,
+                result.prominence,
+                result.segment_len,
+            )
+        rt.dbg_last_confirmed = confirmed.value
+        # #endregion
 
         self.playback.push(m.id, pos, confirmed.value)
 
         cycle_s = rt.ct.on_confirmed(confirmed)
         if cycle_s is not None and cycle_s > 0.05:
             rt.last_cycle_s = cycle_s
+            rt.dbg_cycle_emit_count += 1
+            # #region agent log
+            if m.id == 3:
+                logger.info(
+                    "[DBG][H6/H7] cycle_emit mid=%s cycle_s=%.4f emit_count=%s state=%s pos=%s",
+                    m.id,
+                    cycle_s,
+                    rt.dbg_cycle_emit_count,
+                    confirmed.value,
+                    pos,
+                )
+            # #endregion
             t_end = datetime.now(timezone.utc)
             t_start = t_end
             try:
@@ -252,9 +325,18 @@ class VisionOrchestrator(threading.Thread):
                         "cycle_s": cycle_s,
                         "t_start": t_start.isoformat(),
                         "t_end": t_end.isoformat(),
-                        "confidence": float(result.prominence) / 255.0 if result.found else 0.0,
+                        "confidence": float(result.prominence) / 255.0 if effective_found else 0.0,
                     }
                 )
+                # #region agent log
+                if m.id == 3:
+                    logger.info(
+                        "[DBG][H11] cycle_enqueued mid=3 qid=%s qsize_after_put=%s emit_count=%s",
+                        id(self.out_queue),
+                        self.out_queue.qsize(),
+                        rt.dbg_cycle_emit_count,
+                    )
+                # #endregion
             except queue.Full:
                 logger.warning("vision queue full, dropping cycle")
 
@@ -266,7 +348,7 @@ class VisionOrchestrator(threading.Thread):
             if mold:
                 mold_name = mold.name
 
-        confidence = min(1.0, result.prominence / 100.0) if result.found else 0.0
+        confidence = min(1.0, result.prominence / 100.0) if effective_found else 0.0
 
         with self._lock:
             self._machine_snapshot_cache = getattr(self, "_machine_snapshot_cache", {})
@@ -296,6 +378,8 @@ class VisionOrchestrator(threading.Thread):
                 "line_thickness": int(m.line_thickness or 7),
                 "reflector_len_min": m.reflector_len_min,
                 "reflector_len_max": m.reflector_len_max,
+                "occlusion_hold": occlusion_hold,
+                "dbg_cycle_emit_count": int(rt.dbg_cycle_emit_count),
             }
 
     def _publish_snapshot(self) -> None:
@@ -314,9 +398,27 @@ class VisionOrchestrator(threading.Thread):
 
 def drain_cycle_queue_item(db: Session, item: dict, rolling: dict[int, list[float]]) -> None:
     if item["type"] == "cycle_completed":
+        # #region agent log
+        if int(item.get("machine_id", -1)) == 3:
+            logger.warning("[DBG][H13] drain_enter_cycle mid=3")
+        # #endregion
         m = db.get(Machine, item["machine_id"])
+        # #region agent log
+        if int(item.get("machine_id", -1)) == 3:
+            logger.info("[DBG][H13] drain_after_get_machine mid=3 exists=%s", bool(m))
+        # #endregion
         if not m:
             return
+        # #region agent log
+        if int(item.get("machine_id", -1)) == 3:
+            before_cnt = db.query(Machine).filter(Machine.id == 3).count()
+            logger.info(
+                "[DBG][H7] drain_cycle_start mid=%s cycle_s=%s before_machine_exists=%s",
+                item.get("machine_id"),
+                item.get("cycle_s"),
+                before_cnt,
+            )
+        # #endregion
         t_end = datetime.fromisoformat(item["t_end"])
         t_start = datetime.fromisoformat(item["t_start"])
         handle_cycle_completion(
@@ -329,6 +431,10 @@ def drain_cycle_queue_item(db: Session, item: dict, rolling: dict[int, list[floa
             None,
             float(item.get("confidence", 1.0)),
         )
+        # #region agent log
+        if int(item.get("machine_id", -1)) == 3:
+            logger.info("[DBG][H13] drain_after_handle_cycle mid=3")
+        # #endregion
         m2 = db.get(Machine, item["machine_id"])
         mold_name = None
         if m2 and m2.current_mold_id:
@@ -346,6 +452,15 @@ def drain_cycle_queue_item(db: Session, item: dict, rolling: dict[int, list[floa
             mold_name,
             float(item.get("confidence", 1.0)),
         )
+        # #region agent log
+        if int(item.get("machine_id", -1)) == 3:
+            logger.info("[DBG][H13] drain_after_csv_row mid=3")
+        # #endregion
+        # #region agent log
+        if int(item.get("machine_id", -1)) == 3:
+            ccount = db.execute(text("SELECT COUNT(*) FROM cycles WHERE machine_id=3")).scalar()  # type: ignore[arg-type]
+            logger.info("[DBG][H7] drain_cycle_done mid=3 cycles_count_now=%s", ccount)
+        # #endregion
     elif item["type"] == "event_only":
         ev = item["event"]
         db.add(Event(type=ev["type"], machine_id=ev.get("machine_id"), payload=ev.get("payload")))

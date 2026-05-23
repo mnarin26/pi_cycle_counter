@@ -1,4 +1,17 @@
-"""Motion + dwell based state machine with jitter tolerance."""
+"""Motion + dwell based state machine with jitter tolerance.
+
+This revision intentionally avoids fixed OPEN/CLOSED position thresholds.
+Instead, it models the clamp as a sequence of:
+
+    moving -> waiting -> reverse moving -> waiting
+
+and labels waiting zones by *last movement direction*:
+- wait after +direction movement => CLOSED wait
+- wait after -direction movement => OPEN wait
+
+This matches molds where absolute end positions drift by product size, but the
+two-direction movement pattern remains stable.
+"""
 
 from __future__ import annotations
 
@@ -31,8 +44,7 @@ class ClampStateMachine:
     _moving_raw: bool = False
     _moving_since_ms: float = 0.0
     _still_since_ms: float = 0.0
-    _min_seen: float = 0.15
-    _max_seen: float = 0.85
+    _last_move_dir: int = 0  # +1 or -1 (last meaningful movement direction)
     _filtered_pos: float | None = None
     _confirmed: ConfirmedZone = ConfirmedZone.UNKNOWN
 
@@ -42,29 +54,17 @@ class ClampStateMachine:
         self._moving_raw = False
         self._moving_since_ms = 0.0
         self._still_since_ms = 0.0
-        self._min_seen = min(self.cfg.closed_1d, self.cfg.open_1d)
-        self._max_seen = max(self.cfg.closed_1d, self.cfg.open_1d)
+        self._last_move_dir = 0
         self._filtered_pos = None
         self._confirmed = ConfirmedZone.UNKNOWN
 
-    def _classify_wait_zone(self, pos: float) -> ConfirmedZone:
-        # Dynamic endpoints learn from running range; fallback to configured ends.
-        span = self._max_seen - self._min_seen
-        if span < max(0.06, self.cfg.hysteresis):
-            open_ref = self.cfg.open_1d
-            closed_ref = self.cfg.closed_1d
-        else:
-            open_ref = self._max_seen
-            closed_ref = self._min_seen
-
-        d_open = abs(pos - open_ref)
-        d_closed = abs(pos - closed_ref)
-        margin = max(0.01, self.cfg.hysteresis * 0.35)
-
-        if d_open + margin < d_closed:
-            return ConfirmedZone.OPEN
-        if d_closed + margin < d_open:
+    def _classify_wait_zone(self) -> ConfirmedZone:
+        # No fixed absolute endpoints: zone is inferred from the last movement direction.
+        # +dir wait => CLOSED, -dir wait => OPEN.
+        if self._last_move_dir > 0:
             return ConfirmedZone.CLOSED
+        if self._last_move_dir < 0:
+            return ConfirmedZone.OPEN
         return self._confirmed if self._confirmed in (ConfirmedZone.OPEN, ConfirmedZone.CLOSED) else ConfirmedZone.UNKNOWN
 
     def step(self, position_01: float | None, now_ms: float | None = None) -> ConfirmedZone:
@@ -80,8 +80,9 @@ class ClampStateMachine:
         if self._filtered_pos is None:
             self._filtered_pos = pos
         else:
-            # Low-pass to avoid hand jitter / sensor noise.
-            self._filtered_pos = self._filtered_pos * 0.72 + pos * 0.28
+            # Low-pass to avoid jitter, but keep latency low for OPEN/CLOSED
+            # confirmation in fast molds.
+            self._filtered_pos = self._filtered_pos * 0.45 + pos * 0.55
         fpos = self._filtered_pos
 
         if self._last_pos is None:
@@ -89,22 +90,21 @@ class ClampStateMachine:
             self._last_ms = now_ms
             self._still_since_ms = now_ms
             self._moving_since_ms = now_ms
-            self._min_seen = min(self._min_seen, fpos)
-            self._max_seen = max(self._max_seen, fpos)
             return self._confirmed
 
         dt = max(1.0, now_ms - self._last_ms)
-        dpos = abs(fpos - self._last_pos)
+        delta = fpos - self._last_pos
+        dpos = abs(delta)
         # Movement epsilon is tied to hysteresis so jitter does not trigger MOVING.
         move_eps = max(0.0015, self.cfg.hysteresis * 0.12)
         is_moving_now = dpos > move_eps
 
         self._last_pos = fpos
         self._last_ms = now_ms
-        self._min_seen = min(self._min_seen, fpos)
-        self._max_seen = max(self._max_seen, fpos)
 
         if is_moving_now:
+            dir_now = 1 if delta > 0 else -1
+            self._last_move_dir = dir_now
             if not self._moving_raw:
                 self._moving_raw = True
                 self._moving_since_ms = now_ms
@@ -118,5 +118,5 @@ class ClampStateMachine:
             self._still_since_ms = now_ms
 
         if now_ms - self._still_since_ms >= self.cfg.stability_confirm_ms:
-            self._confirmed = self._classify_wait_zone(fpos)
+            self._confirmed = self._classify_wait_zone()
         return self._confirmed

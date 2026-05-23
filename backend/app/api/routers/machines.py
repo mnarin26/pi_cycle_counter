@@ -25,6 +25,7 @@ class MachineOut(BaseModel):
     line_thickness: int
     reflector_len_min: int | None
     reflector_len_max: int | None
+    occlusion_grace_ms: int
     debounce_ms: int
     stability_confirm_ms: int
     open_position_1d: float
@@ -50,6 +51,7 @@ class MachineUpdate(BaseModel):
     line_thickness: int | None = Field(default=None, ge=1, le=51)
     reflector_len_min: int | None = Field(default=None, ge=1, le=2000)
     reflector_len_max: int | None = Field(default=None, ge=1, le=2000)
+    occlusion_grace_ms: int | None = Field(default=None, ge=0, le=5000)
     debounce_ms: int | None = None
     stability_confirm_ms: int | None = None
     open_position_1d: float | None = None

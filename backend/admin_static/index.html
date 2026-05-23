@@ -72,6 +72,10 @@
             <select id="machineSelect"></select>
           </div>
           <div class="col-3">
+            <label>Makine Adi</label>
+            <input id="machineName" type="text" maxlength="128" />
+          </div>
+          <div class="col-3">
             <label>Yon (axis)</label>
             <select id="axisDir">
               <option value="lr">Sol -> Sag</option>
@@ -130,11 +134,24 @@
             <input id="hys" type="number" step="0.01" min="0" max="0.5" />
           </div>
           <div class="col-3">
+            <label>Hareket Debounce (ms)</label>
+            <input id="debounceMs" type="number" min="0" max="3000" step="1" />
+          </div>
+          <div class="col-3">
+            <label>Sabit Kalma Onay (ms)</label>
+            <input id="stabilityMs" type="number" min="0" max="10000" step="1" />
+          </div>
+          <div class="col-3">
+            <label>Gorunmezlik Toleransi (ms)</label>
+            <input id="occlusionGraceMs" type="number" min="0" max="5000" step="10" />
+          </div>
+          <div class="col-3">
             <label>Makine Aktif</label>
             <select id="machineEnabled"><option value="true">true</option><option value="false">false</option></select>
           </div>
           <div class="col-3"><button id="saveMachineBtn">Makine Parametre Kaydet</button></div>
           <div class="col-3"><button id="learnLenBtn" class="btn-orange">Uzunluk Kalibrasyon Baslat</button></div>
+          <div class="col-3"><button id="resetProdBtn" class="btn-gray">Sayim ve Kalip Verisini Sifirla</button></div>
           <div class="col-3"><button id="reloadSnapBtn" class="btn-gray">Snapshot Yenile</button></div>
           <div class="col-6"><div id="machineMsg" class="muted"></div></div>
         </div>
@@ -197,13 +214,26 @@
         const r = await fetch(API + path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
+      /** POST to this origin (admin app) — avoids :8000 when only :8080 is reachable */
+      async function jpostLocal(path, body){
+        const r = await fetch(location.origin + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        if(!r.ok) throw new Error(await r.text()); return r.json();
+      }
 
       function camById(id){ return cameras.find(c=>c.id===Number(id)); }
       function machineById(id){ return machines.find(m=>m.id===Number(id)); }
+      function machinesByCameraId(cameraId){ return machines.filter(m=>m.camera_id===Number(cameraId)); }
       function normalizeThresholdMode(mode){
         const m = String(mode || 'fixed').toLowerCase();
         if(m === 'adaptive' || m === 'learned') return 'adaptive';
         return 'fixed';
+      }
+      function parseMs(id, fallback){
+        const raw = String(q(id).value ?? '').trim();
+        if(raw === '') return 0;
+        const n = Number(raw);
+        if(!Number.isFinite(n)) return fallback;
+        return Math.max(0, Math.round(n));
       }
       function clonePoly(poly){ return poly ? poly.map(p=>({x:p.x,y:p.y})) : null; }
       function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
@@ -413,18 +443,30 @@
         return Math.hypot(pt.x-rh.x, pt.y-rh.y) <= hitRadiusPx();
       }
 
+      function refreshMachineOptions(){
+        const camId = Number(cameraSelect.value);
+        const filtered = machinesByCameraId(camId);
+        const prev = Number(machineSelect.value || 0);
+        machineSelect.innerHTML = filtered.map(m=>`<option value="${m.id}">#${m.id} - ${m.name}</option>`).join('');
+        if(filtered.length === 0){
+          setMsg('machineMsg', 'Bu kameraya bagli makine yok', 'warn');
+          return;
+        }
+        const keep = filtered.some(m=>m.id === prev) ? prev : filtered[0].id;
+        machineSelect.value = String(keep);
+        onMachineChange();
+      }
+
       async function loadAll(){
         cameras = await jget('/api/cameras');
         machines = await jget('/api/machines');
 
         cameraSelect.innerHTML = cameras.map(c=>`<option value="${c.id}">${c.name} (#${c.id})</option>`).join('');
-        machineSelect.innerHTML = machines.map(m=>`<option value="${m.id}">${m.name} (#${m.id})</option>`).join('');
 
         if(cameras.length) cameraSelect.value = String(cameras[0].id);
-        if(machines.length) machineSelect.value = String(machines[0].id);
+        refreshMachineOptions();
         onCameraChange();
         await refreshSnapshot();
-        onMachineChange();
       }
 
       function onCameraChange(){
@@ -435,11 +477,13 @@
         q('camFps').value = c.target_fps;
         q('camEnabled').value = String(c.enabled);
         q('cameraStatus').textContent = c.status || '-';
+        refreshMachineOptions();
       }
 
       function onMachineChange(){
         const m = machineById(machineSelect.value);
         if(!m) return;
+        q('machineName').value = m.name || '';
         q('thMin').value = m.threshold_min;
         q('thOffset').value = Number(m.threshold_offset || 0);
         q('lineThickness').value = Number(m.line_thickness || 7);
@@ -450,6 +494,9 @@
         q('open1d').value = m.open_position_1d;
         q('closed1d').value = m.closed_position_1d;
         q('hys').value = m.hysteresis;
+        q('debounceMs').value = m.debounce_ms ?? 80;
+        q('stabilityMs').value = m.stability_confirm_ms ?? 500;
+        q('occlusionGraceMs').value = m.occlusion_grace_ms ?? 300;
         q('machineEnabled').value = String(m.enabled);
         try{
           const roi = JSON.parse(m.roi_polygon || '[]');
@@ -608,6 +655,7 @@
         try{
           const id = Number(machineSelect.value);
           const updated = await jpatch(`/api/machines/${id}`, {
+            name: q('machineName').value.trim() || `Machine ${id}`,
             threshold_mode: q('thresholdMode').value,
             threshold_min: Number(q('thMin').value),
             threshold_offset: Number(q('thOffset').value || 0),
@@ -618,6 +666,9 @@
             open_position_1d: Number(q('open1d').value),
             closed_position_1d: Number(q('closed1d').value),
             hysteresis: Number(q('hys').value),
+            debounce_ms: parseMs('debounceMs', 80),
+            stability_confirm_ms: parseMs('stabilityMs', 500),
+            occlusion_grace_ms: parseMs('occlusionGraceMs', 300),
             enabled: q('machineEnabled').value === 'true',
           });
           const idx = machines.findIndex(m=>m.id===id);
@@ -643,6 +694,20 @@
           await loadAll();
         }catch(e){
           setMsg('machineMsg',String(e),'bad');
+        }
+      };
+      q('resetProdBtn').onclick = async ()=>{
+        const ok = confirm('Tum sayim, olay ve kalip gecmisini sifirlamak istiyor musun? Bu islem geri alinmaz.');
+        if(!ok) return;
+        try{
+          const res = await jpostLocal('/api/settings/maintenance/reset-production-data', {});
+          setMsg(
+            'machineMsg',
+            `Sifirlama tamamlandi. cycle=${res.deleted_cycles}, event=${res.deleted_events}, mold=${res.deleted_molds}`,
+            'good'
+          );
+        }catch(e){
+          setMsg('machineMsg', String(e), 'bad');
         }
       };
       q('clearRoiBtn').onclick = ()=>{ roiPoly = null; drawRoi(); };

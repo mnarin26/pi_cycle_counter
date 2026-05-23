@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import queue
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.db.session import SessionLocal, init_db
+import app.db.session as db_session
 from app.api.routers import analytics, calibration, cameras, events, machines, molds, settings as settings_router
 from app.vision.orchestrator import VisionOrchestrator, drain_cycle_queue_item
 from app.ws.hub import Hub
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.logs_dir.mkdir(parents=True, exist_ok=True)
-    init_db()
+    db_session.init_db()
     q: queue.Queue = queue.Queue(maxsize=settings.vision_queue_max)
     app.state.vision_queue = q
     app.state.rolling_cycles = {}
@@ -34,6 +36,17 @@ async def lifespan(app: FastAPI):
     orch.start()
     app.state.vision = orch
     app.state.ws_hub = Hub()
+    # #region agent log
+    try:
+        logger.info(
+            "[DBG][H14] drain_func_file=%s first_line=%s has_h13=%s",
+            drain_cycle_queue_item.__code__.co_filename,
+            drain_cycle_queue_item.__code__.co_firstlineno,
+            "[DBG][H13]" in inspect.getsource(drain_cycle_queue_item),
+        )
+    except Exception as e:
+        logger.warning("[DBG][H14] drain_func_introspect_failed err=%s", e)
+    # #endregion
 
     stop_drain = asyncio.Event()
 
@@ -42,9 +55,31 @@ async def lifespan(app: FastAPI):
             try:
                 while not stop_drain.is_set():
                     item = q.get_nowait()
-                    db = SessionLocal()
+                    # #region agent log
+                    if int(item.get("machine_id", -1)) == 3:
+                        logger.info(
+                            "[DBG][H11] drain_loop_got_item type=%s mid=%s qid=%s qsize_after_get=%s",
+                            item.get("type"),
+                            item.get("machine_id"),
+                            id(q),
+                            q.qsize(),
+                        )
+                    # #endregion
+                    # #region agent log
+                    if int(item.get("machine_id", -1)) == 3:
+                        logger.info("[DBG][H15] before_sessionlocal mid=3")
+                    # #endregion
+                    db = db_session.SessionLocal()
+                    # #region agent log
+                    if int(item.get("machine_id", -1)) == 3:
+                        logger.info("[DBG][H15] after_sessionlocal mid=3")
+                    # #endregion
                     try:
                         drain_cycle_queue_item(db, item, app.state.rolling_cycles)
+                        # #region agent log
+                        if int(item.get("machine_id", -1)) == 3 and item.get("type") == "cycle_completed":
+                            logger.info("[DBG][H11] drain_loop_cycle_persist_done mid=3")
+                        # #endregion
                     except Exception as e:
                         logger.exception("drain item failed: %s", e)
                     finally:
@@ -92,6 +127,35 @@ app.include_router(calibration.router, prefix="/api/calibration", tags=["calibra
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+@app.post("/api/debug/fake_cycle")
+def debug_fake_cycle(
+    machine_id: int = Query(3),
+    cycle_s: float = Query(2.5),
+):
+    q: queue.Queue = app.state.vision_queue
+    now = datetime.now(timezone.utc)
+    item = {
+        "type": "cycle_completed",
+        "machine_id": machine_id,
+        "machine_name": f"Machine {machine_id}",
+        "cycle_s": cycle_s,
+        "t_start": now.isoformat(),
+        "t_end": now.isoformat(),
+        "confidence": 0.95,
+    }
+    q.put_nowait(item)
+    # #region agent log
+    logger.info(
+        "[DBG][H12] fake_cycle_enqueued mid=%s qid=%s qsize_after_put=%s cycle_s=%s",
+        machine_id,
+        id(q),
+        q.qsize(),
+        cycle_s,
+    )
+    # #endregion
+    return {"ok": True, "queued": True, "machine_id": machine_id, "qsize": q.qsize()}
 
 
 @app.websocket("/ws")

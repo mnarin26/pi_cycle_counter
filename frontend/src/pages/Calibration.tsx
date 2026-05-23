@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { apiGet, apiPost } from "../api/client";
 
-type Machine = { id: number; name: string };
+type Machine = { id: number; name: string; enabled: boolean };
 
 export function CalibrationPage() {
   const [machines, setMachines] = useState<Machine[]>([]);
@@ -12,8 +12,9 @@ export function CalibrationPage() {
 
   useEffect(() => {
     apiGet<Machine[]>("/api/machines").then((m) => {
-      setMachines(m);
-      if (m.length) setMid(m[0].id);
+      const active = m.filter((x) => x.enabled);
+      setMachines(active);
+      if (active.length) setMid(active[0].id);
     });
   }, []);
 

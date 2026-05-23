@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Generator
 from pathlib import Path
 
@@ -11,6 +12,9 @@ from app.db.models import AppSetting, Base, Camera, Machine
 
 _engine = None
 SessionLocal = None
+TARGET_CAMERA_COUNT = 32
+TARGET_MACHINE_COUNT = 128
+DEFAULT_SLOTS_PER_CAMERA = 4
 
 
 def get_engine():
@@ -56,46 +60,89 @@ def init_db() -> None:
     # Lightweight forward migration for existing SQLite databases.
     # Adds new columns without requiring Alembic.
     with engine.begin() as conn:
-        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(machines)")).fetchall()}
-        if "threshold_offset" not in cols:
+        machine_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(machines)")).fetchall()}
+        if "threshold_offset" not in machine_cols:
             conn.execute(text("ALTER TABLE machines ADD COLUMN threshold_offset INTEGER NOT NULL DEFAULT 0"))
-        if "line_thickness" not in cols:
+        if "line_thickness" not in machine_cols:
             conn.execute(text("ALTER TABLE machines ADD COLUMN line_thickness INTEGER NOT NULL DEFAULT 7"))
-        if "reflector_len_min" not in cols:
+        if "reflector_len_min" not in machine_cols:
             conn.execute(text("ALTER TABLE machines ADD COLUMN reflector_len_min INTEGER"))
-        if "reflector_len_max" not in cols:
+        if "reflector_len_max" not in machine_cols:
             conn.execute(text("ALTER TABLE machines ADD COLUMN reflector_len_max INTEGER"))
+        if "occlusion_grace_ms" not in machine_cols:
+            conn.execute(text("ALTER TABLE machines ADD COLUMN occlusion_grace_ms INTEGER NOT NULL DEFAULT 300"))
+        cycle_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(cycles)")).fetchall()}
+        if "is_counted" not in cycle_cols:
+            conn.execute(text("ALTER TABLE cycles ADD COLUMN is_counted INTEGER NOT NULL DEFAULT 1"))
+        if "exclude_reason" not in cycle_cols:
+            conn.execute(text("ALTER TABLE cycles ADD COLUMN exclude_reason VARCHAR(64)"))
     db = SessionLocal()
     try:
-        if db.query(Camera).count() == 0:
-            c1 = Camera(name="Camera 1", rtsp_url="", target_width=640, target_fps=8)
-            c2 = Camera(name="Camera 2", rtsp_url="", target_width=640, target_fps=8)
-            db.add_all([c1, c2])
+        changed = False
+        cameras = list(db.query(Camera).order_by(Camera.id))
+        if len(cameras) < TARGET_CAMERA_COUNT:
+            for i in range(len(cameras) + 1, TARGET_CAMERA_COUNT + 1):
+                db.add(Camera(name=f"Camera {i}", rtsp_url="", target_width=640, target_fps=8, enabled=False))
             db.flush()
-            for i in range(4):
-                db.add(
-                    Machine(
-                        camera_id=c1.id,
-                        name=f"Machine {i + 1}",
-                        slot_index=i + 1,
-                        roi_polygon="[[0.1,0.4],[0.9,0.4],[0.9,0.6],[0.1,0.6]]",
-                        axis_p0="[0.1,0.5]",
-                        axis_p1="[0.9,0.5]",
-                        enabled=False,
+            cameras = list(db.query(Camera).order_by(Camera.id))
+            changed = True
+
+        machine_count = db.query(Machine).count()
+        if machine_count < TARGET_MACHINE_COUNT:
+            used_slots: dict[int, set[int]] = defaultdict(set)
+            for camera_id, slot_index in db.query(Machine.camera_id, Machine.slot_index).all():
+                used_slots[int(camera_id)].add(int(slot_index))
+
+            for cam in cameras:
+                for slot in range(1, DEFAULT_SLOTS_PER_CAMERA + 1):
+                    if machine_count >= TARGET_MACHINE_COUNT:
+                        break
+                    if slot in used_slots[cam.id]:
+                        continue
+                    machine_count += 1
+                    used_slots[cam.id].add(slot)
+                    db.add(
+                        Machine(
+                            camera_id=cam.id,
+                            name=f"Machine {machine_count}",
+                            slot_index=slot,
+                            roi_polygon="[[0.1,0.4],[0.9,0.4],[0.9,0.6],[0.1,0.6]]",
+                            axis_p0="[0.1,0.5]",
+                            axis_p1="[0.9,0.5]",
+                            enabled=False,
+                        )
                     )
-                )
-            for i in range(4):
-                db.add(
-                    Machine(
-                        camera_id=c2.id,
-                        name=f"Machine {i + 5}",
-                        slot_index=i + 1,
-                        roi_polygon="[[0.1,0.4],[0.9,0.4],[0.9,0.6],[0.1,0.6]]",
-                        axis_p0="[0.1,0.5]",
-                        axis_p1="[0.9,0.5]",
-                        enabled=False,
-                    )
-                )
+                    changed = True
+                if machine_count >= TARGET_MACHINE_COUNT:
+                    break
+
+            # Fallback: if per-camera default slots are already occupied by custom
+            # machines, keep appending with higher slot_index values.
+            if machine_count < TARGET_MACHINE_COUNT:
+                for cam in cameras:
+                    next_slot = (max(used_slots[cam.id]) + 1) if used_slots[cam.id] else 1
+                    while machine_count < TARGET_MACHINE_COUNT:
+                        machine_count += 1
+                        db.add(
+                            Machine(
+                                camera_id=cam.id,
+                                name=f"Machine {machine_count}",
+                                slot_index=next_slot,
+                                roi_polygon="[[0.1,0.4],[0.9,0.4],[0.9,0.6],[0.1,0.6]]",
+                                axis_p0="[0.1,0.5]",
+                                axis_p1="[0.9,0.5]",
+                                enabled=False,
+                            )
+                        )
+                        next_slot += 1
+                        changed = True
+                        # Keep distribution balanced while filling remaining count.
+                        if next_slot > DEFAULT_SLOTS_PER_CAMERA + 32:
+                            break
+                    if machine_count >= TARGET_MACHINE_COUNT:
+                        break
+
+        if changed:
             db.commit()
     finally:
         db.close()
