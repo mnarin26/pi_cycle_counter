@@ -72,6 +72,11 @@
             <select id="machineSelect"></select>
           </div>
           <div class="col-3">
+            <label>Goruntu Kamerasi</label>
+            <select id="machineCameraSelect"></select>
+            <p class="muted" style="margin-top:4px;">Makine bu kameranin goruntusu uzerinden calisir.</p>
+          </div>
+          <div class="col-3">
             <label>Makine Adi</label>
             <input id="machineName" type="text" maxlength="128" />
           </div>
@@ -194,6 +199,7 @@
 
       const cameraSelect = document.getElementById('cameraSelect');
       const machineSelect = document.getElementById('machineSelect');
+      const machineCameraSelect = document.getElementById('machineCameraSelect');
       const snap = document.getElementById('snap');
       const overlay = document.getElementById('overlay');
       const canvasInner = document.getElementById('canvasInner');
@@ -222,7 +228,20 @@
 
       function camById(id){ return cameras.find(c=>c.id===Number(id)); }
       function machineById(id){ return machines.find(m=>m.id===Number(id)); }
-      function machinesByCameraId(cameraId){ return machines.filter(m=>m.camera_id===Number(cameraId)); }
+      function populateCameraOptions(selectEl, selectedId){
+        selectEl.innerHTML = cameras.map(c=>`<option value="${c.id}">${c.name} (#${c.id})</option>`).join('');
+        if(selectedId != null && cameras.some(c=>c.id === Number(selectedId))){
+          selectEl.value = String(selectedId);
+        }else if(cameras.length){
+          selectEl.value = String(cameras[0].id);
+        }
+      }
+      function machineSnapshotCameraId(){
+        const m = machineById(machineSelect.value);
+        const picked = Number(machineCameraSelect.value);
+        if(Number.isFinite(picked) && picked > 0) return picked;
+        return m ? m.camera_id : null;
+      }
       function normalizeThresholdMode(mode){
         const m = String(mode || 'fixed').toLowerCase();
         if(m === 'adaptive' || m === 'learned') return 'adaptive';
@@ -444,15 +463,17 @@
       }
 
       function refreshMachineOptions(){
-        const camId = Number(cameraSelect.value);
-        const filtered = machinesByCameraId(camId);
         const prev = Number(machineSelect.value || 0);
-        machineSelect.innerHTML = filtered.map(m=>`<option value="${m.id}">#${m.id} - ${m.name}</option>`).join('');
-        if(filtered.length === 0){
-          setMsg('machineMsg', 'Bu kameraya bagli makine yok', 'warn');
+        machineSelect.innerHTML = machines.map(m=>{
+          const cam = camById(m.camera_id);
+          const camLabel = cam ? cam.name : `Kamera ${m.camera_id}`;
+          return `<option value="${m.id}">#${m.id} - ${m.name} [${camLabel}]</option>`;
+        }).join('');
+        if(machines.length === 0){
+          setMsg('machineMsg', 'Makine kaydi yok', 'warn');
           return;
         }
-        const keep = filtered.some(m=>m.id === prev) ? prev : filtered[0].id;
+        const keep = machines.some(m=>m.id === prev) ? prev : machines[0].id;
         machineSelect.value = String(keep);
         onMachineChange();
       }
@@ -461,11 +482,9 @@
         cameras = await jget('/api/cameras');
         machines = await jget('/api/machines');
 
-        cameraSelect.innerHTML = cameras.map(c=>`<option value="${c.id}">${c.name} (#${c.id})</option>`).join('');
-
-        if(cameras.length) cameraSelect.value = String(cameras[0].id);
-        refreshMachineOptions();
+        populateCameraOptions(cameraSelect, cameras[0]?.id);
         onCameraChange();
+        refreshMachineOptions();
         await refreshSnapshot();
       }
 
@@ -477,12 +496,12 @@
         q('camFps').value = c.target_fps;
         q('camEnabled').value = String(c.enabled);
         q('cameraStatus').textContent = c.status || '-';
-        refreshMachineOptions();
       }
 
       function onMachineChange(){
         const m = machineById(machineSelect.value);
         if(!m) return;
+        populateCameraOptions(machineCameraSelect, m.camera_id);
         q('machineName').value = m.name || '';
         q('thMin').value = m.threshold_min;
         q('thOffset').value = Number(m.threshold_offset || 0);
@@ -507,7 +526,8 @@
       }
 
       async function refreshSnapshot(){
-        const c = camById(cameraSelect.value); if(!c) return;
+        const camId = machineSnapshotCameraId();
+        const c = camById(camId); if(!c){ setMsg('roiMsg','Goruntu kamerasi secilmedi','warn'); return; }
         snap.src = `${API}/api/cameras/${c.id}/snapshot.jpg?t=${Date.now()}`;
         await new Promise(res=>{ snap.onload=res; snap.onerror=res; });
         overlay.width = snap.clientWidth;
@@ -655,6 +675,7 @@
         try{
           const id = Number(machineSelect.value);
           const updated = await jpatch(`/api/machines/${id}`, {
+            camera_id: Number(machineCameraSelect.value),
             name: q('machineName').value.trim() || `Machine ${id}`,
             threshold_mode: q('thresholdMode').value,
             threshold_min: Number(q('thMin').value),
@@ -673,8 +694,10 @@
           });
           const idx = machines.findIndex(m=>m.id===id);
           if(idx >= 0) machines[idx] = updated;
+          refreshMachineOptions();
           q('thresholdMode').value = normalizeThresholdMode(updated.threshold_mode);
           setMsg('machineMsg','Makine parametreleri kaydedildi','good');
+          await refreshSnapshot();
         }catch(e){ setMsg('machineMsg',String(e),'bad'); }
       };
 
@@ -731,8 +754,9 @@
         }catch(e){ setMsg('roiMsg',String(e),'bad'); }
       };
 
-      cameraSelect.onchange = async ()=>{ onCameraChange(); await refreshSnapshot(); };
-      machineSelect.onchange = onMachineChange;
+      cameraSelect.onchange = onCameraChange;
+      machineSelect.onchange = async ()=>{ onMachineChange(); await refreshSnapshot(); };
+      machineCameraSelect.onchange = refreshSnapshot;
 
       applyZoom();
       loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));

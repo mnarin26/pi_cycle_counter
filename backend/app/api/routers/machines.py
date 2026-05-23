@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.db.models import Machine
+from app.db.models import Camera, Machine
 
 router = APIRouter()
 
@@ -40,6 +40,7 @@ class MachineOut(BaseModel):
 
 
 class MachineUpdate(BaseModel):
+    camera_id: int | None = None
     name: str | None = None
     roi_polygon: str | None = None
     axis_p0: str | None = None
@@ -80,7 +81,12 @@ def update_machine(machine_id: int, body: MachineUpdate, db: Session = Depends(g
     m = db.get(Machine, machine_id)
     if not m:
         raise HTTPException(404)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    if "camera_id" in data and data["camera_id"] is not None:
+        cam = db.get(Camera, data["camera_id"])
+        if not cam:
+            raise HTTPException(400, detail="camera_id not found")
+    for k, v in data.items():
         setattr(m, k, v)
     db.commit()
     db.refresh(m)
