@@ -4,14 +4,22 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Line,
-  LineChart,
+  Cell,
+  Legend,
   ResponsiveContainer,
+  Scatter,
+  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 import { apiGet } from "../api/client";
+import {
+  chartScrollWidth,
+  eventColor,
+  formatAxisTime,
+  moldColor,
+} from "../lib/chartTheme";
 import { useLiveSnapshot } from "../hooks/useLiveSnapshot";
 
 type Machine = {
@@ -30,15 +38,9 @@ type Machine = {
   hysteresis: number;
 };
 
-type Summary = {
-  cycle_count: number;
-  avg_cycle_s: number;
-};
-
 type CyclePoint = {
   t: string;
   cycle_time_s: number;
-  machine_id: number;
   mold_id?: number | null;
   mold: string | null;
 };
@@ -46,14 +48,12 @@ type CyclePoint = {
 type EventRow = {
   id: number;
   type: string;
-  machine_id: number | null;
-  payload: string | null;
   created_at: string | null;
 };
 
-type MachineAnalysis = {
+type DashboardPayload = {
   machine_id: number;
-  range: "daily" | "weekly" | "monthly" | "yearly";
+  range: string;
   from: string;
   to: string;
   summary: {
@@ -70,29 +70,127 @@ type MachineAnalysis = {
     share_pct: number;
     avg_cycle_s: number;
   }>;
-  time_buckets: Array<{
-    bucket: string;
-    cycle_count: number;
-    avg_cycle_s: number;
-  }>;
+  series: CyclePoint[];
+  series_total: number;
+  series_shown: number;
+  series_truncated: boolean;
+  events: EventRow[];
 };
 
 type RangeKey = "daily" | "weekly" | "monthly" | "yearly";
+
+type ChartCycle = {
+  t: string;
+  t_ms: number;
+  cycle_time_s: number;
+  mold: string;
+  mold_key: string;
+  mold_color: string;
+};
+
+type ChartEvent = {
+  id: number;
+  type: string;
+  t_ms: number;
+  y: number;
+  color: string;
+};
+
+function CycleTooltipContent({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: ChartCycle }>;
+}) {
+  if (!active || !payload?.length) return null;
+  const d = payload[0].payload;
+  return (
+    <div className="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-xs shadow-lg">
+      <div className="font-medium text-slate-100">{new Date(d.t).toLocaleString("tr-TR")}</div>
+      <div className="mt-1 text-slate-300">Döngü: {d.cycle_time_s.toFixed(2)} s</div>
+      <div className="text-slate-300">Kalıp: {d.mold}</div>
+    </div>
+  );
+}
+
+function EventTooltipContent({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: ChartEvent }>;
+}) {
+  if (!active || !payload?.length) return null;
+  const d = payload[0].payload;
+  return (
+    <div className="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-xs shadow-lg">
+      <div className="font-medium text-slate-100">
+        {new Date(d.t_ms).toLocaleString("tr-TR")}
+      </div>
+      <div className="mt-1 text-slate-300">Olay: {d.type}</div>
+    </div>
+  );
+}
+
+function ChartLegend({
+  moldKeys,
+  eventTypes,
+}: {
+  moldKeys: string[];
+  eventTypes: string[];
+}) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-4 text-xs">
+      {moldKeys.length > 0 && (
+        <div>
+          <div className="mb-1 font-semibold text-slate-400">Kalıplar</div>
+          <div className="flex flex-wrap gap-2">
+            {moldKeys.map((k, i) => (
+              <span key={k} className="inline-flex items-center gap-1">
+                <span
+                  className="inline-block h-2.5 w-2.5 rounded-full"
+                  style={{ background: moldColor(k, i) }}
+                />
+                <span className="text-slate-300">{k}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {eventTypes.length > 0 && (
+        <div>
+          <div className="mb-1 font-semibold text-slate-400">Olaylar</div>
+          <div className="flex flex-wrap gap-2">
+            {eventTypes.map((t) => (
+              <span key={t} className="inline-flex items-center gap-1">
+                <span
+                  className="inline-block h-2.5 w-2.5 rounded-full"
+                  style={{ background: eventColor(t) }}
+                />
+                <span className="text-slate-300">{t}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function MachineDetailPage() {
   const params = useParams<{ id: string }>();
   const machineId = Number(params.id || 0);
   const { snapshot } = useLiveSnapshot();
   const [machine, setMachine] = useState<Machine | null>(null);
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [series, setSeries] = useState<CyclePoint[]>([]);
-  const [analysis, setAnalysis] = useState<MachineAnalysis | null>(null);
-  const [events, setEvents] = useState<EventRow[]>([]);
+  const [dash, setDash] = useState<DashboardPayload | null>(null);
   const [range, setRange] = useState<RangeKey>("daily");
   const [fromInput, setFromInput] = useState("");
   const [toInput, setToInput] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
   const lastLiveEmitRef = useRef<number>(-1);
+  const loadGenRef = useRef(0);
 
   const snapMachine = useMemo(
     () => snapshot.machines.find((m) => m.id === machineId) ?? null,
@@ -100,37 +198,43 @@ export function MachineDetailPage() {
   );
 
   const buildWindowQuery = useCallback(() => {
-    const p = new URLSearchParams({ machine_id: String(machineId), range });
+    const p = new URLSearchParams({
+      machine_id: String(machineId),
+      range,
+    });
     if (fromInput) p.set("from", new Date(fromInput).toISOString());
     if (toInput) p.set("to", new Date(toInput).toISOString());
     return p.toString();
   }, [machineId, range, fromInput, toInput]);
 
-  const load = useCallback(async () => {
+  useEffect(() => {
     if (!machineId) return;
+    apiGet<Machine>(`/api/machines/${machineId}`)
+      .then(setMachine)
+      .catch((e) => setErr(String(e)));
+  }, [machineId]);
+
+  const loadDash = useCallback(async () => {
+    if (!machineId) return;
+    const gen = ++loadGenRef.current;
+    setLoading(true);
     try {
-      const windowQuery = buildWindowQuery();
-      const [m, sum, sr, ev] = await Promise.all([
-        apiGet<Machine>(`/api/machines/${machineId}`),
-        apiGet<Summary>(`/api/analytics/summary?${windowQuery}`),
-        apiGet<CyclePoint[]>(`/api/analytics/cycles_series?${windowQuery}&limit=300`),
-        apiGet<EventRow[]>(`/api/events?machine_id=${machineId}&limit=20`),
-      ]);
-      const detail = await apiGet<MachineAnalysis>(`/api/analytics/machine_analysis?${windowQuery}&limit=3000`);
-      setMachine(m);
-      setSummary(sum);
-      setSeries(sr);
-      setAnalysis(detail);
-      setEvents(ev);
+      const data = await apiGet<DashboardPayload>(
+        `/api/analytics/machine_dashboard?${buildWindowQuery()}&series_limit=4000&events_limit=500`,
+      );
+      if (gen !== loadGenRef.current) return;
+      setDash(data);
       setErr(null);
     } catch (e) {
-      setErr(String(e));
+      if (gen === loadGenRef.current) setErr(String(e));
+    } finally {
+      if (gen === loadGenRef.current) setLoading(false);
     }
   }, [machineId, buildWindowQuery]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    loadDash();
+  }, [loadDash]);
 
   useEffect(() => {
     const liveEmitCount = snapMachine?.dbg_cycle_emit_count;
@@ -141,24 +245,69 @@ export function MachineDetailPage() {
     }
     if (liveEmitCount > lastLiveEmitRef.current) {
       lastLiveEmitRef.current = liveEmitCount;
-      load();
+      loadDash();
     }
-  }, [snapMachine?.dbg_cycle_emit_count, load]);
+  }, [snapMachine?.dbg_cycle_emit_count, loadDash]);
+
+  const moldColorMap = useMemo(() => {
+    const keys = [...new Set((dash?.series ?? []).map((s) => s.mold || "—"))];
+    const map = new Map<string, string>();
+    keys.forEach((k, i) => map.set(k, moldColor(k, i)));
+    return map;
+  }, [dash?.series]);
+
+  const cycleChartData = useMemo((): ChartCycle[] => {
+    return (dash?.series ?? []).map((x) => {
+      const mold = x.mold || "—";
+      return {
+        t: x.t,
+        t_ms: new Date(x.t).getTime(),
+        cycle_time_s: Number(x.cycle_time_s.toFixed(3)),
+        mold,
+        mold_key: mold,
+        mold_color: moldColorMap.get(mold) ?? moldColor(mold, 0),
+      };
+    });
+  }, [dash?.series, moldColorMap]);
+
+  const eventChartData = useMemo((): ChartEvent[] => {
+    return (dash?.events ?? [])
+      .filter((e) => e.created_at)
+      .map((e) => ({
+        id: e.id,
+        type: e.type,
+        t_ms: new Date(e.created_at!).getTime(),
+        y: 1,
+        color: eventColor(e.type),
+      }));
+  }, [dash?.events]);
+
+  const moldBarData = useMemo(() => {
+    return (dash?.mold_breakdown ?? []).map((m, i) => ({
+      ...m,
+      fill: moldColor(m.mold_name, i),
+    }));
+  }, [dash?.mold_breakdown]);
+
+  const chartWidth = chartScrollWidth(cycleChartData.length);
+  const moldLegendKeys = [...moldColorMap.keys()];
+  const eventLegendTypes = [...new Set(eventChartData.map((e) => e.type))];
+
+  const xDomain = useMemo((): [number, number] | undefined => {
+    const all = [
+      ...cycleChartData.map((c) => c.t_ms),
+      ...eventChartData.map((e) => e.t_ms),
+    ];
+    if (!all.length) return undefined;
+    const pad = Math.max(60_000, (Math.max(...all) - Math.min(...all)) * 0.02);
+    return [Math.min(...all) - pad, Math.max(...all) + pad];
+  }, [cycleChartData, eventChartData]);
 
   if (!machineId) {
     return <p className="text-alarm">Geçersiz makine id</p>;
   }
 
-  const lastCycle = series.length ? series[series.length - 1].cycle_time_s : null;
-  const cycleTrendData = useMemo(
-    () =>
-      series.slice(-120).map((x, i) => ({
-        idx: i + 1,
-        cycle_time_s: Number(x.cycle_time_s.toFixed(3)),
-      })),
-    [series],
-  );
-  const moldBarData = analysis?.mold_breakdown ?? [];
+  const summary = dash?.summary;
 
   return (
     <div className="space-y-4">
@@ -175,6 +324,7 @@ export function MachineDetailPage() {
       </div>
 
       {err && <p className="text-alarm text-sm">{err}</p>}
+      {loading && <p className="text-sm text-slate-400">Grafikler yükleniyor…</p>}
 
       <div className="rounded border border-slate-700 bg-panel2 p-3">
         <div className="flex flex-wrap items-end gap-3">
@@ -229,29 +379,81 @@ export function MachineDetailPage() {
         </div>
         <div className="rounded border border-slate-700 bg-panel2 p-3">
           <div className="text-xs text-slate-400">Son Döngü</div>
-          <div className="text-lg font-semibold">{lastCycle != null ? `${lastCycle.toFixed(2)}s` : "—"}</div>
+          <div className="text-lg font-semibold">
+            {summary ? `${summary.last_cycle_s.toFixed(2)}s` : "—"}
+          </div>
         </div>
         <div className="rounded border border-slate-700 bg-panel2 p-3">
           <div className="text-xs text-slate-400">Min/Max Döngü</div>
           <div className="text-lg font-semibold">
-            {analysis ? `${analysis.summary.min_cycle_s.toFixed(2)} / ${analysis.summary.max_cycle_s.toFixed(2)}s` : "—"}
+            {summary
+              ? `${summary.min_cycle_s.toFixed(2)} / ${summary.max_cycle_s.toFixed(2)}s`
+              : "—"}
           </div>
         </div>
       </div>
 
       <div className="rounded border border-slate-700 bg-panel2 p-3">
-        <h3 className="mb-2 text-sm font-semibold">Çalışma Analizi (Döngü Trendi)</h3>
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={cycleTrendData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="idx" tick={{ fill: "#94a3b8", fontSize: 10 }} />
-              <YAxis tick={{ fill: "#94a3b8", fontSize: 10 }} />
-              <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155" }} />
-              <Line type="monotone" dataKey="cycle_time_s" stroke="#38bdf8" dot={false} strokeWidth={2} />
-            </LineChart>
-          </ResponsiveContainer>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">Çalışma Analizi (Döngü Trendi)</h3>
+          {dash?.series_truncated && (
+            <span className="text-xs text-amber-300">
+              Grafikte {dash.series_shown.toLocaleString("tr-TR")} /{" "}
+              {dash.series_total.toLocaleString("tr-TR")} döngü — yatay kaydır
+            </span>
+          )}
         </div>
+        <p className="mb-2 text-xs text-slate-500">
+          X ekseni: tarih/saat. Nokta rengi = kalıp. Üzerine gelince tam zaman görünür.
+        </p>
+        <div className="overflow-x-auto rounded border border-slate-800">
+          <div style={{ width: chartWidth, minWidth: "100%", height: 280 }}>
+            <ScatterChart width={chartWidth} height={280} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+              <XAxis
+                type="number"
+                dataKey="t_ms"
+                domain={xDomain}
+                tick={{ fill: "#94a3b8", fontSize: 10 }}
+                tickFormatter={(ms) => formatAxisTime(ms, range)}
+              />
+              <YAxis
+                dataKey="cycle_time_s"
+                tick={{ fill: "#94a3b8", fontSize: 10 }}
+                label={{ value: "s", angle: 0, position: "insideLeft", fill: "#94a3b8" }}
+              />
+              <Tooltip content={<CycleTooltipContent />} />
+              <Scatter data={cycleChartData} isAnimationActive={false}>
+                {cycleChartData.map((entry, i) => (
+                  <Cell key={`${entry.t_ms}-${i}`} fill={entry.mold_color} />
+                ))}
+              </Scatter>
+            </ScatterChart>
+          </div>
+        </div>
+
+        <h3 className="mb-1 mt-4 text-xs font-semibold text-slate-400">Olaylar (zaman çizgisi)</h3>
+        <div className="overflow-x-auto rounded border border-slate-800">
+          <div style={{ width: chartWidth, minWidth: "100%", height: 72 }}>
+            <ScatterChart width={chartWidth} height={72} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
+              <XAxis
+                type="number"
+                dataKey="t_ms"
+                domain={xDomain}
+                hide
+              />
+              <YAxis dataKey="y" domain={[0, 2]} hide />
+              <Tooltip content={<EventTooltipContent />} />
+              <Scatter data={eventChartData} isAnimationActive={false}>
+                {eventChartData.map((entry) => (
+                  <Cell key={entry.id} fill={entry.color} />
+                ))}
+              </Scatter>
+            </ScatterChart>
+          </div>
+        </div>
+
+        <ChartLegend moldKeys={moldLegendKeys} eventTypes={eventLegendTypes} />
       </div>
 
       <div className="rounded border border-slate-700 bg-panel2 p-3">
@@ -260,10 +462,15 @@ export function MachineDetailPage() {
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={moldBarData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="mold_name" tick={{ fill: "#94a3b8", fontSize: 10 }} />
+              <XAxis dataKey="mold_name" tick={{ fill: "#94a3b8", fontSize: 10 }} interval={0} angle={-12} textAnchor="end" height={56} />
               <YAxis tick={{ fill: "#94a3b8", fontSize: 10 }} />
               <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155" }} />
-              <Bar dataKey="cycle_count" fill="#4ade80" />
+              <Bar dataKey="cycle_count" name="Adet">
+                {moldBarData.map((entry, i) => (
+                  <Cell key={`${entry.mold_name}-${i}`} fill={entry.fill} />
+                ))}
+              </Bar>
+              <Legend />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -280,7 +487,13 @@ export function MachineDetailPage() {
             <tbody>
               {moldBarData.map((m, i) => (
                 <tr key={`${m.mold_id ?? "na"}-${i}`} className="border-t border-slate-800">
-                  <td className="py-1 pr-3">{m.mold_name || "—"}</td>
+                  <td className="py-1 pr-3">
+                    <span
+                      className="mr-2 inline-block h-2 w-2 rounded-full"
+                      style={{ background: m.fill }}
+                    />
+                    {m.mold_name || "—"}
+                  </td>
                   <td className="py-1 pr-3">{m.cycle_count}</td>
                   <td className="py-1 pr-3">%{m.share_pct.toFixed(1)}</td>
                   <td className="py-1 pr-3">{m.avg_cycle_s.toFixed(2)}s</td>
@@ -341,14 +554,14 @@ export function MachineDetailPage() {
               </tr>
             </thead>
             <tbody>
-              {series.slice(-20).map((x, i) => (
+              {(dash?.series ?? []).slice(-20).map((x, i) => (
                 <tr key={`${x.t}-${i}`} className="border-t border-slate-800">
-                  <td className="py-1 pr-3">{new Date(x.t).toLocaleTimeString()}</td>
+                  <td className="py-1 pr-3">{new Date(x.t).toLocaleString("tr-TR")}</td>
                   <td className="py-1 pr-3">{x.cycle_time_s.toFixed(2)}</td>
                   <td className="py-1 pr-3">{x.mold || "—"}</td>
                 </tr>
               ))}
-              {series.length === 0 && (
+              {(dash?.series?.length ?? 0) === 0 && (
                 <tr>
                   <td className="py-2 text-slate-500" colSpan={3}>
                     Kayıt yok
@@ -363,27 +576,21 @@ export function MachineDetailPage() {
       <div className="rounded border border-slate-700 bg-panel2 p-3">
         <h3 className="mb-2 text-sm font-semibold">Son Olaylar</h3>
         <ul className="space-y-1 text-sm">
-          {events.slice(0, 10).map((e) => (
+          {(dash?.events ?? []).slice(-10).reverse().map((e) => (
             <li key={e.id} className="border-b border-slate-800 pb-1">
+              <span
+                className="mr-2 inline-block h-2 w-2 rounded-full"
+                style={{ background: eventColor(e.type) }}
+              />
               <span className="mr-2 text-slate-400">
-                {e.created_at ? new Date(e.created_at).toLocaleTimeString() : "—"}
+                {e.created_at ? new Date(e.created_at).toLocaleString("tr-TR") : "—"}
               </span>
               <span className="font-medium">{e.type}</span>
             </li>
           ))}
-          {events.length === 0 && <li className="text-slate-500">Olay yok</li>}
-        </ul>
-      </div>
-
-      <div className="rounded border border-amber-700 bg-amber-950/20 p-3 text-sm">
-        <div className="font-semibold text-amber-300">Doğru sayım nasıl doğrulanır?</div>
-        <ul className="mt-2 list-disc pl-5 text-slate-200">
-          <li>Makine başında 20 fiziksel çevrim say ve bu sayfadaki artışla karşılaştır.</li>
-          <li>Her çevrimde durum akışı MOVING to CLOSED or OPEN to MOVING şeklinde ilerlemeli.</li>
-          <li>Reflektör yokken `prominence` düşük, `state` sabit kalmalı; yalancı döngü artmamalı.</li>
+          {(dash?.events?.length ?? 0) === 0 && <li className="text-slate-500">Olay yok</li>}
         </ul>
       </div>
     </div>
   );
 }
-

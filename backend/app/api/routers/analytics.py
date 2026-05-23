@@ -6,10 +6,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.db.models import Cycle
+from app.db.models import Cycle, Event
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -41,6 +42,66 @@ def _resolve_window(
     return start, end
 
 
+def _cycle_base_query(
+    db: Session,
+    machine_id: int,
+    start: datetime,
+    end: datetime,
+):
+    return db.query(Cycle).filter(
+        Cycle.machine_id == machine_id,
+        Cycle.t_end >= start,
+        Cycle.t_end <= end,
+        Cycle.is_counted.is_(True),
+    )
+
+
+def _aggregate_cycle_stats(db: Session, machine_id: int, start: datetime, end: datetime) -> dict:
+    row = (
+        db.query(
+            func.count(Cycle.id),
+            func.avg(Cycle.cycle_time_s),
+            func.min(Cycle.cycle_time_s),
+            func.max(Cycle.cycle_time_s),
+        )
+        .filter(
+            Cycle.machine_id == machine_id,
+            Cycle.t_end >= start,
+            Cycle.t_end <= end,
+            Cycle.is_counted.is_(True),
+        )
+        .one()
+    )
+    cnt = int(row[0] or 0)
+    if cnt == 0:
+        return {
+            "cycle_count": 0,
+            "avg_cycle_s": 0.0,
+            "min_cycle_s": 0.0,
+            "max_cycle_s": 0.0,
+            "last_cycle_s": 0.0,
+        }
+    last_s = (
+        db.query(Cycle.cycle_time_s)
+        .filter(
+            Cycle.machine_id == machine_id,
+            Cycle.t_end >= start,
+            Cycle.t_end <= end,
+            Cycle.is_counted.is_(True),
+        )
+        .order_by(Cycle.t_end.desc())
+        .limit(1)
+        .scalar()
+    )
+    return {
+        "cycle_count": cnt,
+        "avg_cycle_s": round(float(row[1] or 0), 3),
+        "min_cycle_s": round(float(row[2] or 0), 3),
+        "max_cycle_s": round(float(row[3] or 0), 3),
+        "last_cycle_s": round(float(last_s or 0), 3),
+    }
+
+
 @router.get("/summary")
 def summary(
     db: Session = Depends(get_db),
@@ -50,20 +111,11 @@ def summary(
     to_ts: datetime | None = Query(None, alias="to"),
 ):
     start, end = _resolve_window(range, from_ts, to_ts)
-    q = db.query(Cycle).filter(Cycle.t_end >= start, Cycle.t_end <= end, Cycle.is_counted.is_(True))
+    filt = db.query(Cycle).filter(Cycle.t_end >= start, Cycle.t_end <= end, Cycle.is_counted.is_(True))
     if machine_id is not None:
-        q = q.filter(Cycle.machine_id == machine_id)
-    rows = q.all()
-    if machine_id is not None:
-        # #region agent log
-        logger.info(
-            "[DBG][H1/H4] analytics_summary machine_id=%s range=%s rows=%s",
-            machine_id,
-            range,
-            len(rows),
-        )
-        # #endregion
-    if not rows:
+        filt = filt.filter(Cycle.machine_id == machine_id)
+    cnt = int(filt.with_entities(func.count(Cycle.id)).scalar() or 0)
+    if cnt == 0:
         return {
             "range": range,
             "cycle_count": 0,
@@ -71,15 +123,14 @@ def summary(
             "uptime_proxy": 0.0,
             "downtime_proxy": 0.0,
         }
-    times = [r.cycle_time_s for r in rows]
-    avg = sum(times) / len(times)
+    avg = float(filt.with_entities(func.avg(Cycle.cycle_time_s)).scalar() or 0)
     return {
         "range": range,
         "from": start.isoformat(),
         "to": end.isoformat(),
-        "cycle_count": len(rows),
+        "cycle_count": cnt,
         "avg_cycle_s": round(avg, 3),
-        "uptime_proxy": round(min(1.0, len(rows) / max(1, (end - start).total_seconds() / 10)), 3),
+        "uptime_proxy": round(min(1.0, cnt / max(1, (end - start).total_seconds() / 10)), 3),
         "downtime_proxy": 0.0,
     }
 
@@ -90,7 +141,7 @@ def cycles_series(
     from_ts: datetime | None = Query(None, alias="from"),
     to_ts: datetime | None = Query(None, alias="to"),
     machine_id: int | None = None,
-    limit: int = 500,
+    limit: int = Query(2500, le=8000),
 ):
     now = datetime.now(timezone.utc)
     start = from_ts or (now - timedelta(days=1))
@@ -208,6 +259,102 @@ def machine_analysis(
             }
             for key, vals in sorted(buckets.items(), key=lambda kv: kv[0])
         ],
+    }
+
+
+@router.get("/machine_dashboard")
+def machine_dashboard(
+    machine_id: int,
+    db: Session = Depends(get_db),
+    range: Literal["daily", "weekly", "monthly", "yearly"] = "daily",
+    from_ts: datetime | None = Query(None, alias="from"),
+    to_ts: datetime | None = Query(None, alias="to"),
+    series_limit: int = Query(4000, ge=100, le=8000),
+    events_limit: int = Query(500, ge=10, le=1000),
+):
+    """Single fast payload for machine detail UI: SQL aggregates + bounded series + events."""
+    start, end = _resolve_window(range, from_ts, to_ts)
+    stats = _aggregate_cycle_stats(db, machine_id, start, end)
+    total = stats["cycle_count"]
+
+    mold_rows = (
+        db.query(
+            Cycle.mold_id,
+            Cycle.mold_name_snapshot,
+            func.count(Cycle.id),
+            func.avg(Cycle.cycle_time_s),
+        )
+        .filter(
+            Cycle.machine_id == machine_id,
+            Cycle.t_end >= start,
+            Cycle.t_end <= end,
+            Cycle.is_counted.is_(True),
+        )
+        .group_by(Cycle.mold_id, Cycle.mold_name_snapshot)
+        .order_by(func.count(Cycle.id).desc())
+        .all()
+    )
+    mold_breakdown = [
+        {
+            "mold_id": mid,
+            "mold_name": mname or "—",
+            "cycle_count": int(cnt),
+            "share_pct": round(100.0 * int(cnt) / total, 2) if total else 0.0,
+            "avg_cycle_s": round(float(avg or 0), 3),
+        }
+        for mid, mname, cnt, avg in mold_rows
+    ]
+
+    # When truncated, prefer the most recent cycles (detail view cares about "now").
+    series_rows = (
+        _cycle_base_query(db, machine_id, start, end)
+        .order_by(Cycle.t_end.desc())
+        .limit(series_limit)
+        .all()
+    )
+    series_rows.reverse()
+    series = [
+        {
+            "t": r.t_end.isoformat(),
+            "cycle_time_s": float(r.cycle_time_s),
+            "mold_id": r.mold_id,
+            "mold": r.mold_name_snapshot,
+        }
+        for r in series_rows
+    ]
+
+    ev_rows = (
+        db.query(Event)
+        .filter(
+            Event.machine_id == machine_id,
+            Event.created_at >= start,
+            Event.created_at <= end,
+        )
+        .order_by(Event.created_at)
+        .limit(events_limit)
+        .all()
+    )
+    events = [
+        {
+            "id": e.id,
+            "type": e.type,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in ev_rows
+    ]
+
+    return {
+        "machine_id": machine_id,
+        "range": range,
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "summary": stats,
+        "mold_breakdown": mold_breakdown,
+        "series": series,
+        "series_total": total,
+        "series_shown": len(series),
+        "series_truncated": total > len(series),
+        "events": events,
     }
 
 
