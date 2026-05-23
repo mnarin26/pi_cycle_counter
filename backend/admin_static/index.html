@@ -488,6 +488,21 @@
         await refreshSnapshot();
       }
 
+      function formatCameraStatus(status){
+        const s = String(status || '-');
+        const el = q('cameraStatus');
+        el.textContent = s;
+        el.className = s === 'ok' ? 'good' : (s === 'disabled' ? 'muted' : (s === 'connecting' ? 'warn' : 'bad'));
+      }
+
+      async function refreshCameraStatuses(){
+        try{
+          cameras = await jget('/api/cameras');
+          const c = camById(cameraSelect.value);
+          if(c) formatCameraStatus(c.status);
+        }catch(_e){ /* ignore poll errors */ }
+      }
+
       function onCameraChange(){
         const c = camById(cameraSelect.value);
         if(!c) return;
@@ -495,7 +510,7 @@
         q('camWidth').value = c.target_width;
         q('camFps').value = c.target_fps;
         q('camEnabled').value = String(c.enabled);
-        q('cameraStatus').textContent = c.status || '-';
+        formatCameraStatus(c.status);
       }
 
       function onMachineChange(){
@@ -782,6 +797,7 @@
 
       applyZoom();
       loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
+      setInterval(refreshCameraStatuses, 3000);
     </script>
   </body>
 </html>

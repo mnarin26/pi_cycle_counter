@@ -105,17 +105,16 @@ class VisionOrchestrator(threading.Thread):
         return w
 
     def _on_cam_status(self, camera_id: int, status: str) -> None:
-        if status != "ok":
-            try:
-                self.out_queue.put_nowait(
-                    {
-                        "type": "camera_event",
-                        "camera_id": camera_id,
-                        "status": status,
-                    }
-                )
-            except queue.Full:
-                pass
+        try:
+            self.out_queue.put_nowait(
+                {
+                    "type": "camera_event",
+                    "camera_id": camera_id,
+                    "status": status,
+                }
+            )
+        except queue.Full:
+            pass
 
     def run(self) -> None:
         db_session.get_engine()

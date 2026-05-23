@@ -34,9 +34,35 @@ class CameraUpdate(BaseModel):
     enabled: bool | None = None
 
 
+def _effective_camera_status(camera: Camera, orch) -> str:
+    """Prefer live worker + fresh frame over stale DB status."""
+    if not camera.enabled:
+        return "disabled"
+    if not (camera.rtsp_url or "").strip():
+        return "disconnected"
+    w = orch.workers.get(camera.id)
+    if w is None:
+        return "disconnected"
+    age_ms = w.latest_age_ms()
+    if age_ms >= 0 and age_ms < 10_000:
+        return "ok"
+    live = w.status or "disconnected"
+    if live == "ok" and age_ms < 0:
+        return "connecting"
+    return live
+
+
 @router.get("", response_model=list[CameraOut])
-def list_cameras(db: Session = Depends(get_db)):
-    return db.query(Camera).order_by(Camera.id).all()
+def list_cameras(request: Request, db: Session = Depends(get_db)):
+    rows = db.query(Camera).order_by(Camera.id).all()
+    orch = getattr(request.app.state, "vision", None)
+    if orch is None:
+        return rows
+    out: list[CameraOut] = []
+    for c in rows:
+        base = CameraOut.model_validate(c)
+        out.append(base.model_copy(update={"status": _effective_camera_status(c, orch)}))
+    return out
 
 
 @router.patch("/{camera_id}", response_model=CameraOut)
