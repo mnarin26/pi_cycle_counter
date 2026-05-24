@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.db.session import SessionLocal, init_db
+import app.db.session as db_session
 from app.db.models import Camera
 from app.services.reset_production import wipe_production_history
 from app.services import system_time
@@ -22,7 +22,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.on_event("startup")
 def _startup_init_db() -> None:
-    init_db()
+    db_session.init_db()
 
 
 @app.get("/api/system/time")
@@ -91,7 +91,7 @@ def set_wifi_ap_admin(body: SetWifiApBody):
 @app.post("/api/cameras/{camera_id}/sync-time")
 def sync_camera_time_admin(camera_id: int):
     """Push Pi wall clock to IP camera OSD (Hikvision / Dahua / XM-style CGI)."""
-    db = SessionLocal()
+    db = db_session.SessionLocal()
     try:
         cam = db.get(Camera, camera_id)
         if not cam:
@@ -115,7 +115,7 @@ def sync_camera_time_admin(camera_id: int):
 @app.post("/api/settings/maintenance/reset-production-data")
 def reset_production_data_admin():
     """Same DB wipe as main API, served on this port so the admin UI avoids cross-origin fetch."""
-    db = SessionLocal()
+    db = db_session.SessionLocal()
     try:
         stats = wipe_production_history(db)
         return {"ok": True, **stats}
