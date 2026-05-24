@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.db.models import Camera, Machine
+from app.services.mold_matcher import MAX_REPLAY_DAYS, replay_mold_history
+from app.services.mold_names import clear_orphan_cycle_mold_labels
+from app.services.time_windows import RangeKey, resolve_window
 
 router = APIRouter()
 
@@ -63,6 +69,27 @@ class MachineUpdate(BaseModel):
     current_mold_id: int | None = None
 
 
+class ReplayMoldBody(BaseModel):
+    range: RangeKey = "daily"
+    from_ts: datetime | None = Field(default=None, alias="from")
+    to_ts: datetime | None = Field(default=None, alias="to")
+    mode: Literal["missing_only", "reprocess"] = "missing_only"
+
+    class Config:
+        populate_by_name = True
+
+
+class ReplayMoldOut(BaseModel):
+    machine_id: int
+    mode: str
+    start: str
+    end: str
+    cycles_total: int
+    cycles_assigned: int
+    cycles_skipped_existing: int
+    events_created: int
+
+
 @router.get("", response_model=list[MachineOut])
 def list_machines(db: Session = Depends(get_db)):
     return db.query(Machine).order_by(Machine.id).all()
@@ -103,3 +130,28 @@ def set_roi(machine_id: int, roi: list[list[float]], db: Session = Depends(get_d
     m.roi_polygon = json.dumps(roi)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/{machine_id}/replay-mold-matching", response_model=ReplayMoldOut)
+def replay_mold_matching(
+    machine_id: int,
+    body: ReplayMoldBody,
+    db: Session = Depends(get_db),
+):
+    m = db.get(Machine, machine_id)
+    if not m:
+        raise HTTPException(404)
+    start, end = resolve_window(body.range, body.from_ts, body.to_ts)
+    span_days = (end - start).total_seconds() / 86400
+    if span_days > MAX_REPLAY_DAYS:
+        raise HTTPException(
+            400,
+            detail=f"En fazla {MAX_REPLAY_DAYS} günlük aralık işlenebilir (seçilen: {span_days:.1f} gün)",
+        )
+    try:
+        if clear_orphan_cycle_mold_labels(db, machine_id):
+            db.commit()
+        result = replay_mold_history(db, machine_id, start, end, body.mode)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e)) from e
+    return result

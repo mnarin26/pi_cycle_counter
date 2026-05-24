@@ -5,7 +5,9 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  ComposedChart,
   Legend,
+  Line,
   ResponsiveContainer,
   Scatter,
   ScatterChart,
@@ -13,14 +15,30 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { apiGet } from "../api/client";
+import { apiGet, apiPost } from "../api/client";
 import {
+  buildZigzagSeries,
+  buildZigzagLineSegments,
+  buildMoldColorMap,
+  moldColorFromMap,
   chartScrollWidth,
   eventColor,
   formatAxisTime,
-  moldColor,
+  parseApiTime,
+  zigzagXDomain,
+  ZIGZAG_RESOLUTION_LABELS,
+  ZIGZAG_RESOLUTION_MS,
+  type ZigzagResolution,
+  zigzagChartWidth,
+  zigzagTimelineMs,
+  findNearestZigzagCycle,
+  resolveZigzagHoverMs,
+  formatBucketLabel,
+  moldStackKey,
+  type ZigzagPoint,
 } from "../lib/chartTheme";
 import { useLiveSnapshot } from "../hooks/useLiveSnapshot";
+import { useZigzagViewport } from "../hooks/useZigzagViewport";
 
 type Machine = {
   id: number;
@@ -51,11 +69,26 @@ type EventRow = {
   created_at: string | null;
 };
 
+type TrendMoldSlice = { mold_name: string; count: number };
+
+type TrendBucket = {
+  bucket: string;
+  t_ms: number;
+  cycle_count: number;
+  avg_cycle_s: number;
+  min_cycle_s: number;
+  max_cycle_s: number;
+  by_mold: TrendMoldSlice[];
+};
+
 type DashboardPayload = {
   machine_id: number;
   range: string;
   from: string;
   to: string;
+  window_label?: string;
+  chart_mode: "cycles" | "buckets";
+  gap_threshold_s?: number;
   summary: {
     cycle_count: number;
     avg_cycle_s: number;
@@ -63,6 +96,14 @@ type DashboardPayload = {
     max_cycle_s: number;
     last_cycle_s: number;
   };
+  active_mold: {
+    mold_id: number;
+    mold_name: string;
+    cycle_count: number;
+    avg_cycle_s: number;
+    min_cycle_s: number;
+    max_cycle_s: number;
+  } | null;
   mold_breakdown: Array<{
     mold_id: number | null;
     mold_name: string;
@@ -70,22 +111,21 @@ type DashboardPayload = {
     share_pct: number;
     avg_cycle_s: number;
   }>;
+  trend_resolution: string;
+  trend_resolution_label: string;
+  trend_buckets: TrendBucket[];
+  trend_mold_names: string[];
   series: CyclePoint[];
   series_total: number;
-  series_shown: number;
-  series_truncated: boolean;
+  series_lazy?: boolean;
   events: EventRow[];
 };
 
 type RangeKey = "daily" | "weekly" | "monthly" | "yearly";
 
-type ChartCycle = {
-  t: string;
-  t_ms: number;
-  cycle_time_s: number;
-  mold: string;
-  mold_key: string;
-  mold_color: string;
+type TrendRow = TrendBucket & {
+  label: string;
+  [key: string]: string | number | TrendMoldSlice[];
 };
 
 type ChartEvent = {
@@ -96,20 +136,90 @@ type ChartEvent = {
   color: string;
 };
 
-function CycleTooltipContent({
+const ZIGZAG_SNAP_MAX_MS = 120_000; // 2 dk — daha uzaksa "bu saatte döngü yok"
+
+function ZigzagTooltipContent({
+  active,
+  label,
+  coordinate,
+  plotPoints,
+  xDomain,
+  chartWidth,
+  range,
+}: {
+  active?: boolean;
+  label?: string | number;
+  coordinate?: { x?: number; y?: number };
+  plotPoints: ZigzagPoint[];
+  xDomain?: [number, number];
+  chartWidth: number;
+  range: string;
+}) {
+  if (!active) return null;
+
+  const hoverMs = resolveZigzagHoverMs(label, coordinate, xDomain, chartWidth);
+  if (hoverMs == null) return null;
+
+  const hoverLabel = formatAxisTime(hoverMs, range);
+  const nearest = findNearestZigzagCycle(plotPoints, hoverMs);
+  const firstT = plotPoints[0]?.t_ms;
+  const lastT = plotPoints[plotPoints.length - 1]?.t_ms;
+  const outsideLoaded =
+    firstT != null &&
+    lastT != null &&
+    (hoverMs < firstT - ZIGZAG_SNAP_MAX_MS || hoverMs > lastT + ZIGZAG_SNAP_MAX_MS);
+
+  if (!nearest || nearest.deltaMs > ZIGZAG_SNAP_MAX_MS || outsideLoaded) {
+    return (
+      <div className="rounded border border-amber-700 bg-slate-900 px-3 py-2 text-xs text-amber-200">
+        <div className="font-medium text-slate-100">{hoverLabel}</div>
+        <div className="mt-1">Bu saatte döngü yok (mola / duruş)</div>
+      </div>
+    );
+  }
+
+  const d = nearest.point;
+  const cycleLabel = formatAxisTime(d.t_ms, range);
+  const snapNote =
+    nearest.deltaMs > 5000
+      ? `İmleç: ${hoverLabel} · en yakın döngü (+${Math.round(nearest.deltaMs / 1000)} sn)`
+      : null;
+
+  return (
+    <div className="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-xs shadow-lg">
+      <div className="font-medium text-slate-100">{cycleLabel}</div>
+      {snapNote && <div className="mt-0.5 text-slate-500">{snapNote}</div>}
+      <div className="mt-1 text-slate-300">Döngü: {d.cycle_time_s!.toFixed(2)} s</div>
+      <div className="text-slate-300">Kalıp: {d.mold}</div>
+    </div>
+  );
+}
+
+function BucketTooltipContent({
   active,
   payload,
 }: {
   active?: boolean;
-  payload?: Array<{ payload: ChartCycle }>;
+  payload?: Array<{ payload: TrendRow }>;
 }) {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
   return (
-    <div className="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-xs shadow-lg">
-      <div className="font-medium text-slate-100">{new Date(d.t).toLocaleString("tr-TR")}</div>
-      <div className="mt-1 text-slate-300">Döngü: {d.cycle_time_s.toFixed(2)} s</div>
-      <div className="text-slate-300">Kalıp: {d.mold}</div>
+    <div className="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-xs shadow-lg max-w-xs">
+      <div className="font-medium text-slate-100">{d.bucket}</div>
+      <div className="mt-1 text-slate-300">
+        Ort: {d.avg_cycle_s.toFixed(2)} s · Min–max: {d.min_cycle_s.toFixed(2)}–{d.max_cycle_s.toFixed(2)} s
+      </div>
+      <div className="text-slate-300">Döngü: {d.cycle_count.toLocaleString("tr-TR")}</div>
+      {d.by_mold?.length > 0 && (
+        <ul className="mt-2 space-y-0.5 border-t border-slate-700 pt-1">
+          {d.by_mold.map((m) => (
+            <li key={m.mold_name} className="text-slate-400">
+              {m.mold_name}: {m.count.toLocaleString("tr-TR")}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -134,25 +244,55 @@ function EventTooltipContent({
 }
 
 function ChartLegend({
-  moldKeys,
+  molds,
   eventTypes,
+  zigzag = false,
 }: {
-  moldKeys: string[];
+  molds: { name: string; color: string }[];
   eventTypes: string[];
+  zigzag?: boolean;
 }) {
   return (
     <div className="mt-3 flex flex-wrap gap-4 text-xs">
-      {moldKeys.length > 0 && (
+      <div>
+        <div className="mb-1 font-semibold text-slate-400">Grafik</div>
+        <div className="flex flex-wrap gap-3 text-slate-300">
+          {zigzag ? (
+            <>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-0.5 w-4 bg-sky-400" />
+                Döngü süresi (renk = kalıp)
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-0.5 w-4 border-t border-dashed border-amber-400" />
+                Duruş boşluğu (çizgi kopuk)
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-0.5 w-4 bg-sky-400" />
+                Ort. döngü süresi (çizgi)
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-3 w-3 rounded-sm bg-slate-500/50" />
+                Döngü adedi (yığılmış çubuk)
+              </span>
+            </>
+          )}
+        </div>
+      </div>
+      {molds.length > 0 && (
         <div>
           <div className="mb-1 font-semibold text-slate-400">Kalıplar</div>
           <div className="flex flex-wrap gap-2">
-            {moldKeys.map((k, i) => (
-              <span key={k} className="inline-flex items-center gap-1">
+            {molds.map((m) => (
+              <span key={m.name} className="inline-flex items-center gap-1">
                 <span
-                  className="inline-block h-2.5 w-2.5 rounded-full"
-                  style={{ background: moldColor(k, i) }}
+                  className="inline-block h-2.5 w-2.5 rounded-sm"
+                  style={{ background: m.color }}
                 />
-                <span className="text-slate-300">{k}</span>
+                <span className="text-slate-300">{m.name}</span>
               </span>
             ))}
           </div>
@@ -187,10 +327,16 @@ export function MachineDetailPage() {
   const [range, setRange] = useState<RangeKey>("daily");
   const [fromInput, setFromInput] = useState("");
   const [toInput, setToInput] = useState("");
+  const [replayMode, setReplayMode] = useState<"missing_only" | "reprocess">("missing_only");
+  const [replayBusy, setReplayBusy] = useState(false);
+  const [replayMsg, setReplayMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [zigzagResolution, setZigzagResolution] = useState<ZigzagResolution>("6h");
   const lastLiveEmitRef = useRef<number>(-1);
+  const liveDashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadGenRef = useRef(0);
+  const machineLoadedRef = useRef(0);
 
   const snapMachine = useMemo(
     () => snapshot.machines.find((m) => m.id === machineId) ?? null,
@@ -201,6 +347,7 @@ export function MachineDetailPage() {
     const p = new URLSearchParams({
       machine_id: String(machineId),
       range,
+      lazy_series: "true",
     });
     if (fromInput) p.set("from", new Date(fromInput).toISOString());
     if (toInput) p.set("to", new Date(toInput).toISOString());
@@ -209,9 +356,11 @@ export function MachineDetailPage() {
 
   useEffect(() => {
     if (!machineId) return;
-    apiGet<Machine>(`/api/machines/${machineId}`)
-      .then(setMachine)
-      .catch((e) => setErr(String(e)));
+    if (machineLoadedRef.current !== machineId) {
+      machineLoadedRef.current = machineId;
+      setMachine(null);
+      setDash(null);
+    }
   }, [machineId]);
 
   const loadDash = useCallback(async () => {
@@ -219,18 +368,52 @@ export function MachineDetailPage() {
     const gen = ++loadGenRef.current;
     setLoading(true);
     try {
-      const data = await apiGet<DashboardPayload>(
-        `/api/analytics/machine_dashboard?${buildWindowQuery()}&series_limit=4000&events_limit=500`,
-      );
+      const eventsCap =
+        range === "yearly" ? 60 : range === "monthly" ? 80 : range === "weekly" ? 120 : 100;
+      const dashPath = `/api/analytics/machine_dashboard?${buildWindowQuery()}&events_limit=${eventsCap}`;
+      const [machineData, dashData] = await Promise.all([
+        apiGet<Machine>(`/api/machines/${machineId}`),
+        apiGet<DashboardPayload>(dashPath),
+      ]);
       if (gen !== loadGenRef.current) return;
-      setDash(data);
+      setMachine(machineData);
+      setDash(dashData);
       setErr(null);
     } catch (e) {
       if (gen === loadGenRef.current) setErr(String(e));
     } finally {
       if (gen === loadGenRef.current) setLoading(false);
     }
-  }, [machineId, buildWindowQuery]);
+  }, [machineId, buildWindowQuery, range]);
+
+  const runReplay = useCallback(async () => {
+    if (!machineId) return;
+    setReplayBusy(true);
+    setReplayMsg(null);
+    try {
+      const body: Record<string, unknown> = { range, mode: replayMode };
+      if (fromInput) body.from = new Date(fromInput).toISOString();
+      if (toInput) body.to = new Date(toInput).toISOString();
+      const res = await apiPost<{
+        cycles_total: number;
+        cycles_assigned: number;
+        cycles_skipped_existing: number;
+        events_created: number;
+      }>(`/api/machines/${machineId}/replay-mold-matching`, body);
+      setReplayMsg(
+        `${res.cycles_total} döngü tarandı · ${res.cycles_assigned} kalıp atandı` +
+          (res.cycles_skipped_existing
+            ? ` · ${res.cycles_skipped_existing} zaten kayıtlıydı (atlanıldı)`
+            : "") +
+          (res.events_created ? ` · ${res.events_created} olay` : ""),
+      );
+      await loadDash();
+    } catch (e) {
+      setReplayMsg(String(e));
+    } finally {
+      setReplayBusy(false);
+    }
+  }, [machineId, range, replayMode, fromInput, toInput, loadDash]);
 
   useEffect(() => {
     loadDash();
@@ -245,30 +428,98 @@ export function MachineDetailPage() {
     }
     if (liveEmitCount > lastLiveEmitRef.current) {
       lastLiveEmitRef.current = liveEmitCount;
-      loadDash();
+      if (liveDashTimerRef.current) clearTimeout(liveDashTimerRef.current);
+      liveDashTimerRef.current = setTimeout(() => {
+        liveDashTimerRef.current = null;
+        loadDash();
+      }, 5000);
     }
+    return () => {
+      if (liveDashTimerRef.current) {
+        clearTimeout(liveDashTimerRef.current);
+        liveDashTimerRef.current = null;
+      }
+    };
   }, [snapMachine?.dbg_cycle_emit_count, loadDash]);
 
-  const moldColorMap = useMemo(() => {
-    const keys = [...new Set((dash?.series ?? []).map((s) => s.mold || "—"))];
-    const map = new Map<string, string>();
-    keys.forEach((k, i) => map.set(k, moldColor(k, i)));
-    return map;
-  }, [dash?.series]);
+  const chartMode = dash?.chart_mode ?? "cycles";
+  const seriesLazy = chartMode === "cycles" && (dash?.series_lazy ?? true);
+  const trendMoldNames = dash?.trend_mold_names ?? [];
+  const gapMs = (dash?.gap_threshold_s ?? 1200) * 1000;
+  const totalCycles = dash?.series_total ?? dash?.summary?.cycle_count ?? 0;
+  const filterFromMs = fromInput ? parseApiTime(new Date(fromInput).toISOString()) : NaN;
+  const filterToMs = toInput ? parseApiTime(new Date(toInput).toISOString()) : NaN;
+  const zigzagVisibleMs = ZIGZAG_RESOLUTION_MS[zigzagResolution];
 
-  const cycleChartData = useMemo((): ChartCycle[] => {
-    return (dash?.series ?? []).map((x) => {
-      const mold = x.mold || "—";
-      return {
-        t: x.t,
-        t_ms: new Date(x.t).getTime(),
-        cycle_time_s: Number(x.cycle_time_s.toFixed(3)),
-        mold,
-        mold_key: mold,
-        mold_color: moldColorMap.get(mold) ?? moldColor(mold, 0),
-      };
+  const viewport = useZigzagViewport({
+    machineId,
+    range,
+    windowFrom: dash?.from,
+    windowTo: dash?.to,
+    visibleSpanMs: zigzagVisibleMs,
+    enabled: seriesLazy && !!dash,
+  });
+
+  const zigzagSource = useMemo(() => {
+    const raw = seriesLazy ? viewport.mergedSeries : (dash?.series ?? []);
+    const lo = Number.isFinite(filterFromMs) ? filterFromMs : viewport.windowFromMs;
+    const hi = Number.isFinite(filterToMs) ? filterToMs : viewport.windowToMs;
+    return raw.filter((p) => {
+      const t = parseApiTime(p.t);
+      return t >= lo && t <= hi;
     });
-  }, [dash?.series, moldColorMap]);
+  }, [
+    seriesLazy,
+    viewport.mergedSeries,
+    viewport.windowFromMs,
+    viewport.windowToMs,
+    dash?.series,
+    filterFromMs,
+    filterToMs,
+  ]);
+
+  const moldColorMap = useMemo(() => {
+    const names: string[] = [];
+    for (const m of dash?.mold_breakdown ?? []) names.push(m.mold_name);
+    for (const p of zigzagSource) names.push(p.mold || "—");
+    for (const n of trendMoldNames) names.push(n);
+    return buildMoldColorMap(names);
+  }, [dash?.mold_breakdown, zigzagSource, trendMoldNames]);
+
+  const moldLegend = useMemo(
+    () => [...moldColorMap.entries()].map(([name, color]) => ({ name, color })),
+    [moldColorMap],
+  );
+
+  const zigzagData = useMemo(() => {
+    if (chartMode !== "cycles") return [];
+    return buildZigzagSeries(zigzagSource, gapMs, moldColorMap);
+  }, [chartMode, zigzagSource, gapMs, moldColorMap]);
+
+  const zigzagLineSegments = useMemo(
+    () => (chartMode === "cycles" ? buildZigzagLineSegments(zigzagData) : []),
+    [chartMode, zigzagData],
+  );
+
+  const zigzagPlotPoints = useMemo(
+    () => zigzagData.filter((p) => p.cycle_time_s != null && !p.is_gap),
+    [zigzagData],
+  );
+
+  const trendChartData = useMemo((): TrendRow[] => {
+    if (chartMode !== "buckets") return [];
+    const res = dash?.trend_resolution ?? "hour";
+    return (dash?.trend_buckets ?? []).map((b) => {
+      const row: TrendRow = {
+        ...b,
+        label: formatBucketLabel(b.bucket, res),
+      };
+      for (const m of b.by_mold) {
+        row[moldStackKey(m.mold_name)] = m.count;
+      }
+      return row;
+    });
+  }, [chartMode, dash?.trend_buckets, dash?.trend_resolution]);
 
   const eventChartData = useMemo((): ChartEvent[] => {
     return (dash?.events ?? [])
@@ -276,38 +527,69 @@ export function MachineDetailPage() {
       .map((e) => ({
         id: e.id,
         type: e.type,
-        t_ms: new Date(e.created_at!).getTime(),
+        t_ms: parseApiTime(e.created_at!),
         y: 1,
         color: eventColor(e.type),
       }));
   }, [dash?.events]);
 
   const moldBarData = useMemo(() => {
-    return (dash?.mold_breakdown ?? []).map((m, i) => ({
+    return (dash?.mold_breakdown ?? []).map((m) => ({
       ...m,
-      fill: moldColor(m.mold_name, i),
+      fill: moldColorFromMap(moldColorMap, m.mold_name),
     }));
-  }, [dash?.mold_breakdown]);
+  }, [dash?.mold_breakdown, moldColorMap]);
 
-  const chartWidth = chartScrollWidth(cycleChartData.length);
-  const moldLegendKeys = [...moldColorMap.keys()];
+  const chartPointCount =
+    chartMode === "cycles" ? zigzagData.length : trendChartData.length;
+  const chartWidth = useMemo(() => {
+    if (chartMode !== "cycles") {
+      return chartScrollWidth(chartPointCount, 44);
+    }
+    if (seriesLazy) return viewport.chartWidth;
+    const lo = Number.isFinite(filterFromMs) ? filterFromMs : viewport.windowFromMs;
+    const hi = Number.isFinite(filterToMs) ? filterToMs : viewport.windowToMs;
+    const timeline = zigzagTimelineMs(range, lo, hi);
+    return zigzagChartWidth(timeline, zigzagVisibleMs, 960);
+  }, [
+    chartMode,
+    seriesLazy,
+    viewport.chartWidth,
+    chartPointCount,
+    range,
+    zigzagVisibleMs,
+    filterFromMs,
+    filterToMs,
+    viewport.windowFromMs,
+    viewport.windowToMs,
+  ]);
   const eventLegendTypes = [...new Set(eventChartData.map((e) => e.type))];
 
   const xDomain = useMemo((): [number, number] | undefined => {
+    if (chartMode === "cycles" && viewport.windowToMs > viewport.windowFromMs) {
+      const lo = Number.isFinite(filterFromMs) ? filterFromMs : viewport.windowFromMs;
+      const hi = Number.isFinite(filterToMs) ? filterToMs : viewport.windowToMs;
+      return zigzagXDomain(range, lo, hi);
+    }
     const all = [
-      ...cycleChartData.map((c) => c.t_ms),
+      ...(chartMode === "cycles"
+        ? zigzagData.map((c) => c.t_ms)
+        : trendChartData.map((c) => c.t_ms)),
       ...eventChartData.map((e) => e.t_ms),
     ];
     if (!all.length) return undefined;
     const pad = Math.max(60_000, (Math.max(...all) - Math.min(...all)) * 0.02);
     return [Math.min(...all) - pad, Math.max(...all) + pad];
-  }, [cycleChartData, eventChartData]);
+  }, [chartMode, range, viewport, filterFromMs, filterToMs, zigzagData, trendChartData, eventChartData]);
 
   if (!machineId) {
     return <p className="text-alarm">Geçersiz makine id</p>;
   }
 
   const summary = dash?.summary;
+  const activeMold = dash?.active_mold ?? null;
+  // Prefer active-mold stats for avg/min/max; fall back to global summary
+  const moldStats = activeMold ?? summary;
 
   return (
     <div className="space-y-4">
@@ -318,13 +600,16 @@ export function MachineDetailPage() {
           </h2>
           <p className="text-sm text-slate-400">Sayım doğrulama ekranı</p>
         </div>
-        <Link to="/" className="rounded bg-slate-700 px-3 py-2 text-sm">
-          Panoya dön
-        </Link>
+        <div className="flex items-center gap-3">
+          {loading && dash && <span className="text-xs text-sky-300">Güncelleniyor…</span>}
+          <Link to="/" className="rounded bg-slate-700 px-3 py-2 text-sm">
+            Panoya dön
+          </Link>
+        </div>
       </div>
 
       {err && <p className="text-alarm text-sm">{err}</p>}
-      {loading && <p className="text-sm text-slate-400">Grafikler yükleniyor…</p>}
+      {loading && !dash && <p className="text-sm text-slate-400">Veriler yükleniyor…</p>}
 
       <div className="rounded border border-slate-700 bg-panel2 p-3">
         <div className="flex flex-wrap items-end gap-3">
@@ -359,22 +644,63 @@ export function MachineDetailPage() {
               onChange={(e) => setToInput(e.target.value)}
             />
           </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs text-slate-400">Geçmiş işleme</span>
+            <select
+              className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
+              value={replayMode}
+              onChange={(e) => setReplayMode(e.target.value as "missing_only" | "reprocess")}
+              disabled={replayBusy}
+            >
+              <option value="missing_only">Sadece boş olanlar</option>
+              <option value="reprocess">Aralığı yeniden işle</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            className="rounded bg-amber-700 px-3 py-2 text-sm font-medium disabled:opacity-50"
+            disabled={replayBusy || loading}
+            onClick={() => void runReplay()}
+          >
+            {replayBusy ? "İşleniyor…" : "Kalıp eşleştirmesini çalıştır"}
+          </button>
         </div>
+        <p className="mt-2 text-xs text-slate-500">
+          Yukarıdaki aralık kullanılır (günlük ≈ bugün, haftalık ≈ bu hafta). En fazla 7 gün.
+          <strong className="font-normal text-slate-400"> Sadece boş olanlar:</strong> daha önce
+          kayıtlı kalıplara dokunulmaz.
+          <strong className="font-normal text-slate-400"> Yeniden işle:</strong> seçili aralıktaki
+          atamalar silinip matcher baştan çalışır.
+        </p>
+        {replayMsg && <p className="mt-1 text-xs text-amber-200">{replayMsg}</p>}
       </div>
 
-      <div className="grid gap-3 md:grid-cols-5">
+      <div className="grid gap-3 md:grid-cols-6">
         <div className="rounded border border-slate-700 bg-panel2 p-3">
           <div className="text-xs text-slate-400">Canlı Durum</div>
           <div className="text-lg font-semibold">{snapMachine?.state || "—"}</div>
         </div>
         <div className="rounded border border-slate-700 bg-panel2 p-3">
-          <div className="text-xs text-slate-400">Döngü Adedi</div>
+          <div className="text-xs text-slate-400">Toplam Döngü</div>
           <div className="text-lg font-semibold">{summary?.cycle_count ?? 0}</div>
         </div>
+        <div className="rounded border border-slate-700 bg-panel2 p-3 md:col-span-2">
+          <div className="text-xs text-slate-400">
+            Aktif Kalıp
+            {activeMold && (
+              <span className="ml-1 text-slate-500">· {activeMold.cycle_count} döngü</span>
+            )}
+          </div>
+          <div className="truncate text-lg font-semibold text-amber-300">
+            {activeMold?.mold_name ?? (dash && !loading ? "—" : snapMachine?.mold_name ?? "—")}
+          </div>
+        </div>
         <div className="rounded border border-slate-700 bg-panel2 p-3">
-          <div className="text-xs text-slate-400">Ort. Döngü</div>
+          <div className="text-xs text-slate-400">
+            Ort. Döngü{activeMold ? " (kalıp)" : ""}
+          </div>
           <div className="text-lg font-semibold">
-            {summary ? `${summary.avg_cycle_s.toFixed(2)}s` : "—"}
+            {moldStats ? `${moldStats.avg_cycle_s.toFixed(2)}s` : "—"}
           </div>
         </div>
         <div className="rounded border border-slate-700 bg-panel2 p-3">
@@ -383,52 +709,170 @@ export function MachineDetailPage() {
             {summary ? `${summary.last_cycle_s.toFixed(2)}s` : "—"}
           </div>
         </div>
-        <div className="rounded border border-slate-700 bg-panel2 p-3">
-          <div className="text-xs text-slate-400">Min/Max Döngü</div>
-          <div className="text-lg font-semibold">
-            {summary
-              ? `${summary.min_cycle_s.toFixed(2)} / ${summary.max_cycle_s.toFixed(2)}s`
-              : "—"}
-          </div>
-        </div>
       </div>
+      {moldStats && summary && moldStats !== summary && (
+        <div className="rounded border border-slate-700 bg-panel2 px-3 py-2 text-sm text-slate-400">
+          Aktif kalıp min/max: {moldStats.min_cycle_s.toFixed(2)} s – {moldStats.max_cycle_s.toFixed(2)} s
+          <span className="ml-3 text-slate-500">
+            (tüm kalıplar: {summary.min_cycle_s.toFixed(2)} – {summary.max_cycle_s.toFixed(2)} s)
+          </span>
+        </div>
+      )}
 
       <div className="rounded border border-slate-700 bg-panel2 p-3">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-semibold">Çalışma Analizi (Döngü Trendi)</h3>
-          {dash?.series_truncated && (
-            <span className="text-xs text-amber-300">
-              Grafikte {dash.series_shown.toLocaleString("tr-TR")} /{" "}
-              {dash.series_total.toLocaleString("tr-TR")} döngü — yatay kaydır
-            </span>
-          )}
+          <div className="flex flex-wrap items-end gap-3">
+            {chartMode === "cycles" && (
+              <label className="text-xs text-slate-400">
+                <span className="mb-1 block">Ekran çözünürlüğü</span>
+                <select
+                  className="rounded border border-slate-600 bg-slate-900 px-2 py-1.5 text-sm text-slate-100"
+                  value={zigzagResolution}
+                  onChange={(e) => setZigzagResolution(e.target.value as ZigzagResolution)}
+                >
+                  {(Object.keys(ZIGZAG_RESOLUTION_MS) as ZigzagResolution[]).map((k) => (
+                    <option key={k} value={k}>
+                      {ZIGZAG_RESOLUTION_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <div className="text-right text-xs text-slate-400">
+              {dash?.window_label && <div>{dash.window_label}</div>}
+              {dash?.trend_resolution_label && <div>{dash.trend_resolution_label}</div>}
+            </div>
+          </div>
         </div>
+        {seriesLazy && totalCycles > 0 && (
+          <p className="mb-2 text-xs text-slate-400">
+            Yatay kaydır: görünen zaman dilimi yüklenir —{" "}
+            <span className="text-amber-200">
+              {viewport.mergedSeries.length.toLocaleString("tr-TR")} /{" "}
+              {totalCycles.toLocaleString("tr-TR")} döngü
+            </span>
+            {viewport.loadingViewport && (
+              <span className="ml-2 text-sky-300">bölüm yükleniyor…</span>
+            )}
+          </p>
+        )}
+        {!seriesLazy && dash?.series_truncated && (
+          <p className="mb-2 text-xs text-amber-300">
+            Gösterilen: {dash.series_shown.toLocaleString("tr-TR")} /{" "}
+            {dash.series_total.toLocaleString("tr-TR")} döngü (yoğunluk için seyreltildi)
+          </p>
+        )}
         <p className="mb-2 text-xs text-slate-500">
-          X ekseni: tarih/saat. Nokta rengi = kalıp. Üzerine gelince tam zaman görünür.
+          {chartMode === "cycles"
+            ? seriesLazy
+              ? "Sabit zaman ekseni; çözünürlük = bir ekranda görünen süre. Boşluklar gerçek mola/duruş."
+              : "Günlük / haftalık: sabit zaman ekseni; uzun boşlukta çizgi kopar (mola / duruş)."
+            : "Aylık / yıllık özet: mavi çizgi ortalama süre, renkli çubuklar kalıp adedi."}
         </p>
-        <div className="overflow-x-auto rounded border border-slate-800">
-          <div style={{ width: chartWidth, minWidth: "100%", height: 280 }}>
-            <ScatterChart width={chartWidth} height={280} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis
-                type="number"
-                dataKey="t_ms"
-                domain={xDomain}
-                tick={{ fill: "#94a3b8", fontSize: 10 }}
-                tickFormatter={(ms) => formatAxisTime(ms, range)}
-              />
-              <YAxis
-                dataKey="cycle_time_s"
-                tick={{ fill: "#94a3b8", fontSize: 10 }}
-                label={{ value: "s", angle: 0, position: "insideLeft", fill: "#94a3b8" }}
-              />
-              <Tooltip content={<CycleTooltipContent />} />
-              <Scatter data={cycleChartData} isAnimationActive={false}>
-                {cycleChartData.map((entry, i) => (
-                  <Cell key={`${entry.t_ms}-${i}`} fill={entry.mold_color} />
+        <div
+          ref={seriesLazy ? viewport.scrollRef : undefined}
+          className="overflow-x-auto rounded border border-slate-800"
+        >
+          <div style={{ width: chartWidth, minWidth: "100%", height: 300 }}>
+            {chartMode === "cycles" ? (
+              <ComposedChart
+                width={chartWidth}
+                height={300}
+                data={[]}
+                margin={{ top: 8, right: 16, bottom: 24, left: 8 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis
+                  type="number"
+                  dataKey="t_ms"
+                  domain={xDomain}
+                  tick={{ fill: "#94a3b8", fontSize: 10 }}
+                  tickFormatter={(ms) => formatAxisTime(ms, range)}
+                />
+                <YAxis
+                  tick={{ fill: "#94a3b8", fontSize: 10 }}
+                  label={{ value: "s", angle: 0, position: "insideLeft", fill: "#94a3b8" }}
+                />
+                <Tooltip
+                  content={
+                    <ZigzagTooltipContent
+                      plotPoints={zigzagPlotPoints}
+                      xDomain={xDomain}
+                      chartWidth={chartWidth}
+                      range={range}
+                    />
+                  }
+                  cursor={{ stroke: "#94a3b8", strokeWidth: 1, strokeDasharray: "4 4" }}
+                  isAnimationActive={false}
+                  shared={false}
+                  filterNull={false}
+                />
+                {zigzagLineSegments.map((seg, i) => (
+                  <Line
+                    key={`${seg.mold}-${i}`}
+                    type="linear"
+                    data={seg.points}
+                    dataKey="cycle_time_s"
+                    stroke={seg.color}
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={false}
+                    connectNulls={false}
+                    isAnimationActive={false}
+                    tooltipType="none"
+                  />
                 ))}
-              </Scatter>
-            </ScatterChart>
+              </ComposedChart>
+            ) : (
+              <ComposedChart
+                width={chartWidth}
+                height={300}
+                data={trendChartData}
+                margin={{ top: 8, right: 48, bottom: 24, left: 8 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis
+                  dataKey="label"
+                  tick={{ fill: "#94a3b8", fontSize: 10 }}
+                  interval="preserveStartEnd"
+                  angle={trendChartData.length > 14 ? -35 : 0}
+                  textAnchor={trendChartData.length > 14 ? "end" : "middle"}
+                  height={trendChartData.length > 14 ? 52 : 28}
+                />
+                <YAxis
+                  yAxisId="left"
+                  tick={{ fill: "#94a3b8", fontSize: 10 }}
+                  label={{ value: "s", angle: 0, position: "insideLeft", fill: "#94a3b8" }}
+                />
+                <YAxis
+                  yAxisId="right"
+                  orientation="right"
+                  tick={{ fill: "#64748b", fontSize: 10 }}
+                  label={{ value: "adet", angle: 0, position: "insideRight", fill: "#64748b" }}
+                />
+                <Tooltip content={<BucketTooltipContent />} />
+                {trendMoldNames.map((name) => (
+                  <Bar
+                    key={name}
+                    yAxisId="right"
+                    dataKey={moldStackKey(name)}
+                    stackId="volume"
+                    fill={moldColorFromMap(moldColorMap, name)}
+                    isAnimationActive={false}
+                  />
+                ))}
+                <Line
+                  yAxisId="left"
+                  type="monotone"
+                  dataKey="avg_cycle_s"
+                  stroke="#38bdf8"
+                  strokeWidth={2}
+                  dot={trendChartData.length <= 31}
+                  isAnimationActive={false}
+                />
+              </ComposedChart>
+            )}
           </div>
         </div>
 
@@ -436,12 +880,7 @@ export function MachineDetailPage() {
         <div className="overflow-x-auto rounded border border-slate-800">
           <div style={{ width: chartWidth, minWidth: "100%", height: 72 }}>
             <ScatterChart width={chartWidth} height={72} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
-              <XAxis
-                type="number"
-                dataKey="t_ms"
-                domain={xDomain}
-                hide
-              />
+              <XAxis type="number" dataKey="t_ms" domain={xDomain} hide />
               <YAxis dataKey="y" domain={[0, 2]} hide />
               <Tooltip content={<EventTooltipContent />} />
               <Scatter data={eventChartData} isAnimationActive={false}>
@@ -453,7 +892,11 @@ export function MachineDetailPage() {
           </div>
         </div>
 
-        <ChartLegend moldKeys={moldLegendKeys} eventTypes={eventLegendTypes} />
+        <ChartLegend
+          molds={moldLegend}
+          eventTypes={eventLegendTypes}
+          zigzag={chartMode === "cycles"}
+        />
       </div>
 
       <div className="rounded border border-slate-700 bg-panel2 p-3">
@@ -462,7 +905,14 @@ export function MachineDetailPage() {
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={moldBarData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="mold_name" tick={{ fill: "#94a3b8", fontSize: 10 }} interval={0} angle={-12} textAnchor="end" height={56} />
+              <XAxis
+                dataKey="mold_name"
+                tick={{ fill: "#94a3b8", fontSize: 10 }}
+                interval={0}
+                angle={-12}
+                textAnchor="end"
+                height={56}
+              />
               <YAxis tick={{ fill: "#94a3b8", fontSize: 10 }} />
               <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155" }} />
               <Bar dataKey="cycle_count" name="Adet">
@@ -556,7 +1006,11 @@ export function MachineDetailPage() {
             <tbody>
               {(dash?.series ?? []).slice(-20).map((x, i) => (
                 <tr key={`${x.t}-${i}`} className="border-t border-slate-800">
-                  <td className="py-1 pr-3">{new Date(x.t).toLocaleString("tr-TR")}</td>
+                  <td className="py-1 pr-3">
+                    {new Date(parseApiTime(x.t)).toLocaleString("tr-TR", {
+                      timeZone: "Europe/Istanbul",
+                    })}
+                  </td>
                   <td className="py-1 pr-3">{x.cycle_time_s.toFixed(2)}</td>
                   <td className="py-1 pr-3">{x.mold || "—"}</td>
                 </tr>

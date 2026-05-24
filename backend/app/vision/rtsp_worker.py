@@ -35,6 +35,7 @@ class RtspWorker(threading.Thread):
         camera_id: int,
         rtsp_url: str,
         target_width: int = 640,
+        target_fps: int = 8,
         frame_skip: int = 2,
         on_status: Callable[[str], None] | None = None,
         daemon: bool = True,
@@ -42,7 +43,8 @@ class RtspWorker(threading.Thread):
         super().__init__(daemon=daemon)
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url.strip()
-        self.target_width = target_width
+        self.target_width = max(160, int(target_width or 640))
+        self.target_fps = max(1, min(30, int(target_fps or 8)))
         self.frame_skip = max(1, frame_skip)
         self.on_status = on_status
         self._stop = threading.Event()
@@ -111,6 +113,7 @@ class RtspWorker(threading.Thread):
 
             consecutive_fail = 0
             while not self._stop.is_set():
+                loop_start = time.monotonic()
                 ok = cap.grab()
                 if not ok:
                     consecutive_fail += 1
@@ -149,6 +152,12 @@ class RtspWorker(threading.Thread):
                 if dt > 1e-6:
                     inst_fps = 1.0 / dt
                     self._fps_ema = self._fps_ema * 0.85 + inst_fps * 0.15
+
+                # target_fps caps how often we process frames on the Pi (not the camera encoder rate)
+                want_dt = 1.0 / float(self.target_fps)
+                spent = time.monotonic() - loop_start
+                if spent < want_dt:
+                    time.sleep(want_dt - spent)
 
             try:
                 cap.release()

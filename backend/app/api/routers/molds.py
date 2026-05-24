@@ -1,30 +1,24 @@
 from __future__ import annotations
 
-import json
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.db.models import Event, Cycle, Machine, Mold, MoldMachine
+from app.db.models import Cycle, Machine, Mold, MoldMachine
+from app.services.mold_names import (
+    backfill_mold_name_snapshots,
+    clear_mold_name_snapshots,
+    clear_orphan_cycle_mold_labels,
+)
+from app.services.time_windows import resolve_window
 
 router = APIRouter()
-
-
-def _range_start(range_: str) -> datetime:
-    now = datetime.now(timezone.utc)
-    if range_ == "daily":
-        return now - timedelta(days=1)
-    if range_ == "weekly":
-        return now - timedelta(days=7)
-    if range_ == "monthly":
-        return now - timedelta(days=31)
-    if range_ == "yearly":
-        return now - timedelta(days=365)
-    return now - timedelta(days=31)
 
 
 class MoldOut(BaseModel):
@@ -33,6 +27,7 @@ class MoldOut(BaseModel):
     status: str
     avg_cycle_s: float
     tolerance_s: float
+    stdev_limit_s: float | None = None
     sample_count: int
     confidence: float
 
@@ -42,6 +37,14 @@ class MoldOut(BaseModel):
 
 class NameBody(BaseModel):
     name: str
+
+
+class MoldUpdate(BaseModel):
+    name: str | None = None
+    status: Literal["candidate", "active", "ignored"] | None = None
+    avg_cycle_s: float | None = Field(default=None, gt=0)
+    tolerance_s: float | None = Field(default=None, gt=0)
+    stdev_limit_s: float | None = Field(default=None, gt=0)
 
 
 class ConfirmMatchBody(BaseModel):
@@ -62,42 +65,49 @@ def mold_usage(
     from_ts: datetime | None = Query(None, alias="from"),
     to_ts: datetime | None = Query(None, alias="to"),
 ):
-    start = from_ts or _range_start(range)
-    end = to_ts or datetime.now(timezone.utc)
-    if end <= start:
-        end = start + timedelta(seconds=1)
+    start, end = resolve_window(range, from_ts, to_ts)  # type: ignore[arg-type]
 
-    machine_names = {m.id: m.name for m in db.query(Machine).all()}
+    machine_names = {m.id: m.name for m in db.query(Machine.id, Machine.name).all()}
     molds = {m.id: m for m in db.query(Mold).all()}
-    rows = (
-        db.query(Cycle)
+
+    agg_rows = (
+        db.query(
+            Cycle.mold_id,
+            Cycle.machine_id,
+            func.count(Cycle.id),
+            func.avg(Cycle.cycle_time_s),
+        )
         .filter(
             Cycle.t_end >= start,
             Cycle.t_end <= end,
             Cycle.mold_id.is_not(None),
             Cycle.is_counted.is_(True),
         )
+        .group_by(Cycle.mold_id, Cycle.machine_id)
         .all()
     )
-    grouped: dict[int, dict] = defaultdict(lambda: {"total": 0, "machines": defaultdict(int), "times": []})
-    for c in rows:
-        if c.mold_id is None:
+
+    grouped: dict[int, dict] = defaultdict(lambda: {"total": 0, "machines": {}, "time_sum": 0.0})
+    for mold_id, machine_id, cnt, avg_s in agg_rows:
+        if mold_id is None:
             continue
-        grouped[c.mold_id]["total"] += 1
-        grouped[c.mold_id]["machines"][c.machine_id] += 1
-        grouped[c.mold_id]["times"].append(float(c.cycle_time_s))
+        c = int(cnt)
+        grouped[mold_id]["total"] += c
+        grouped[mold_id]["machines"][int(machine_id)] = c
+        grouped[mold_id]["time_sum"] += float(avg_s or 0) * c
 
     out = []
     for mold_id, agg in sorted(grouped.items(), key=lambda kv: kv[1]["total"], reverse=True):
         mold = molds.get(mold_id)
-        times = agg["times"]
+        total = agg["total"]
+        avg_cycle = agg["time_sum"] / total if total else 0.0
         out.append(
             {
                 "mold_id": mold_id,
                 "mold_name": (mold.name if mold else None) or "İsimsiz kalıp",
                 "status": mold.status if mold else "unknown",
-                "total_cycles": agg["total"],
-                "avg_cycle_s": round(sum(times) / len(times), 3) if times else 0.0,
+                "total_cycles": total,
+                "avg_cycle_s": round(avg_cycle, 3),
                 "machines": [
                     {
                         "machine_id": mid,
@@ -116,6 +126,50 @@ def mold_usage(
     }
 
 
+@router.patch("/{mold_id}", response_model=MoldOut)
+def update_mold(mold_id: int, body: MoldUpdate, db: Session = Depends(get_db)):
+    m = db.get(Mold, mold_id)
+    if not m:
+        raise HTTPException(404)
+    data = body.model_dump(exclude_unset=True)
+    if "stdev_limit_s" in data and data["stdev_limit_s"] is None:
+        data["stdev_limit_s"] = None
+    if "name" in data:
+        name = (data["name"] or "").strip()
+        data["name"] = name or None
+        if name and data.get("status") is None and m.status == "candidate":
+            m.status = "active"
+    for k, v in data.items():
+        setattr(m, k, v)
+    if m.name:
+        backfill_mold_name_snapshots(db, mold_id, m.name)
+    elif "name" in data and not m.name:
+        clear_mold_name_snapshots(db, mold_id)
+        clear_orphan_cycle_mold_labels(db)
+    db.commit()
+    db.refresh(m)
+    return m
+
+
+@router.delete("/{mold_id}")
+def delete_mold(mold_id: int, db: Session = Depends(get_db)):
+    m = db.get(Mold, mold_id)
+    if not m:
+        raise HTTPException(404)
+    db.query(Cycle).filter(Cycle.mold_id == mold_id).update(
+        {Cycle.mold_id: None, Cycle.mold_name_snapshot: None},
+        synchronize_session=False,
+    )
+    db.query(Machine).filter(Machine.current_mold_id == mold_id).update(
+        {Machine.current_mold_id: None},
+        synchronize_session=False,
+    )
+    db.query(MoldMachine).filter(MoldMachine.mold_id == mold_id).delete(synchronize_session=False)
+    db.delete(m)
+    db.commit()
+    return {"ok": True}
+
+
 @router.post("/{mold_id}/name", response_model=MoldOut)
 def name_mold(mold_id: int, body: NameBody, db: Session = Depends(get_db)):
     m = db.get(Mold, mold_id)
@@ -123,6 +177,7 @@ def name_mold(mold_id: int, body: NameBody, db: Session = Depends(get_db)):
         raise HTTPException(404)
     m.name = body.name
     m.status = "active"
+    backfill_mold_name_snapshots(db, mold_id, body.name)
     db.commit()
     db.refresh(m)
     return m

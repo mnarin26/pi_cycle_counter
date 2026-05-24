@@ -76,6 +76,29 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE cycles ADD COLUMN is_counted INTEGER NOT NULL DEFAULT 1"))
         if "exclude_reason" not in cycle_cols:
             conn.execute(text("ALTER TABLE cycles ADD COLUMN exclude_reason VARCHAR(64)"))
+        mold_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(molds)")).fetchall()}
+        if "stdev_limit_s" not in mold_cols:
+            conn.execute(text("ALTER TABLE molds ADD COLUMN stdev_limit_s REAL"))
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_cycles_machine_counted_tend "
+                "ON cycles (machine_id, is_counted, t_end)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_events_machine_created "
+                "ON events (machine_id, created_at)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_cycles_counted_tend_mold "
+                "ON cycles (is_counted, t_end, mold_id, machine_id)"
+            )
+        )
+        conn.execute(text("ANALYZE cycles"))
+        conn.execute(text("ANALYZE events"))
     db = SessionLocal()
     try:
         changed = False

@@ -89,14 +89,24 @@ class VisionOrchestrator(threading.Thread):
 
     def _ensure_worker(self, cam: Camera) -> RtspWorker:
         w = self.workers.get(cam.id)
-        if w is None or w.rtsp_url != (cam.rtsp_url or "").strip():
+        want_url = (cam.rtsp_url or "").strip()
+        want_w = int(cam.target_width or 640)
+        want_fps = int(cam.target_fps or 8)
+        stale = (
+            w is None
+            or w.rtsp_url != want_url
+            or w.target_width != want_w
+            or w.target_fps != want_fps
+        )
+        if stale:
             if w:
                 w.stop()
                 w.join(timeout=2.0)
             w = RtspWorker(
                 cam.id,
-                cam.rtsp_url or "",
-                target_width=cam.target_width or 640,
+                want_url,
+                target_width=want_w,
+                target_fps=want_fps,
                 frame_skip=settings.frame_skip,
                 on_status=lambda s, cid=cam.id: self._on_cam_status(cid, s),
             )

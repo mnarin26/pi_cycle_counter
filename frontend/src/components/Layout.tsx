@@ -3,12 +3,11 @@ import { useLiveSnapshot } from "../hooks/useLiveSnapshot";
 
 const nav = [
   ["/", "Pano"],
+  ["/tv", "TV Ekranı"],
   ["/live", "Canlı"],
-  ["/machines", "Makineler"],
   ["/molds", "Kalıplar"],
   ["/analytics", "Analitik"],
   ["/events", "Olaylar"],
-  ["/calibration", "Kalibrasyon"],
 ];
 
 export function Layout() {

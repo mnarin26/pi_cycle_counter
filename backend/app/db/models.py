@@ -76,6 +76,7 @@ class Mold(Base):
     status: Mapped[str] = mapped_column(String(32), default="candidate")  # candidate, active, ignored
     avg_cycle_s: Mapped[float] = mapped_column(Float, default=0.0)
     tolerance_s: Mapped[float] = mapped_column(Float, default=0.35)
+    stdev_limit_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     sample_count: Mapped[int] = mapped_column(Integer, default=0)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

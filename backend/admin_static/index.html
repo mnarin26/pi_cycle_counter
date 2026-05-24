@@ -23,12 +23,73 @@
       .btn-gray { background: #334155; color: #e2e8f0; }
       .btn-green { background: #22c55e; color: #052e16; }
       .btn-orange { background: #f59e0b; color: #422006; }
+      table.live { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+      table.live th, table.live td { border: 1px solid #334155; padding: 8px 10px; text-align: left; }
+      table.live th { background: #0f172a; color: #93c5fd; font-weight: 600; }
+      table.live tr:nth-child(even) td { background: #0f172a; }
+      table.live tr:nth-child(odd) td { background: #111827; }
     </style>
   </head>
   <body>
     <div class="wrap">
-      <h2>Ayar / Kalibrasyon Paneli (8080)</h2>
-      <p class="muted">Izleme paneli ayri (8000). Bu sayfada RTSP, ROI, threshold, eksen ve acik/kapali pozisyon ayarlanir.</p>
+      <h2>Admin Paneli (8080)</h2>
+      <p class="muted">Izleme paneli ayri (<a id="mainAppLink" href="#" style="color:#93c5fd">8000</a>). Burada makine canli durumu, RTSP, ROI, threshold ve kalibrasyon ayarlanir.</p>
+
+      <div class="card">
+        <h3>Makineler (canli)</h3>
+        <p class="muted">Canli sinyal ve esik durumu. Detay ayarlari asagidaki makine kartindan yapilir.</p>
+        <div id="machineLiveWs" class="muted" style="margin-bottom:8px;">WS baglaniyor…</div>
+        <div style="overflow-x:auto;">
+          <table class="live">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Ad</th>
+                <th>Kamera</th>
+                <th>Esik</th>
+                <th>Sinyal (peak/bg)</th>
+              </tr>
+            </thead>
+            <tbody id="machineLiveBody">
+              <tr><td colspan="5" class="muted">Yukleniyor…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Raspberry Pi saati</h3>
+        <p class="muted">Dongu kayitlari Pi saatini kullanir. Goruntudeki tarih yazisi (OSD) <b>kameranin kendi saatidir</b> — asagidan kamera senkronu gerekir.</p>
+        <div id="piTimeStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
+        <div class="row">
+          <div class="col-3">
+            <label>Saat dilimi</label>
+            <select id="piTimezone">
+              <option value="Europe/Istanbul">Europe/Istanbul (TR)</option>
+              <option value="UTC">UTC</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="Europe/Berlin">Europe/Berlin</option>
+              <option value="Asia/Dubai">Asia/Dubai</option>
+            </select>
+          </div>
+          <div class="col-4">
+            <label>Tarih ve saat (manuel)</label>
+            <input id="piDatetime" type="datetime-local" step="60" />
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="piSetTimeBtn" class="btn-orange">Saati Ayarla</button>
+          </div>
+          <div class="col-2">
+            <label>&nbsp;</label>
+            <button id="piNtpOnBtn" class="btn-gray">NTP Ac</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div class="col-3"><button id="piRefreshTimeBtn" class="btn-gray">Saati Yenile</button></div>
+          <div class="col-9"><div id="piTimeMsg" class="muted"></div></div>
+        </div>
+      </div>
 
       <div class="card">
         <div class="row">
@@ -45,12 +106,14 @@
             <div id="cameraStatus" class="muted">-</div>
           </div>
           <div class="col-3">
-            <label>Genislik</label>
-            <input id="camWidth" type="number" min="160" max="1920" />
+            <label>Isleme genisligi (px)</label>
+            <input id="camWidth" type="number" min="160" max="1920" title="Kare Pi uzerinde bu genislige kucultulur; CPU yuku azalir. Kayittan sonra ~2 sn icinde uygulanir." />
+            <p class="muted" style="margin-top:4px;">Ornek: 640. Kameranin kendi cozunurlugunu degistirmez.</p>
           </div>
           <div class="col-3">
-            <label>Hedef FPS</label>
-            <input id="camFps" type="number" min="1" max="30" />
+            <label>Isleme FPS ust siniri</label>
+            <input id="camFps" type="number" min="1" max="30" title="Saniyede en fazla kac kare islenir (Pi yuku). RTSP akis hizini zorlamaz." />
+            <p class="muted" style="margin-top:4px;">Ornek: 8. Dusuk = daha az CPU.</p>
           </div>
           <div class="col-3">
             <label>Aktif</label>
@@ -61,7 +124,8 @@
             <button id="saveCamBtn">Kamera Ayarini Kaydet</button>
           </div>
           <div class="col-3"><button id="testCamBtn" class="btn-orange">Kamera Test</button></div>
-          <div class="col-9"><div id="camMsg" class="muted"></div></div>
+          <div class="col-3"><button id="syncCamTimeBtn" class="btn-green">Kamera OSD Saatini Pi ile Esitle</button></div>
+          <div class="col-6"><div id="camMsg" class="muted"></div></div>
         </div>
       </div>
 
@@ -187,8 +251,13 @@
 
     <script>
       const API = `${location.protocol}//${location.hostname}:8000`;
+      const WS = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.hostname}:8000/ws`;
+      const mainLink = document.getElementById('mainAppLink');
+      if(mainLink) mainLink.href = API + '/';
       let cameras = [];
       let machines = [];
+      let liveSnapshot = { machines: [] };
+      let liveWs = null;
       let roiPoly = null; // [{x,y},...4]
       let interaction = { mode: null, start: null, basePoly: null, cornerIdx: -1, rotateBaseAngle: 0, rotateStart: 0 };
       let viewZoom = 1.0;
@@ -225,7 +294,119 @@
         const r = await fetch(location.origin + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
+      async function jgetLocal(path){
+        const r = await fetch(location.origin + path);
+        if(!r.ok) throw new Error(await r.text()); return r.json();
+      }
 
+      function formatPiClock(iso){
+        if(!iso) return '—';
+        try{
+          const d = new Date(iso);
+          return d.toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul', hour12: false });
+        }catch(_){ return iso; }
+      }
+
+      function fillDatetimeLocalFromIso(iso){
+        if(!iso) return;
+        const d = new Date(iso);
+        const pad = n => String(n).padStart(2,'0');
+        const v = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        q('piDatetime').value = v;
+      }
+
+      async function refreshPiTime(){
+        try{
+          const st = await jgetLocal('/api/system/time');
+          const ntp = st.ntp_synchronized == null ? '?' : (st.ntp_synchronized ? 'evet' : 'hayir');
+          const ntpOn = st.ntp_active == null ? '?' : (st.ntp_active ? 'acik' : 'kapali');
+          q('piTimeStatus').innerHTML =
+            `<span class="good">UTC:</span> ${formatPiClock(st.utc_now)} &nbsp;|&nbsp; ` +
+            `<span class="good">Yerel (${st.timezone}):</span> ${formatPiClock(st.local_now)} &nbsp;|&nbsp; ` +
+            `NTP: ${ntpOn} (senkron: ${ntp})` +
+            (st.can_set_time ? '' : ` &nbsp; <span class="warn">${st.hint || 'Saat ayari icin sudo gerekli'}</span>`);
+          if(st.timezone){
+            const sel = q('piTimezone');
+            if([...sel.options].some(o => o.value === st.timezone)) sel.value = st.timezone;
+          }
+          fillDatetimeLocalFromIso(st.local_now);
+          return st;
+        }catch(e){
+          q('piTimeStatus').innerHTML = `<span class="bad">${String(e)}</span>`;
+          throw e;
+        }
+      }
+
+      function thresholdLabel(m, sm){
+        const mode = String(m.threshold_mode || 'fixed').toLowerCase();
+        const off = Number(m.threshold_offset || 0);
+        const offTxt = off === 0 ? '' : ` (off ${off >= 0 ? '+' : ''}${off})`;
+        const amin = sm && sm.threshold_active_min;
+        if(mode === 'adaptive' || mode === 'learned'){
+          return amin != null ? `adp prom≥${amin}${offTxt}` : 'adp:—';
+        }
+        return `prom≥${m.threshold_min}${offTxt}`;
+      }
+
+      function signalLabel(m, sm){
+        if(!sm) return '—';
+        const peak = sm.peak ?? 0;
+        const bg = sm.background ?? 0;
+        const prom = sm.prominence ?? 0;
+        const seg = sm.segment_len ?? 0;
+        const lmin = m.reflector_len_min;
+        const lmax = m.reflector_len_max;
+        const lenTxt = (lmin != null && lmax != null) ? ` len ${seg} (${lmin}-${lmax})` : ` len ${seg}`;
+        return `${peak}/${bg}  Δ${prom}${lenTxt}`;
+      }
+
+      function renderMachineLiveTable(){
+        const body = q('machineLiveBody');
+        const enabled = machines.filter(m => m.enabled);
+        if(!enabled.length){
+          body.innerHTML = '<tr><td colspan="5" class="muted">Aktif makine yok</td></tr>';
+          return;
+        }
+        const snapById = new Map(
+          (liveSnapshot.machines || [])
+            .filter(m => m.state !== 'DISABLED')
+            .map(m => [m.id, m])
+        );
+        body.innerHTML = enabled.map(m => {
+          const sm = snapById.get(m.id);
+          return `<tr>
+            <td>${m.id}</td>
+            <td>${escapeHtml(m.name || '')}</td>
+            <td>${m.camera_id}</td>
+            <td>${escapeHtml(thresholdLabel(m, sm))}</td>
+            <td>${escapeHtml(signalLabel(m, sm))}</td>
+          </tr>`;
+        }).join('');
+      }
+
+      function escapeHtml(s){
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      }
+
+      function connectLiveWs(){
+        if(liveWs) try{ liveWs.close(); }catch(_){}
+        liveWs = new WebSocket(WS);
+        liveWs.onopen = () => { q('machineLiveWs').innerHTML = '<span class="good">WS bagli</span>'; };
+        liveWs.onclose = () => {
+          q('machineLiveWs').innerHTML = '<span class="warn">WS kopuk — yeniden baglaniyor…</span>';
+          setTimeout(connectLiveWs, 2000);
+        };
+        liveWs.onerror = () => { q('machineLiveWs').innerHTML = '<span class="bad">WS hata</span>'; };
+        liveWs.onmessage = (ev) => {
+          try{
+            const msg = JSON.parse(ev.data);
+            if(msg.type === 'snapshot' && msg.data){
+              liveSnapshot = msg.data;
+              renderMachineLiveTable();
+            }
+          }catch(_){}
+        };
+      }
       function camById(id){ return cameras.find(c=>c.id===Number(id)); }
       function machineById(id){ return machines.find(m=>m.id===Number(id)); }
       function populateCameraOptions(selectEl, selectedId){
@@ -485,6 +666,7 @@
         populateCameraOptions(cameraSelect, cameras[0]?.id);
         onCameraChange();
         refreshMachineOptions();
+        renderMachineLiveTable();
         await refreshSnapshot();
       }
 
@@ -690,6 +872,15 @@
           await loadAll();
         }catch(e){ setMsg('camMsg',String(e),'bad'); }
       };
+      q('syncCamTimeBtn').onclick = async ()=>{
+        try{
+          const id = Number(cameraSelect.value);
+          const res = await jpostLocal(`/api/cameras/${id}/sync-time`, {});
+          setMsg('camMsg', `Kamera saati guncellendi (${res.method} @ ${res.host})`, 'good');
+          setTimeout(refreshSnapshot, 1500);
+        }catch(e){ setMsg('camMsg', apiErrText(e), 'bad'); }
+      };
+
       q('testCamBtn').onclick = async ()=>{
         try{
           const id = Number(cameraSelect.value);
@@ -747,6 +938,41 @@
           setMsg('machineMsg',String(e),'bad');
         }
       };
+      q('piRefreshTimeBtn').onclick = async ()=>{
+        try{
+          await refreshPiTime();
+          setMsg('piTimeMsg', 'Saat bilgisi guncellendi', 'good');
+        }catch(e){ setMsg('piTimeMsg', String(e), 'bad'); }
+      };
+      q('piSetTimeBtn').onclick = async ()=>{
+        const dt = q('piDatetime').value;
+        if(!dt){ setMsg('piTimeMsg', 'Tarih/saat sec', 'bad'); return; }
+        const ok = confirm(`Pi saati "${dt}" (${q('piTimezone').value}) olarak ayarlansin mi? NTP kapanir.`);
+        if(!ok) return;
+        try{
+          const res = await jpostLocal('/api/system/time', { datetime_local: dt, timezone: q('piTimezone').value });
+          await refreshPiTime();
+          setMsg('piTimeMsg', 'Sistem saati guncellendi', 'good');
+        }catch(e){ setMsg('piTimeMsg', apiErrText(e), 'bad'); }
+      };
+      q('piNtpOnBtn').onclick = async ()=>{
+        try{
+          await jpostLocal('/api/system/time/ntp', { enabled: true });
+          await refreshPiTime();
+          setMsg('piTimeMsg', 'NTP acildi — ag uzerinden saat senkronu', 'good');
+        }catch(e){ setMsg('piTimeMsg', apiErrText(e), 'bad'); }
+      };
+
+      function apiErrText(e){
+        let msg = String(e);
+        try{
+          const j = JSON.parse(msg);
+          if(typeof j.detail === 'string') return j.detail;
+          if(Array.isArray(j.detail)) return j.detail.map(x=>x.msg || x).join('; ');
+        }catch(_){}
+        return msg;
+      }
+
       q('resetProdBtn').onclick = async ()=>{
         const ok = confirm('Tum sayim, olay ve kalip gecmisini sifirlamak istiyor musun? Bu islem geri alinmaz.');
         if(!ok) return;
@@ -796,6 +1022,9 @@
       };
 
       applyZoom();
+      connectLiveWs();
+      refreshPiTime().catch(e=>setMsg('piTimeMsg', String(e), 'bad'));
+      setInterval(()=>refreshPiTime().catch(()=>{}), 30000);
       loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
       setInterval(refreshCameraStatuses, 3000);
     </script>
