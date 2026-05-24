@@ -5,12 +5,18 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.db.models import Cycle, Machine, Mold, MoldMachine
+from app.services.cycle_export import (
+    export_filename,
+    mold_cycles_csv,
+    molds_summary_csv,
+)
 from app.services.mold_names import (
     backfill_mold_name_snapshots,
     clear_mold_name_snapshots,
@@ -124,6 +130,31 @@ def mold_usage(
         "to": end.isoformat(),
         "rows": out,
     }
+
+
+@router.get("/export")
+def export_molds_data(
+    mold_id: int = Query(..., description="Kalıp kimliği (zorunlu)"),
+    kind: Literal["summary", "cycles"] = Query("summary"),
+    range: str = Query("monthly"),
+    from_ts: datetime | None = Query(None, alias="from"),
+    to_ts: datetime | None = Query(None, alias="to"),
+    db: Session = Depends(get_db),
+):
+    if db.get(Mold, mold_id) is None:
+        raise HTTPException(404, detail="Kalıp bulunamadı")
+    start, end = resolve_window(range, from_ts, to_ts)  # type: ignore[arg-type]
+    if kind == "summary":
+        content = molds_summary_csv(db, start, end, mold_id=mold_id)
+    else:
+        content = mold_cycles_csv(db, mold_id, start, end)
+    filename = export_filename(f"kalip_{mold_id}", start, end, kind)
+    body = "\ufeff" + content
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.patch("/{mold_id}", response_model=MoldOut)

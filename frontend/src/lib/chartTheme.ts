@@ -53,6 +53,14 @@ export function parseApiTime(iso: string): number {
   return new Date(normalized).getTime();
 }
 
+/** datetime-local değerini İstanbul duvar saati sayıp UTC ISO'ya çevirir. */
+export function datetimeLocalInputToUtcIso(value: string): string {
+  if (!value) return "";
+  const trimmed = value.trim();
+  const base = trimmed.length >= 16 ? trimmed.slice(0, 16) : trimmed;
+  return new Date(`${base}:00+03:00`).toISOString();
+}
+
 export function formatAxisTime(ms: number, range: string): string {
   const base: Intl.DateTimeFormatOptions = { timeZone: DISPLAY_TZ };
   if (range === "yearly") {

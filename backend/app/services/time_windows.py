@@ -10,6 +10,17 @@ DISPLAY_TZ = ZoneInfo("Europe/Istanbul")
 RangeKey = Literal["daily", "weekly", "monthly", "yearly"]
 
 
+def ensure_utc(dt: datetime) -> datetime:
+    """SQLite often returns naive datetimes that are stored as UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def to_istanbul(dt: datetime) -> datetime:
+    return ensure_utc(dt).astimezone(DISPLAY_TZ)
+
+
 def period_start_utc(range_: str, now: datetime | None = None) -> datetime:
     """Start of current calendar period in Istanbul, as UTC for DB filters."""
     now_utc = now or datetime.now(timezone.utc)
@@ -37,16 +48,16 @@ def resolve_window(
     to_ts: datetime | None,
 ) -> tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
-    start = from_ts if from_ts else period_start_utc(range_, now)
-    end = to_ts or now
+    start = ensure_utc(from_ts) if from_ts is not None else period_start_utc(range_, now)
+    end = ensure_utc(to_ts) if to_ts is not None else now
     if end <= start:
         end = start + timedelta(seconds=1)
     return start, end
 
 
 def format_window_label(range_: str, start: datetime, end: datetime) -> str:
-    s = start.astimezone(DISPLAY_TZ).strftime("%d.%m.%Y %H:%M")
-    e = end.astimezone(DISPLAY_TZ).strftime("%d.%m.%Y %H:%M")
+    s = to_istanbul(start).strftime("%d.%m.%Y %H:%M")
+    e = to_istanbul(end).strftime("%d.%m.%Y %H:%M")
     titles = {
         "daily": "Bugün",
         "weekly": "Bu hafta (Pzt → şimdi)",

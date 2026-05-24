@@ -98,10 +98,31 @@ async def lifespan(app: FastAPI):
 
     drain_task = asyncio.create_task(drain_loop())
     bcast_task = asyncio.create_task(broadcast_loop())
+
+    async def retention_loop():
+        from app.services.data_retention import run_data_retention
+
+        while not stop_drain.is_set():
+            db = db_session.SessionLocal()
+            try:
+                stats = run_data_retention(db, settings.logs_dir)
+                logger.info("Veri saklama temizliği: %s", stats)
+            except Exception as e:
+                logger.exception("Veri saklama hatası: %s", e)
+            finally:
+                db.close()
+            try:
+                await asyncio.wait_for(stop_drain.wait(), timeout=86400.0)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    retention_task = asyncio.create_task(retention_loop())
     yield
     stop_drain.set()
     drain_task.cancel()
     bcast_task.cancel()
+    retention_task.cancel()
     orch.stop()
     orch.join(timeout=3.0)
 

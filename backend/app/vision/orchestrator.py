@@ -29,9 +29,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import Camera, Event, Machine
+from app.db.models import Camera, Cycle, Event, Machine
 import app.db.session as db_session
-from app.services.csv_logger import append_cycle_row
+from app.services.cycle_daily_log import append_cycle_to_daily_csv
 from app.services.cycle_tracker import CycleTracker
 from app.services.mold_matcher import handle_cycle_completion
 from app.services.playback_buffer import PlaybackBuffer
@@ -440,31 +440,18 @@ def drain_cycle_queue_item(db: Session, item: dict, rolling: dict[int, list[floa
             None,
             float(item.get("confidence", 1.0)),
         )
-        # #region agent log
-        if int(item.get("machine_id", -1)) == 3:
-            logger.info("[DBG][H13] drain_after_handle_cycle mid=3")
-        # #endregion
-        m2 = db.get(Machine, item["machine_id"])
-        mold_name = None
-        if m2 and m2.current_mold_id:
-            from app.db.models import Mold as MoldModel
-
-            mold = db.get(MoldModel, m2.current_mold_id)
-            if mold:
-                mold_name = mold.name
-        append_cycle_row(
-            settings.logs_dir,
-            m.id,
-            item.get("machine_name", m.name),
-            float(item["cycle_s"]),
-            "OPEN",
-            mold_name,
-            float(item.get("confidence", 1.0)),
+        cycle = (
+            db.query(Cycle)
+            .filter(Cycle.machine_id == m.id, Cycle.t_end == t_end)
+            .order_by(Cycle.id.desc())
+            .first()
         )
-        # #region agent log
-        if int(item.get("machine_id", -1)) == 3:
-            logger.info("[DBG][H13] drain_after_csv_row mid=3")
-        # #endregion
+        if cycle:
+            append_cycle_to_daily_csv(
+                settings.logs_dir,
+                item.get("machine_name", m.name),
+                cycle,
+            )
         # #region agent log
         if int(item.get("machine_id", -1)) == 3:
             ccount = db.execute(text("SELECT COUNT(*) FROM cycles WHERE machine_id=3")).scalar()  # type: ignore[arg-type]

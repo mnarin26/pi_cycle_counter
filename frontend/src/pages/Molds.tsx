@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiDelete, apiGet, apiPatch, apiPost } from "../api/client";
+import { datetimeLocalInputToUtcIso } from "../lib/chartTheme";
+import { apiDelete, apiDownloadCsv, apiGet, apiPatch, apiPost } from "../api/client";
 
 const DEFAULT_STDEV_RATIO = 0.05;
 const MIN_STDEV_LIMIT = 0.25;
@@ -304,12 +305,15 @@ export function MoldsPage() {
   const [toInput, setToInput] = useState("");
   const [loadingMolds, setLoadingMolds] = useState(true);
   const [loadingUsage, setLoadingUsage] = useState(false);
+  const [exportBusy, setExportBusy] = useState<{ moldId: number; kind: "summary" | "cycles" } | null>(
+    null,
+  );
   const [err, setErr] = useState<string | null>(null);
 
   const usageQuery = useCallback(() => {
     const p = new URLSearchParams({ range });
-    if (fromInput) p.set("from", new Date(fromInput).toISOString());
-    if (toInput) p.set("to", new Date(toInput).toISOString());
+    if (fromInput) p.set("from", datetimeLocalInputToUtcIso(fromInput));
+    if (toInput) p.set("to", datetimeLocalInputToUtcIso(toInput));
     return p.toString();
   }, [range, fromInput, toInput]);
 
@@ -342,6 +346,23 @@ export function MoldsPage() {
   const reloadAll = useCallback(async () => {
     await Promise.all([loadMolds(), loadUsage()]);
   }, [loadMolds, loadUsage]);
+
+  const downloadMoldExport = useCallback(
+    async (moldId: number, kind: "summary" | "cycles") => {
+      setExportBusy({ moldId, kind });
+      try {
+        const p = new URLSearchParams({ range, kind, mold_id: String(moldId) });
+        if (fromInput) p.set("from", datetimeLocalInputToUtcIso(fromInput));
+        if (toInput) p.set("to", datetimeLocalInputToUtcIso(toInput));
+        await apiDownloadCsv(`/api/molds/export?${p.toString()}`, `kalip_${moldId}_${kind}.csv`);
+      } catch (e) {
+        setErr(String(e));
+      } finally {
+        setExportBusy(null);
+      }
+    },
+    [range, fromInput, toInput],
+  );
 
   useEffect(() => {
     void loadMolds();
@@ -424,6 +445,32 @@ export function MoldsPage() {
                 <div className="text-xs text-slate-400">Durum: {r.status}</div>
                 <div className="text-xs text-slate-400">Toplam Adet: {r.total_cycles}</div>
                 <div className="text-xs text-slate-400">Ort. Döngü: {r.avg_cycle_s.toFixed(2)}s</div>
+                <div className="ml-auto flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="rounded bg-emerald-800 px-2 py-1 text-xs disabled:opacity-50"
+                    disabled={
+                      exportBusy?.moldId === r.mold_id && exportBusy.kind === "summary"
+                    }
+                    onClick={() => void downloadMoldExport(r.mold_id, "summary")}
+                  >
+                    {exportBusy?.moldId === r.mold_id && exportBusy.kind === "summary"
+                      ? "İndiriliyor…"
+                      : "Özet CSV"}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded bg-emerald-900 px-2 py-1 text-xs disabled:opacity-50"
+                    disabled={
+                      exportBusy?.moldId === r.mold_id && exportBusy.kind === "cycles"
+                    }
+                    onClick={() => void downloadMoldExport(r.mold_id, "cycles")}
+                  >
+                    {exportBusy?.moldId === r.mold_id && exportBusy.kind === "cycles"
+                      ? "İndiriliyor…"
+                      : "Döngü CSV"}
+                  </button>
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">

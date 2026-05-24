@@ -36,3 +36,20 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   const text = await r.text();
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
+
+export async function apiDownloadCsv(path: string, fallbackFilename: string): Promise<void> {
+  const r = await fetch(`${base}${path}`);
+  if (!r.ok) throw new Error(await r.text());
+  const blob = await r.blob();
+  const cd = r.headers.get("Content-Disposition") || "";
+  const match = /filename="([^"]+)"/.exec(cd);
+  const filename = match?.[1] || fallbackFilename;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

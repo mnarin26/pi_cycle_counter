@@ -3,12 +3,19 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
+from app.config import settings
 from app.db.models import Camera, Machine
+from app.services.cycle_export import (
+    export_filename,
+    machine_cycles_csv,
+    machine_summary_csv,
+)
 from app.services.mold_matcher import MAX_REPLAY_DAYS, replay_mold_history
 from app.services.mold_names import clear_orphan_cycle_mold_labels
 from app.services.time_windows import RangeKey, resolve_window
@@ -130,6 +137,32 @@ def set_roi(machine_id: int, roi: list[list[float]], db: Session = Depends(get_d
     m.roi_polygon = json.dumps(roi)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/{machine_id}/export")
+def export_machine_data(
+    machine_id: int,
+    kind: Literal["summary", "cycles"] = Query("summary"),
+    range: RangeKey = Query("daily"),
+    from_ts: datetime | None = Query(None, alias="from"),
+    to_ts: datetime | None = Query(None, alias="to"),
+    db: Session = Depends(get_db),
+):
+    m = db.get(Machine, machine_id)
+    if not m:
+        raise HTTPException(404)
+    start, end = resolve_window(range, from_ts, to_ts)
+    if kind == "summary":
+        content = machine_summary_csv(db, machine_id, start, end)
+    else:
+        content = machine_cycles_csv(db, machine_id, m.name, start, end)
+    filename = export_filename(f"makine_{machine_id}", start, end, kind)
+    body = "\ufeff" + content
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/{machine_id}/replay-mold-matching", response_model=ReplayMoldOut)

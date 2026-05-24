@@ -13,13 +13,14 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { apiGet, apiPost } from "../api/client";
+import { apiDownloadCsv, apiGet, apiPost } from "../api/client";
 import {
   buildZigzagSeries,
   buildZigzagLineSegments,
   buildMoldColorMap,
   moldColorFromMap,
   chartScrollWidth,
+  datetimeLocalInputToUtcIso,
   eventColor,
   formatAxisTime,
   formatZigzagAxisTick,
@@ -284,6 +285,7 @@ export function MachineDetailPage() {
   const [toInput, setToInput] = useState("");
   const [replayMode, setReplayMode] = useState<"missing_only" | "reprocess">("missing_only");
   const [replayBusy, setReplayBusy] = useState(false);
+  const [exportBusy, setExportBusy] = useState<"summary" | "cycles" | null>(null);
   const [replayMsg, setReplayMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -304,8 +306,8 @@ export function MachineDetailPage() {
       range,
       lazy_series: "true",
     });
-    if (fromInput) p.set("from", new Date(fromInput).toISOString());
-    if (toInput) p.set("to", new Date(toInput).toISOString());
+    if (fromInput) p.set("from", datetimeLocalInputToUtcIso(fromInput));
+    if (toInput) p.set("to", datetimeLocalInputToUtcIso(toInput));
     return p.toString();
   }, [machineId, range, fromInput, toInput]);
 
@@ -347,8 +349,8 @@ export function MachineDetailPage() {
     setReplayMsg(null);
     try {
       const body: Record<string, unknown> = { range, mode: replayMode };
-      if (fromInput) body.from = new Date(fromInput).toISOString();
-      if (toInput) body.to = new Date(toInput).toISOString();
+      if (fromInput) body.from = datetimeLocalInputToUtcIso(fromInput);
+      if (toInput) body.to = datetimeLocalInputToUtcIso(toInput);
       const res = await apiPost<{
         cycles_total: number;
         cycles_assigned: number;
@@ -369,6 +371,27 @@ export function MachineDetailPage() {
       setReplayBusy(false);
     }
   }, [machineId, range, replayMode, fromInput, toInput, loadDash]);
+
+  const downloadExport = useCallback(
+    async (kind: "summary" | "cycles") => {
+      if (!machineId) return;
+      setExportBusy(kind);
+      try {
+        const p = new URLSearchParams({ range, kind });
+        if (fromInput) p.set("from", datetimeLocalInputToUtcIso(fromInput));
+        if (toInput) p.set("to", datetimeLocalInputToUtcIso(toInput));
+        await apiDownloadCsv(
+          `/api/machines/${machineId}/export?${p.toString()}`,
+          `makine_${machineId}_${kind}.csv`,
+        );
+      } catch (e) {
+        setErr(String(e));
+      } finally {
+        setExportBusy(null);
+      }
+    },
+    [machineId, range, fromInput, toInput],
+  );
 
   useEffect(() => {
     loadDash();
@@ -402,8 +425,8 @@ export function MachineDetailPage() {
   const trendMoldNames = dash?.trend_mold_names ?? [];
   const gapMs = (dash?.gap_threshold_s ?? 1200) * 1000;
   const totalCycles = dash?.series_total ?? dash?.summary?.cycle_count ?? 0;
-  const filterFromMs = fromInput ? parseApiTime(new Date(fromInput).toISOString()) : NaN;
-  const filterToMs = toInput ? parseApiTime(new Date(toInput).toISOString()) : NaN;
+  const filterFromMs = fromInput ? parseApiTime(datetimeLocalInputToUtcIso(fromInput)) : NaN;
+  const filterToMs = toInput ? parseApiTime(datetimeLocalInputToUtcIso(toInput)) : NaN;
   const zigzagVisibleMs = ZIGZAG_RESOLUTION_MS[zigzagResolution];
 
   const viewport = useZigzagViewport({
@@ -609,6 +632,22 @@ export function MachineDetailPage() {
             onClick={() => void runReplay()}
           >
             {replayBusy ? "İşleniyor…" : "Kalıp eşleştirmesini çalıştır"}
+          </button>
+          <button
+            type="button"
+            className="rounded bg-emerald-800 px-3 py-2 text-sm font-medium disabled:opacity-50"
+            disabled={!!exportBusy || loading}
+            onClick={() => void downloadExport("summary")}
+          >
+            {exportBusy === "summary" ? "İndiriliyor…" : "Özet CSV indir"}
+          </button>
+          <button
+            type="button"
+            className="rounded bg-emerald-900 px-3 py-2 text-sm font-medium disabled:opacity-50"
+            disabled={!!exportBusy || loading}
+            onClick={() => void downloadExport("cycles")}
+          >
+            {exportBusy === "cycles" ? "İndiriliyor…" : "Döngü CSV indir"}
           </button>
         </div>
         <p className="mt-2 text-xs text-slate-500">
