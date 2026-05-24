@@ -9,8 +9,6 @@ import {
   Legend,
   Line,
   ResponsiveContainer,
-  Scatter,
-  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
@@ -24,7 +22,9 @@ import {
   chartScrollWidth,
   eventColor,
   formatAxisTime,
+  formatZigzagAxisTick,
   parseApiTime,
+  zigzagXAxisTicks,
   zigzagXDomain,
   ZIGZAG_RESOLUTION_LABELS,
   ZIGZAG_RESOLUTION_MS,
@@ -128,14 +128,6 @@ type TrendRow = TrendBucket & {
   [key: string]: string | number | TrendMoldSlice[];
 };
 
-type ChartEvent = {
-  id: number;
-  type: string;
-  t_ms: number;
-  y: number;
-  color: string;
-};
-
 const ZIGZAG_SNAP_MAX_MS = 120_000; // 2 dk — daha uzaksa "bu saatte döngü yok"
 
 function ZigzagTooltipContent({
@@ -224,32 +216,11 @@ function BucketTooltipContent({
   );
 }
 
-function EventTooltipContent({
-  active,
-  payload,
-}: {
-  active?: boolean;
-  payload?: Array<{ payload: ChartEvent }>;
-}) {
-  if (!active || !payload?.length) return null;
-  const d = payload[0].payload;
-  return (
-    <div className="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-xs shadow-lg">
-      <div className="font-medium text-slate-100">
-        {new Date(d.t_ms).toLocaleString("tr-TR")}
-      </div>
-      <div className="mt-1 text-slate-300">Olay: {d.type}</div>
-    </div>
-  );
-}
-
 function ChartLegend({
   molds,
-  eventTypes,
   zigzag = false,
 }: {
   molds: { name: string; color: string }[];
-  eventTypes: string[];
   zigzag?: boolean;
 }) {
   return (
@@ -293,22 +264,6 @@ function ChartLegend({
                   style={{ background: m.color }}
                 />
                 <span className="text-slate-300">{m.name}</span>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-      {eventTypes.length > 0 && (
-        <div>
-          <div className="mb-1 font-semibold text-slate-400">Olaylar</div>
-          <div className="flex flex-wrap gap-2">
-            {eventTypes.map((t) => (
-              <span key={t} className="inline-flex items-center gap-1">
-                <span
-                  className="inline-block h-2.5 w-2.5 rounded-full"
-                  style={{ background: eventColor(t) }}
-                />
-                <span className="text-slate-300">{t}</span>
               </span>
             ))}
           </div>
@@ -521,17 +476,6 @@ export function MachineDetailPage() {
     });
   }, [chartMode, dash?.trend_buckets, dash?.trend_resolution]);
 
-  const eventChartData = useMemo((): ChartEvent[] => {
-    return (dash?.events ?? [])
-      .filter((e) => e.created_at)
-      .map((e) => ({
-        id: e.id,
-        type: e.type,
-        t_ms: parseApiTime(e.created_at!),
-        y: 1,
-        color: eventColor(e.type),
-      }));
-  }, [dash?.events]);
 
   const moldBarData = useMemo(() => {
     return (dash?.mold_breakdown ?? []).map((m) => ({
@@ -563,7 +507,6 @@ export function MachineDetailPage() {
     viewport.windowFromMs,
     viewport.windowToMs,
   ]);
-  const eventLegendTypes = [...new Set(eventChartData.map((e) => e.type))];
 
   const xDomain = useMemo((): [number, number] | undefined => {
     if (chartMode === "cycles" && viewport.windowToMs > viewport.windowFromMs) {
@@ -575,12 +518,16 @@ export function MachineDetailPage() {
       ...(chartMode === "cycles"
         ? zigzagData.map((c) => c.t_ms)
         : trendChartData.map((c) => c.t_ms)),
-      ...eventChartData.map((e) => e.t_ms),
     ];
     if (!all.length) return undefined;
     const pad = Math.max(60_000, (Math.max(...all) - Math.min(...all)) * 0.02);
     return [Math.min(...all) - pad, Math.max(...all) + pad];
-  }, [chartMode, range, viewport, filterFromMs, filterToMs, zigzagData, trendChartData, eventChartData]);
+  }, [chartMode, range, viewport, filterFromMs, filterToMs, zigzagData, trendChartData]);
+
+  const zigzagXTicks = useMemo(
+    () => (chartMode === "cycles" ? zigzagXAxisTicks(xDomain, zigzagResolution) : []),
+    [chartMode, xDomain, zigzagResolution],
+  );
 
   if (!machineId) {
     return <p className="text-alarm">Geçersiz makine id</p>;
@@ -598,7 +545,6 @@ export function MachineDetailPage() {
           <h2 className="text-xl font-semibold">
             {machine?.name || `Makine #${machineId}`} detay
           </h2>
-          <p className="text-sm text-slate-400">Sayım doğrulama ekranı</p>
         </div>
         <div className="flex items-center gap-3">
           {loading && dash && <span className="text-xs text-sky-300">Güncelleniyor…</span>}
@@ -741,35 +687,16 @@ export function MachineDetailPage() {
             )}
             <div className="text-right text-xs text-slate-400">
               {dash?.window_label && <div>{dash.window_label}</div>}
-              {dash?.trend_resolution_label && <div>{dash.trend_resolution_label}</div>}
             </div>
           </div>
         </div>
-        {seriesLazy && totalCycles > 0 && (
-          <p className="mb-2 text-xs text-slate-400">
-            Yatay kaydır: görünen zaman dilimi yüklenir —{" "}
-            <span className="text-amber-200">
-              {viewport.mergedSeries.length.toLocaleString("tr-TR")} /{" "}
-              {totalCycles.toLocaleString("tr-TR")} döngü
-            </span>
-            {viewport.loadingViewport && (
-              <span className="ml-2 text-sky-300">bölüm yükleniyor…</span>
-            )}
+        {totalCycles > 0 && (seriesLazy || dash?.series_truncated) && (
+          <p className="mb-2 text-xs text-amber-200">
+            {seriesLazy
+              ? `${viewport.mergedSeries.length.toLocaleString("tr-TR")} / ${totalCycles.toLocaleString("tr-TR")} döngü`
+              : `${dash!.series_shown.toLocaleString("tr-TR")} / ${dash!.series_total.toLocaleString("tr-TR")} döngü`}
           </p>
         )}
-        {!seriesLazy && dash?.series_truncated && (
-          <p className="mb-2 text-xs text-amber-300">
-            Gösterilen: {dash.series_shown.toLocaleString("tr-TR")} /{" "}
-            {dash.series_total.toLocaleString("tr-TR")} döngü (yoğunluk için seyreltildi)
-          </p>
-        )}
-        <p className="mb-2 text-xs text-slate-500">
-          {chartMode === "cycles"
-            ? seriesLazy
-              ? "Sabit zaman ekseni; çözünürlük = bir ekranda görünen süre. Boşluklar gerçek mola/duruş."
-              : "Günlük / haftalık: sabit zaman ekseni; uzun boşlukta çizgi kopar (mola / duruş)."
-            : "Aylık / yıllık özet: mavi çizgi ortalama süre, renkli çubuklar kalıp adedi."}
-        </p>
         <div
           ref={seriesLazy ? viewport.scrollRef : undefined}
           className="overflow-x-auto rounded border border-slate-800"
@@ -787,8 +714,10 @@ export function MachineDetailPage() {
                   type="number"
                   dataKey="t_ms"
                   domain={xDomain}
+                  ticks={zigzagXTicks}
                   tick={{ fill: "#94a3b8", fontSize: 10 }}
-                  tickFormatter={(ms) => formatAxisTime(ms, range)}
+                  tickFormatter={(ms) => formatZigzagAxisTick(ms, zigzagResolution)}
+                  height={36}
                 />
                 <YAxis
                   tick={{ fill: "#94a3b8", fontSize: 10 }}
@@ -876,25 +805,9 @@ export function MachineDetailPage() {
           </div>
         </div>
 
-        <h3 className="mb-1 mt-4 text-xs font-semibold text-slate-400">Olaylar (zaman çizgisi)</h3>
-        <div className="overflow-x-auto rounded border border-slate-800">
-          <div style={{ width: chartWidth, minWidth: "100%", height: 72 }}>
-            <ScatterChart width={chartWidth} height={72} margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
-              <XAxis type="number" dataKey="t_ms" domain={xDomain} hide />
-              <YAxis dataKey="y" domain={[0, 2]} hide />
-              <Tooltip content={<EventTooltipContent />} />
-              <Scatter data={eventChartData} isAnimationActive={false}>
-                {eventChartData.map((entry) => (
-                  <Cell key={entry.id} fill={entry.color} />
-                ))}
-              </Scatter>
-            </ScatterChart>
-          </div>
-        </div>
 
         <ChartLegend
           molds={moldLegend}
-          eventTypes={eventLegendTypes}
           zigzag={chartMode === "cycles"}
         />
       </div>

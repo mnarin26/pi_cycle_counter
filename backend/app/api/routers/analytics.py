@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import Integer, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
@@ -685,7 +685,11 @@ def tv_board(
         }
 
     mids = [m.id for m in machines]
-    hour_col = func.strftime("%H", Cycle.t_end).label("hour")
+    # Cycle.t_end is UTC in DB; bucket by Europe/Istanbul wall-clock hour (+3, no DST).
+    hour_col = func.cast(
+        func.strftime("%H", func.datetime(Cycle.t_end, "+3 hours")),
+        Integer,
+    ).label("hour")
 
     # Query 1: machine + hour → count (for chart; all molds)
     hourly_rows = (

@@ -16,7 +16,8 @@ type ViewportResponse = {
   truncated: boolean;
 };
 
-const VIEWPORT_MAX_POINTS = 1200;
+const VIEWPORT_MAX_POINTS = 4000;
+const MIN_SPLIT_MS = 60_000;
 const SCROLL_PAD_RATIO = 0.15;
 
 function rangeCovered(ranges: Array<[number, number]>, fromMs: number, toMs: number): boolean {
@@ -79,13 +80,15 @@ export function useZigzagViewport(opts: {
   }, [enabled]);
 
   const loadRange = useCallback(
-    async (fromMs: number, toMs: number) => {
+    async (fromMs: number, toMs: number, opts?: { bypassCover?: boolean }) => {
       if (!enabled || !machineId || !windowFrom || !windowTo) return;
       const timelineEnd = windowFromMs + timelineMs;
       const clampedFrom = Math.max(windowFromMs, fromMs);
       const clampedTo = Math.min(timelineEnd, windowToMs, toMs);
       if (clampedTo <= clampedFrom) return;
-      if (rangeCovered(loadedRangesRef.current, clampedFrom, clampedTo)) return;
+      if (!opts?.bypassCover && rangeCovered(loadedRangesRef.current, clampedFrom, clampedTo)) {
+        return;
+      }
 
       const gen = ++loadGenRef.current;
       setLoadingViewport(true);
@@ -104,7 +107,18 @@ export function useZigzagViewport(opts: {
           for (const pt of data.series) next.set(pt.t, pt);
           return next;
         });
-        loadedRangesRef.current = mergeRanges(loadedRangesRef.current, clampedFrom, clampedTo);
+
+        if (data.truncated && clampedTo - clampedFrom > MIN_SPLIT_MS) {
+          const mid = Math.floor((clampedFrom + clampedTo) / 2);
+          await loadRange(clampedFrom, mid, { bypassCover: true });
+          if (gen !== loadGenRef.current) return;
+          await loadRange(mid, clampedTo, { bypassCover: true });
+          return;
+        }
+
+        if (!data.truncated) {
+          loadedRangesRef.current = mergeRanges(loadedRangesRef.current, clampedFrom, clampedTo);
+        }
       } finally {
         if (gen === loadGenRef.current) setLoadingViewport(false);
       }
@@ -126,7 +140,11 @@ export function useZigzagViewport(opts: {
     const pad = Math.max(60_000, visibleSpanMs * SCROLL_PAD_RATIO);
 
     void loadRange(visibleStart - pad, visibleEnd + pad);
-  }, [enabled, timelineMs, windowFromMs, loadRange]);
+
+    if (ratio >= 0.98) {
+      void loadRange(windowFromMs, windowToMs, { bypassCover: true });
+    }
+  }, [enabled, timelineMs, windowFromMs, windowToMs, loadRange]);
 
   const scheduleScrollLoad = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);

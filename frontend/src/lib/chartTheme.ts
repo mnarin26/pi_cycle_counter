@@ -101,6 +101,66 @@ export const ZIGZAG_RESOLUTION_LABELS: Record<ZigzagResolution, string> = {
   "24h": "24 saat / ekran",
 };
 
+/** X-axis tick spacing for zigzag timeline (Istanbul wall clock). */
+export const ZIGZAG_X_TICK_INTERVAL_MS: Record<ZigzagResolution, number> = {
+  "1h": 10 * 60 * 1000,
+  "6h": MS_PER_HOUR,
+  "12h": 2 * MS_PER_HOUR,
+  "24h": 2 * MS_PER_HOUR,
+};
+
+const IST_OFFSET_MS = 3 * MS_PER_HOUR;
+
+export function alignMsToIstanbulStep(ms: number, stepMs: number): number {
+  const local = ms + IST_OFFSET_MS;
+  return Math.floor(local / stepMs) * stepMs - IST_OFFSET_MS;
+}
+
+/** Fixed tick positions on the scrollable zigzag time axis. */
+export function zigzagXAxisTicks(
+  domain: [number, number] | undefined,
+  resolution: ZigzagResolution,
+): number[] {
+  if (!domain) return [];
+  const [start, end] = domain;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
+  const step = ZIGZAG_X_TICK_INTERVAL_MS[resolution];
+  const ticks: number[] = [];
+  let t = alignMsToIstanbulStep(start, step);
+  if (t < start) t += step;
+  while (t <= end) {
+    ticks.push(t);
+    t += step;
+  }
+  return ticks;
+}
+
+export function formatZigzagAxisTick(ms: number, resolution: ZigzagResolution): string {
+  const base: Intl.DateTimeFormatOptions = { timeZone: DISPLAY_TZ };
+  if (resolution === "1h") {
+    return new Date(ms).toLocaleString("tr-TR", {
+      ...base,
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+  if (resolution === "6h") {
+    return new Date(ms).toLocaleString("tr-TR", {
+      ...base,
+      day: "numeric",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+  return new Date(ms).toLocaleString("tr-TR", {
+    ...base,
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+  });
+}
+
 /** Total scrollable timeline for the selected range (calendar window). */
 export function zigzagTimelineMs(range: string, windowFromMs: number, windowToMs: number): number {
   const actualSpan = Math.max(MS_PER_HOUR, windowToMs - windowFromMs);

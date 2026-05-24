@@ -5,6 +5,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  LabelList,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -16,6 +17,16 @@ import { useLiveSnapshot, type MachineSnap } from "../hooks/useLiveSnapshot";
 
 const STORAGE_KEY = "tv_selected_machine_ids";
 const REFRESH_MS = 45_000;
+const DISPLAY_TZ = "Europe/Istanbul";
+
+function istanbulHourNow(): number {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: DISPLAY_TZ,
+    hour: "numeric",
+    hour12: false,
+  }).formatToParts(new Date());
+  return Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+}
 
 type MachineRow = { id: number; name: string; enabled: boolean };
 
@@ -72,12 +83,12 @@ function stateInfo(state: string): { label: string; border: string; dot: string 
   }
 }
 
-/** Fill a 0-23 hour array from sparse server data. */
+/** Fill 0–23 Istanbul hours from server data; show through current hour. */
 function fillHours(hourly: HourBucket[]): HourBucket[] {
   const map = new Map(hourly.map((h) => [h.hour, h]));
-  const nowHour = new Date().getUTCHours(); // server stores UTC
+  const nowHour = istanbulHourNow();
   return Array.from({ length: 24 }, (_, h) => map.get(h) ?? { hour: h, count: 0, avg_cycle_s: 0 }).filter(
-    (h) => h.hour <= nowHour + 1,
+    (h) => h.hour <= nowHour,
   );
 }
 
@@ -147,9 +158,9 @@ function TvMachineRow({
       </div>
 
       {/* ── Hourly bar chart ── */}
-      <div className="h-28 border-t border-slate-800 px-2 pt-1 pb-2">
+      <div className="h-32 border-t border-slate-800 px-2 pt-1 pb-2">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={chartData} margin={{ top: 2, right: 4, bottom: 0, left: 4 }} barCategoryGap="10%">
+          <BarChart data={chartData} margin={{ top: 16, right: 4, bottom: 0, left: 4 }} barCategoryGap="10%">
             <CartesianGrid strokeDasharray="2 4" stroke="#1e293b" vertical={false} />
             <XAxis
               dataKey="hour"
@@ -181,6 +192,12 @@ function TvMachineRow({
                   opacity={entry.count > 0 ? 0.85 : 0.4}
                 />
               ))}
+              <LabelList
+                dataKey="count"
+                position="top"
+                formatter={(value: number) => (value > 0 ? String(value) : "")}
+                style={{ fill: "#e2e8f0", fontSize: 10, fontWeight: 600 }}
+              />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
