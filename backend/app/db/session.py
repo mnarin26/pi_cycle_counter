@@ -31,7 +31,7 @@ def get_engine():
             url = settings.database_url
         _engine = create_engine(
             url,
-            connect_args={"check_same_thread": False},
+            connect_args={"check_same_thread": False, "timeout": 30},
             pool_pre_ping=True,
         )
 
@@ -39,6 +39,8 @@ def get_engine():
         def set_sqlite_pragma(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
             cursor.close()
 
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)

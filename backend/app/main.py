@@ -150,6 +150,12 @@ def health():
     return {"ok": True}
 
 
+@app.get("/api/live/snapshot")
+def live_snapshot():
+    """Current vision snapshot (same payload as WebSocket)."""
+    return app.state.vision.snapshot
+
+
 @app.post("/api/debug/fake_cycle")
 def debug_fake_cycle(
     machine_id: int = Query(3),

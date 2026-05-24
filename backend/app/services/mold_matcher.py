@@ -180,6 +180,46 @@ def _post_stop_times(samples: list[tuple[int, float]]) -> list[float]:
     return [s[1] for s in samples]
 
 
+def _resume_post_stop_state(db: Session, machine_id: int) -> PostStopState | None:
+    """Rebuild in-memory post-stop buffer from trailing pending cycles in DB.
+
+    This keeps long-stop decisions resilient across service restarts.
+    """
+    recent = (
+        db.query(Cycle.id, Cycle.cycle_time_s, Cycle.exclude_reason, Cycle.mold_id)
+        .filter(Cycle.machine_id == machine_id)
+        .order_by(Cycle.id.desc())
+        .limit(max(POST_STOP_MAX_WAIT_FLOOR, POST_STOP_WINDOW_MAX * 6))
+        .all()
+    )
+    if not recent:
+        return None
+
+    pending_tail: list[tuple[int, float]] = []
+    prev_mold_id: int | None = None
+    for cid, cycle_s, exclude_reason, mold_id in recent:
+        if exclude_reason == "post_stop_pending":
+            pending_tail.append((int(cid), float(cycle_s)))
+            continue
+        if pending_tail:
+            prev_mold_id = int(mold_id) if mold_id is not None else None
+        break
+
+    if not pending_tail:
+        return None
+
+    # Historical bug path: pending rows could remain non-counted after restart.
+    # Keep dashboards live while post-stop learning continues.
+    for cycle_id, _ in pending_tail:
+        c = db.get(Cycle, cycle_id)
+        if c and not c.is_counted:
+            c.is_counted = True
+
+    state = PostStopState(prev_mold_id=prev_mold_id, downtime_s=0.0)
+    state.samples = list(reversed(pending_tail))
+    return state
+
+
 def _scan_stable_window(
     times: list[float],
     window_size: int,
@@ -486,7 +526,8 @@ def _post_stop_add_cycle(
         c = existing_cycle
         c.mold_id = None
         c.mold_name_snapshot = None
-        c.is_counted = False
+        # Keep counts live during post-stop learning; final decision may override retroactively.
+        c.is_counted = True
         c.exclude_reason = "post_stop_pending"
     else:
         c = Cycle(
@@ -497,7 +538,8 @@ def _post_stop_add_cycle(
             t_end=t_end,
             confidence=confidence,
             mold_name_snapshot=None,
-            is_counted=False,
+            # Keep counts live during post-stop learning; final decision may override retroactively.
+            is_counted=True,
             exclude_reason="post_stop_pending",
         )
         db.add(c)
@@ -507,7 +549,7 @@ def _post_stop_add_cycle(
 
     resolved = _resolve_post_stop_window(state)
     if resolved is None:
-        return None, False, "post_stop_pending", 0
+        return None, True, "post_stop_pending", 0
 
     decision_times, window_start, mean_v, st, stdev_limit, window_size, forced = resolved
     mold_id, is_counted, exclude_reason, retro_count = _finalize_post_stop_decision(
@@ -1027,6 +1069,11 @@ def handle_cycle_completion(
     bufs = _post_stop_buffers if post_stop_bufs is None else post_stop_bufs
 
     active = bufs.get(machine.id)
+    if active is None:
+        resumed = _resume_post_stop_state(db, machine.id)
+        if resumed is not None:
+            bufs[machine.id] = resumed
+            active = resumed
     if active is not None:
         _post_stop_add_cycle(
             db,

@@ -78,6 +78,9 @@ class VisionOrchestrator(threading.Thread):
             "cpu_proxy": 0.0,
         }
         self._reload_at = 0.0
+        self._cameras_cache: list[Camera] = []
+        self._machines_cache: list[Machine] = []
+        self._mold_names: dict[int, str] = {}
 
     def stop(self) -> None:
         self._stop.set()
@@ -126,32 +129,55 @@ class VisionOrchestrator(threading.Thread):
         except queue.Full:
             pass
 
+    def _reload_config_from_db(self) -> None:
+        db = db_session.SessionLocal()
+        try:
+            cameras, machines = self._reload_db(db)
+            self._cameras_cache = cameras
+            self._machines_cache = machines
+            from app.db.models import Mold as MoldModel
+
+            mold_ids = {m.current_mold_id for m in machines if m.current_mold_id}
+            self._mold_names = {}
+            if mold_ids:
+                for mold in db.query(MoldModel).filter(MoldModel.id.in_(mold_ids)).all():
+                    self._mold_names[mold.id] = mold.name
+            for c in cameras:
+                if c.enabled and c.rtsp_url:
+                    self._ensure_worker(c)
+            enabled_cam_ids = {c.id for c in cameras if c.enabled and c.rtsp_url}
+            for cid in list(self.workers.keys()):
+                if cid not in enabled_cam_ids:
+                    w = self.workers.pop(cid)
+                    w.stop()
+            machine_rows = {m.id: m for m in machines}
+            for mid in list(self.machine_rt.keys()):
+                if mid not in machine_rows:
+                    del self.machine_rt[mid]
+            for m in machines:
+                if m.id not in self.machine_rt:
+                    self.machine_rt[m.id] = MachineRuntime()
+                self._sync_machine_config(m, self.machine_rt[m.id])
+            cache = getattr(self, "_machine_snapshot_cache", {})
+            enabled_ids = {m.id for m in machines if m.enabled}
+            for mid in list(cache.keys()):
+                if mid not in enabled_ids:
+                    del cache[mid]
+            self._machine_snapshot_cache = cache
+        finally:
+            db.close()
+
     def run(self) -> None:
         db_session.get_engine()
         while not self._stop.is_set():
-            now = time.monotonic()
-            db = db_session.SessionLocal()
             try:
-                cameras, machines = self._reload_db(db)
-                if now >= self._reload_at:
+                now = time.monotonic()
+                if now >= self._reload_at or not self._machines_cache:
                     self._reload_at = now + 2.0
-                    for c in cameras:
-                        if c.enabled and c.rtsp_url:
-                            self._ensure_worker(c)
-                    for cid in list(self.workers.keys()):
-                        if cid not in {c.id for c in cameras if c.enabled and c.rtsp_url}:
-                            w = self.workers.pop(cid)
-                            w.stop()
+                    self._reload_config_from_db()
 
-                machine_rows = {m.id: m for m in machines}
-                for mid in list(self.machine_rt.keys()):
-                    if mid not in machine_rows:
-                        del self.machine_rt[mid]
-                for m in machines:
-                    if m.id not in self.machine_rt:
-                        self.machine_rt[m.id] = MachineRuntime()
-                    self._sync_machine_config(m, self.machine_rt[m.id])
-
+                cameras = self._cameras_cache
+                machines = self._machines_cache
                 for m in machines:
                     if not m.enabled:
                         continue
@@ -165,42 +191,11 @@ class VisionOrchestrator(threading.Thread):
                     if frame is None:
                         continue
                     t0 = time.monotonic()
-                    self._process_machine_frame(db, m, frame, w)
+                    self._process_machine_frame(m, frame, w)
                     self.machine_rt[m.id].perf.tick_process(time.monotonic() - t0)
-
-                cache = getattr(self, "_machine_snapshot_cache", {})
-                for m in machines:
-                    if m.id not in cache:
-                        cache[m.id] = {
-                            "id": m.id,
-                            "name": m.name,
-                            "camera_id": m.camera_id,
-                            "state": "DISABLED" if not m.enabled else "UNKNOWN",
-                            "position_01": None,
-                            "centroid": None,
-                            "roi_bbox": None,
-                            "cycle_time_last": None,
-                            "mold_name": None,
-                            "confidence": 0.0,
-                            "fps": 0.0,
-                            "process_ms": 0.0,
-                            "threshold_mode": (m.threshold_mode or "fixed").lower(),
-                            "threshold_active_min": m.threshold_min,
-                            "threshold_active_max": m.threshold_max,
-                            "threshold_offset": m.threshold_offset,
-                            "peak": 0,
-                            "background": 0,
-                            "prominence": 0,
-                            "segment_len": 0,
-                            "line_thickness": m.line_thickness,
-                            "reflector_len_min": m.reflector_len_min,
-                            "reflector_len_max": m.reflector_len_max,
-                            "occlusion_hold": False,
-                            "dbg_cycle_emit_count": 0,
-                        }
-                self._machine_snapshot_cache = cache
-            finally:
-                db.close()
+            except Exception as e:
+                logger.exception("vision loop failed: %s", e)
+                time.sleep(0.25)
 
             self._publish_snapshot()
             time.sleep(0.02)
@@ -214,7 +209,7 @@ class VisionOrchestrator(threading.Thread):
             stability_confirm_ms=m.stability_confirm_ms,
         )
 
-    def _process_machine_frame(self, db: Session, m: Machine, frame, worker: RtspWorker) -> None:
+    def _process_machine_frame(self, m: Machine, frame, worker: RtspWorker) -> None:
         rt = self.machine_rt[m.id]
 
         result = line_peak_position(
@@ -349,13 +344,7 @@ class VisionOrchestrator(threading.Thread):
             except queue.Full:
                 logger.warning("vision queue full, dropping cycle")
 
-        mold_name = None
-        if m.current_mold_id:
-            from app.db.models import Mold as MoldModel
-
-            mold = db.get(MoldModel, m.current_mold_id)
-            if mold:
-                mold_name = mold.name
+        mold_name = self._mold_names.get(m.current_mold_id) if m.current_mold_id else None
 
         confidence = min(1.0, result.prominence / 100.0) if effective_found else 0.0
 
@@ -395,7 +384,11 @@ class VisionOrchestrator(threading.Thread):
         cache = getattr(self, "_machine_snapshot_cache", {})
         cams = []
         for cid, w in self.workers.items():
-            cams.append({"id": cid, "status": w.status, "fps": w.fps})
+            age_ms = w.latest_age_ms()
+            status = w.status
+            if 0 <= age_ms < 10_000:
+                status = "ok"
+            cams.append({"id": cid, "status": status, "fps": w.fps})
         with self._lock:
             machines = sorted(cache.values(), key=lambda x: x["id"])
             self.snapshot = {

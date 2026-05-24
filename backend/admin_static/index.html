@@ -92,6 +92,35 @@
       </div>
 
       <div class="card">
+        <h3>Fabrika Wi-Fi (Access Point)</h3>
+        <p class="muted">
+          Kameralar ve TV bu aga baglanir (<b>pi-wifi</b> / NetworkManager profili).
+          SSID veya sifre degisince bagli cihazlar kopar; degisiklikten sonra yeni aga tekrar baglanin.
+          Bu sayfaya <b>pi-wifi</b> uzerinden bagliysaniz islem sonrasi baglanti kesilebilir.
+        </p>
+        <div id="wifiApStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
+        <div class="row">
+          <div class="col-4">
+            <label>Ag adi (SSID)</label>
+            <input id="wifiApSsid" maxlength="32" placeholder="ornek: pi-wifi" />
+          </div>
+          <div class="col-4">
+            <label>Yeni Wi-Fi sifresi (WPA2)</label>
+            <input id="wifiApPassword" type="password" maxlength="63" placeholder="Bos = sifreyi degistirme" autocomplete="new-password" />
+            <p class="muted" style="margin-top:4px;">En az 8 karakter. Bos birakirsaniz sadece SSID guncellenir.</p>
+          </div>
+          <div class="col-4">
+            <label>&nbsp;</label>
+            <button id="wifiApSaveBtn" class="btn-orange">SSID / Sifreyi Kaydet</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div class="col-3"><button id="wifiApRefreshBtn" class="btn-gray">Yenile</button></div>
+          <div class="col-9"><div id="wifiApMsg" class="muted"></div></div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="row">
           <div class="col-3">
             <label>Kamera</label>
@@ -337,6 +366,26 @@
         }
       }
 
+      async function refreshWifiAp(){
+        try{
+          const st = await jgetLocal('/api/system/wifi-ap');
+          const active = st.active ? '<span class="good">AP acik</span>' : '<span class="warn">AP kapali</span>';
+          const pwd = st.has_password ? 'sifre tanimli' : 'sifre yok';
+          const backend = st.backend ? ` &nbsp;|&nbsp; surucu: <b>${st.backend}</b>` : '';
+          q('wifiApStatus').innerHTML =
+            `Profil: <b>${st.connection_id || '—'}</b>${backend} &nbsp;|&nbsp; SSID: <b>${st.ssid || '—'}</b> &nbsp;|&nbsp; ` +
+            `${active} &nbsp;|&nbsp; ${pwd}` +
+            (st.channel ? ` &nbsp;|&nbsp; kanal ${st.channel}` : '') +
+            (st.can_configure ? '' : ` &nbsp; <span class="warn">${st.hint || 'sudo gerekli'}</span>`);
+          if(st.ssid) q('wifiApSsid').value = st.ssid;
+          q('wifiApSaveBtn').disabled = !st.can_configure;
+          return st;
+        }catch(e){
+          q('wifiApStatus').innerHTML = `<span class="bad">${String(e)}</span>`;
+          throw e;
+        }
+      }
+
       function thresholdLabel(m, sm){
         const mode = String(m.threshold_mode || 'fixed').toLowerCase();
         const off = Number(m.threshold_offset || 0);
@@ -350,10 +399,14 @@
 
       function signalLabel(m, sm){
         if(!sm) return '—';
-        const peak = sm.peak ?? 0;
-        const bg = sm.background ?? 0;
-        const prom = sm.prominence ?? 0;
-        const seg = sm.segment_len ?? 0;
+        const peak = Number(sm.peak ?? 0);
+        const bg = Number(sm.background ?? 0);
+        const prom = Number(sm.prominence ?? 0);
+        const fps = Number(sm.fps ?? 0);
+        if(peak === 0 && bg === 0 && prom === 0 && fps < 0.05){
+          return 'sinyal yok (kamera/kare yok)';
+        }
+        const seg = Number(sm.segment_len ?? 0);
         const lmin = m.reflector_len_min;
         const lmax = m.reflector_len_max;
         const lenTxt = (lmin != null && lmax != null) ? ` len ${seg} (${lmin}-${lmax})` : ` len ${seg}`;
@@ -362,26 +415,50 @@
 
       function renderMachineLiveTable(){
         const body = q('machineLiveBody');
-        const enabled = machines.filter(m => m.enabled);
-        if(!enabled.length){
-          body.innerHTML = '<tr><td colspan="5" class="muted">Aktif makine yok</td></tr>';
+        const dbById = new Map(machines.map(m => [Number(m.id), m]));
+        const snapList = (liveSnapshot.machines || [])
+          .filter(sm => sm.state !== 'DISABLED')
+          .sort((a, b) => Number(a.id) - Number(b.id));
+        if(!snapList.length){
+          body.innerHTML = '<tr><td colspan="5" class="muted">Canli veri yok — WS baglantisi veya aktif makine bekleniyor</td></tr>';
           return;
         }
-        const snapById = new Map(
-          (liveSnapshot.machines || [])
-            .filter(m => m.state !== 'DISABLED')
-            .map(m => [m.id, m])
-        );
-        body.innerHTML = enabled.map(m => {
-          const sm = snapById.get(m.id);
+        body.innerHTML = snapList.map(sm => {
+          const mid = Number(sm.id);
+          const m = dbById.get(mid) || sm;
+          const name = (m.name != null ? m.name : sm.name) || '';
+          const camId = m.camera_id != null ? m.camera_id : sm.camera_id;
           return `<tr>
-            <td>${m.id}</td>
-            <td>${escapeHtml(m.name || '')}</td>
-            <td>${m.camera_id}</td>
+            <td>${mid}</td>
+            <td>${escapeHtml(name)}</td>
+            <td>${camId ?? '—'}</td>
             <td>${escapeHtml(thresholdLabel(m, sm))}</td>
             <td>${escapeHtml(signalLabel(m, sm))}</td>
           </tr>`;
         }).join('');
+        const snapIds = new Set(snapList.map(sm => Number(sm.id)));
+        const pending = machines
+          .filter(m => m.enabled && !snapIds.has(Number(m.id)))
+          .sort((a, b) => Number(a.id) - Number(b.id));
+        if(pending.length){
+          body.innerHTML += pending.map(m => `<tr class="muted">
+            <td>${m.id}</td>
+            <td>${escapeHtml(m.name || '')}</td>
+            <td>${m.camera_id}</td>
+            <td>—</td>
+            <td>sinyal yok (henuz kare yok)</td>
+          </tr>`).join('');
+        }
+      }
+
+      async function refreshLiveSnapshotHttp(){
+        try{
+          const data = await jget('/api/live/snapshot');
+          if(data && Array.isArray(data.machines)){
+            liveSnapshot = data;
+            renderMachineLiveTable();
+          }
+        }catch(_e){ /* main app erisilemezse WS kullanilir */ }
       }
 
       function escapeHtml(s){
@@ -963,6 +1040,36 @@
         }catch(e){ setMsg('piTimeMsg', apiErrText(e), 'bad'); }
       };
 
+      q('wifiApRefreshBtn').onclick = async ()=>{
+        try{
+          await refreshWifiAp();
+          setMsg('wifiApMsg', 'Wi-Fi AP bilgisi guncellendi', 'good');
+        }catch(e){ setMsg('wifiApMsg', apiErrText(e), 'bad'); }
+      };
+      q('wifiApSaveBtn').onclick = async ()=>{
+        const ssid = q('wifiApSsid').value.trim();
+        const password = q('wifiApPassword').value;
+        if(!ssid){ setMsg('wifiApMsg', 'SSID girin', 'bad'); return; }
+        let confirmMsg = `Wi-Fi ag adi "${ssid}" olarak kaydedilsin mi?`;
+        if(password.trim()) confirmMsg += '\n\nYeni sifre de uygulanacak.';
+        confirmMsg += '\n\nBagli kameralar/TV kopabilir; islemden sonra yeni aga baglanin.';
+        if(!confirm(confirmMsg)) return;
+        try{
+          const body = { ssid, reconnect: true };
+          if(password.trim()) body.password = password;
+          const res = await jpostLocal('/api/system/wifi-ap', body);
+          q('wifiApPassword').value = '';
+          await refreshWifiAp();
+          setMsg(
+            'wifiApMsg',
+            res.reconnected
+              ? 'Kaydedildi ve AP yeniden baslatildi'
+              : 'Kaydedildi (AP kapaliydi; acinca yeni ayar gecerli)',
+            'good'
+          );
+        }catch(e){ setMsg('wifiApMsg', apiErrText(e), 'bad'); }
+      };
+
       function apiErrText(e){
         let msg = String(e);
         try{
@@ -1023,7 +1130,10 @@
 
       applyZoom();
       connectLiveWs();
+      refreshLiveSnapshotHttp();
+      setInterval(() => refreshLiveSnapshotHttp(), 1000);
       refreshPiTime().catch(e=>setMsg('piTimeMsg', String(e), 'bad'));
+      refreshWifiAp().catch(e=>setMsg('wifiApMsg', String(e), 'bad'));
       setInterval(()=>refreshPiTime().catch(()=>{}), 30000);
       loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
       setInterval(refreshCameraStatuses, 3000);

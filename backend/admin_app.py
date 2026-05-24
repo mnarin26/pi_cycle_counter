@@ -9,6 +9,7 @@ from app.db.session import SessionLocal, init_db
 from app.db.models import Camera
 from app.services.reset_production import wipe_production_history
 from app.services import system_time
+from app.services import wifi_ap
 from app.services.camera_time_sync import sync_camera_time
 
 
@@ -55,6 +56,34 @@ def set_system_ntp_admin(body: SetNtpBody):
     try:
         system_time.set_ntp_enabled(body.enabled)
         return {"ok": True, **system_time.get_time_status()}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.get("/api/system/wifi-ap")
+def get_wifi_ap_admin():
+    """Fabrika Wi-Fi AP (hotspot) SSID and status."""
+    return wifi_ap.get_wifi_ap_status()
+
+
+class SetWifiApBody(BaseModel):
+    ssid: str = Field(..., min_length=1, max_length=32)
+    password: str | None = Field(
+        default=None,
+        description="Yeni WPA2 sifresi (8-63 karakter). Bos birakilirsa mevcut sifre korunur.",
+    )
+    reconnect: bool = True
+
+
+@app.post("/api/system/wifi-ap")
+def set_wifi_ap_admin(body: SetWifiApBody):
+    try:
+        result = wifi_ap.set_wifi_ap(
+            body.ssid,
+            body.password,
+            reconnect=body.reconnect,
+        )
+        return {"ok": True, **result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
