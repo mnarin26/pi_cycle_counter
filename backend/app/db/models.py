@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -89,6 +90,7 @@ class Mold(Base):
 
 class MoldMachine(Base):
     __tablename__ = "mold_machines"
+    __table_args__ = (UniqueConstraint("mold_id", "machine_id", name="uq_mold_machines_mold_machine"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     mold_id: Mapped[int] = mapped_column(ForeignKey("molds.id"), nullable=False)

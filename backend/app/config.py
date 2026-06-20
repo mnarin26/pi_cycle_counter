@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     ws_broadcast_hz: float = 8.0
     vision_queue_max: int = 500
     abnormal_cycle_sigma: float = 4.0
+    # When False, cycles are counted without auto mold match / post-stop / abnormal filter.
+    auto_mold_matching: bool = False
+    # In-progress cycle survives UNKNOWN up to this long (also scaled per machine).
+    cycle_unknown_grace_s: float = 3.0
+    # After axis endpoint visit, tolerate longer signal loss (reflector under panel).
+    cycle_unknown_grace_after_extreme_s: float = 12.0
+    cycle_endpoint_margin: float = 0.15
+    cycle_min_travel_range: float = 0.18
 
     @property
     def cors_list(self) -> list[str]:

@@ -223,10 +223,14 @@ export type ZigzagPoint = {
   t: string;
   t_ms: number;
   cycle_time_s: number | null;
+  /** Gerçek süre — grafikte kısaltıldıysa tooltip için. */
+  cycle_time_s_raw?: number;
   mold: string;
   mold_color: string;
   is_gap?: boolean;
   gap_ms?: number;
+  /** Uzun duruştan sonraki ilk döngü (ölçüm mola süresini içerir). */
+  is_post_gap?: boolean;
 };
 
 export const ZIGZAG_CHART_MARGIN = { top: 8, right: 16, bottom: 24, left: 8 };
@@ -342,6 +346,7 @@ export function buildZigzagSeries(
 ): ZigzagPoint[] {
   const out: ZigzagPoint[] = [];
   let prevMs = 0;
+  let expectPostGap = false;
   for (const x of series) {
     const t_ms = parseApiTime(x.t);
     const mold = x.mold || "—";
@@ -357,15 +362,65 @@ export function buildZigzagSeries(
         is_gap: true,
         gap_ms: t_ms - prevMs,
       });
+      expectPostGap = true;
     }
     out.push({
       t: x.t,
       t_ms,
       cycle_time_s: Number(x.cycle_time_s.toFixed(3)),
+      cycle_time_s_raw: Number(x.cycle_time_s.toFixed(3)),
       mold,
       mold_color: color,
+      is_post_gap: expectPostGap,
     });
+    expectPostGap = false;
     prevMs = t_ms;
   }
   return out;
+}
+
+/** Y ekseni: aykırı / duruş sonrası dev döngüler skalayı bozmasın. */
+export function computeZigzagYDomain(
+  points: ZigzagPoint[],
+  hint?: { avgCycleS?: number; maxCycleS?: number },
+): [number, number] {
+  const values = points
+    .filter((p) => !p.is_gap && !p.is_post_gap)
+    .map((p) => p.cycle_time_s_raw ?? p.cycle_time_s)
+    .filter((v): v is number => v != null && Number.isFinite(v) && v > 0);
+
+  if (!values.length) {
+    const fallback = Math.max(
+      60,
+      (hint?.maxCycleS ?? 0) * 1.25,
+      (hint?.avgCycleS ?? 0) * 2.5,
+    );
+    return [0, fallback || 120];
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const p90 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
+  const median = sorted[Math.floor(sorted.length / 2)];
+  let ceiling = Math.max(p90 * 1.2, median * 2.5, 45);
+
+  const moldMax = hint?.maxCycleS ?? 0;
+  if (moldMax > 0 && moldMax < ceiling * 4) {
+    ceiling = Math.max(ceiling, moldMax * 1.25);
+  }
+
+  return [0, Math.min(600, Math.ceil(ceiling))];
+}
+
+/** Grafik çizimi için aşırı süreleri üst sınıra kırp; ham değer tooltip'te kalır. */
+export function applyZigzagYScale(points: ZigzagPoint[], yMax: number): ZigzagPoint[] {
+  return points.map((p) => {
+    if (p.is_gap || p.cycle_time_s == null) return p;
+    const raw = p.cycle_time_s_raw ?? p.cycle_time_s;
+    if (raw <= yMax) return p;
+    return {
+      ...p,
+      cycle_time_s_raw: raw,
+      cycle_time_s: Number(yMax.toFixed(3)),
+    };
+  });
 }

@@ -208,6 +208,11 @@ class VisionOrchestrator(threading.Thread):
             debounce_ms=m.debounce_ms,
             stability_confirm_ms=m.stability_confirm_ms,
         )
+        stability_s = max(0.5, float(m.stability_confirm_ms or 500) / 1000.0)
+        rt.ct.unknown_grace_s = max(settings.cycle_unknown_grace_s, stability_s * 6.0)
+        rt.ct.unknown_grace_after_extreme_s = settings.cycle_unknown_grace_after_extreme_s
+        rt.ct.endpoint_margin = settings.cycle_endpoint_margin
+        rt.ct.min_travel_range = settings.cycle_min_travel_range
 
     def _process_machine_frame(self, m: Machine, frame, worker: RtspWorker) -> None:
         rt = self.machine_rt[m.id]
@@ -303,7 +308,8 @@ class VisionOrchestrator(threading.Thread):
 
         self.playback.push(m.id, pos, confirmed.value)
 
-        cycle_s = rt.ct.on_confirmed(confirmed)
+        track_pos = pos if pos is not None else rt.hold_pos_01
+        cycle_s = rt.ct.on_confirmed(confirmed, track_pos)
         if cycle_s is not None and cycle_s > 0.05:
             rt.last_cycle_s = cycle_s
             rt.dbg_cycle_emit_count += 1

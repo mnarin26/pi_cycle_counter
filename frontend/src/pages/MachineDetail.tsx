@@ -20,6 +20,8 @@ import {
   buildMoldColorMap,
   moldColorFromMap,
   chartScrollWidth,
+  computeZigzagYDomain,
+  applyZigzagYScale,
   datetimeLocalInputToUtcIso,
   eventColor,
   formatAxisTime,
@@ -177,12 +179,20 @@ function ZigzagTooltipContent({
     nearest.deltaMs > 5000
       ? `İmleç: ${hoverLabel} · en yakın döngü (+${Math.round(nearest.deltaMs / 1000)} sn)`
       : null;
+  const rawS = d.cycle_time_s_raw ?? d.cycle_time_s!;
+  const clipped = rawS !== d.cycle_time_s;
 
   return (
     <div className="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-xs shadow-lg">
       <div className="font-medium text-slate-100">{cycleLabel}</div>
       {snapNote && <div className="mt-0.5 text-slate-500">{snapNote}</div>}
-      <div className="mt-1 text-slate-300">Döngü: {d.cycle_time_s!.toFixed(2)} s</div>
+      <div className="mt-1 text-slate-300">Döngü: {rawS.toFixed(2)} s</div>
+      {d.is_post_gap && (
+        <div className="text-amber-300">Duruş sonrası ilk döngü (mola süresi dahil)</div>
+      )}
+      {clipped && !d.is_post_gap && (
+        <div className="text-slate-500">Grafikte ölçek için üst sınıra kısaltıldı</div>
+      )}
       <div className="text-slate-300">Kalıp: {d.mold}</div>
     </div>
   );
@@ -429,6 +439,8 @@ export function MachineDetailPage() {
   const filterToMs = toInput ? parseApiTime(datetimeLocalInputToUtcIso(toInput)) : NaN;
   const zigzagVisibleMs = ZIGZAG_RESOLUTION_MS[zigzagResolution];
 
+  const viewportResetKey = `${machineId}|${range}|${fromInput}|${toInput}`;
+
   const viewport = useZigzagViewport({
     machineId,
     range,
@@ -436,6 +448,7 @@ export function MachineDetailPage() {
     windowTo: dash?.to,
     visibleSpanMs: zigzagVisibleMs,
     enabled: seriesLazy && !!dash,
+    resetKey: viewportResetKey,
   });
 
   const zigzagSource = useMemo(() => {
@@ -469,10 +482,33 @@ export function MachineDetailPage() {
     [moldColorMap],
   );
 
-  const zigzagData = useMemo(() => {
+  const zigzagDataRaw = useMemo(() => {
     if (chartMode !== "cycles") return [];
     return buildZigzagSeries(zigzagSource, gapMs, moldColorMap);
   }, [chartMode, zigzagSource, gapMs, moldColorMap]);
+
+  const moldStatsForScale = dash?.active_mold ?? dash?.summary;
+
+  const zigzagYDomain = useMemo((): [number, number] => {
+    return computeZigzagYDomain(zigzagDataRaw, {
+      avgCycleS: moldStatsForScale?.avg_cycle_s,
+      maxCycleS: moldStatsForScale?.max_cycle_s,
+    });
+  }, [zigzagDataRaw, moldStatsForScale?.avg_cycle_s, moldStatsForScale?.max_cycle_s]);
+
+  const zigzagData = useMemo(
+    () => applyZigzagYScale(zigzagDataRaw, zigzagYDomain[1]),
+    [zigzagDataRaw, zigzagYDomain],
+  );
+
+  const zigzagHasClipped = useMemo(
+    () =>
+      zigzagDataRaw.some((p) => {
+        const raw = p.cycle_time_s_raw ?? p.cycle_time_s;
+        return raw != null && raw > zigzagYDomain[1] * 1.01;
+      }),
+    [zigzagDataRaw, zigzagYDomain],
+  );
 
   const zigzagLineSegments = useMemo(
     () => (chartMode === "cycles" ? buildZigzagLineSegments(zigzagData) : []),
@@ -729,6 +765,12 @@ export function MachineDetailPage() {
             </div>
           </div>
         </div>
+        {zigzagHasClipped && chartMode === "cycles" && (
+          <p className="mb-2 text-xs text-slate-500">
+            Uzun duruş sonrası veya aşırı döngüler Y ekseninde kısaltılır; gerçek süre tooltip&apos;te
+            gösterilir (üst sınır ≈ {zigzagYDomain[1]} s).
+          </p>
+        )}
         {totalCycles > 0 && (seriesLazy || dash?.series_truncated) && (
           <p className="mb-2 text-xs text-amber-200">
             {seriesLazy
@@ -759,6 +801,8 @@ export function MachineDetailPage() {
                   height={36}
                 />
                 <YAxis
+                  domain={zigzagYDomain}
+                  allowDataOverflow
                   tick={{ fill: "#94a3b8", fontSize: 10 }}
                   label={{ value: "s", angle: 0, position: "insideLeft", fill: "#94a3b8" }}
                 />

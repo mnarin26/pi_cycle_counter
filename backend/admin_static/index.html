@@ -28,6 +28,8 @@
       table.live th { background: #0f172a; color: #93c5fd; font-weight: 600; }
       table.live tr:nth-child(even) td { background: #0f172a; }
       table.live tr:nth-child(odd) td { background: #111827; }
+      input[title], select[title], input[type="datetime-local"][title] { cursor: help; }
+      input[title]:hover, select[title]:hover { border-color: #64748b; }
     </style>
   </head>
   <body>
@@ -136,12 +138,12 @@
           </div>
           <div class="col-3">
             <label>Isleme genisligi (px)</label>
-            <input id="camWidth" type="number" min="160" max="1920" title="Kare Pi uzerinde bu genislige kucultulur; CPU yuku azalir. Kayittan sonra ~2 sn icinde uygulanir." />
+            <input id="camWidth" type="number" min="160" max="1920" />
             <p class="muted" style="margin-top:4px;">Ornek: 640. Kameranin kendi cozunurlugunu degistirmez.</p>
           </div>
           <div class="col-3">
             <label>Isleme FPS ust siniri</label>
-            <input id="camFps" type="number" min="1" max="30" title="Saniyede en fazla kac kare islenir (Pi yuku). RTSP akis hizini zorlamaz." />
+            <input id="camFps" type="number" min="1" max="30" />
             <p class="muted" style="margin-top:4px;">Ornek: 8. Dusuk = daha az CPU.</p>
           </div>
           <div class="col-3">
@@ -306,6 +308,46 @@
 
       function q(id){ return document.getElementById(id); }
       function setMsg(id, text, cls='muted'){ const el=q(id); el.className=cls; el.textContent=text; }
+
+      /** Hover aciklamalari — degistirilebilir tum kutucuklar */
+      const FIELD_TIPS = {
+        piTimezone: 'Dongu kayitlari ve panel saati icin kullanilan saat dilimi. Europe/Istanbul onerilir.',
+        piDatetime: 'Raspberry Pi sistem saatini elle ayarlar. Kaydedince NTP kapanir; ag saati yerine bu deger kullanilir.',
+        wifiApSsid: 'Pi fabrika Wi-Fi erisim noktasi adi (SSID). Kameralar ve TV bu aga baglanir.',
+        wifiApPassword: 'pi-wifi ag sifresi (WPA2). En az 8 karakter. Bos birakilirsa sadece SSID guncellenir.',
+        cameraSelect: 'RTSP ve isleme ayarlarini duzenlemek icin kamera secimi.',
+        rtspUrl: 'IP kameradan canli goruntu akisi (RTSP adresi). Ornek: rtsp://kullanici:sifre@192.168.1.10:554/stream2',
+        camWidth: 'Kare Pi uzerinde bu genislige kucultulur; islem hizi artar, CPU yuku azalir. Kameranin kendi cozunurlugunu degistirmez. Kayittan sonra ~2 sn icinde uygulanir.',
+        camFps: 'Saniyede en fazla kac kare islenir (Pi yuku). Dusuk deger = daha az CPU. RTSP akis hizini zorlamaz.',
+        camEnabled: 'false: kamera akisi durur ve bu kamerayi kullanan makineler sinyal alamaz.',
+        machineSelect: 'Kalibrasyon ve parametreler icin makine secimi.',
+        machineCameraSelect: 'Secili makine hangi kameranin goruntusunden takip edilecek. Degisince otomatik kaydedilir.',
+        machineName: 'Izleme panelinde (8000) gorunen makine adi.',
+        axisDir: 'Takip cizgisinin kapali→acik yonu. Kirmizi nokta kapali ucu, yesil nokta acik ucu gosterir.',
+        roiAngle: 'ROI dortgeninin donus acisi (derece). Cizgiyi hizalamak icin kullanilir.',
+        thresholdMode: 'fixed: sabit prominence esigi. adaptive: sahneye gore otomatik esik (parlak zeminlerde genelde daha iyi).',
+        thMin: 'Fixed modda reflektor kabul esigi: peak - arka plan en az bu kadar olmali (0-255). Dusuk = zayif reflektor de kabul.',
+        thOffset: 'Esige eklenen +/- deger. Negatif yaparsaniz daha zayif reflektorler de kabul edilir.',
+        lineThickness: 'Sari takip cizgisi etrafindaki piksel bandi (max-pool). Kalin = titreme/blur toleransi; ince = daha hassas.',
+        lenMin: 'Reflektor parlak segment minimum uzunlugu (ornek sayisi). Cok kisa parlamalari reddeder.',
+        lenMax: 'Reflektor parlak segment maksimum uzunlugu. Cok genis parlak bolgeleri reddeder.',
+        lenCalibSec: 'Otomatik uzunluk kalibrasyonu suresi (sn). Bu surede reflektoru cizgi boyunca bir kez gezdirin.',
+        open1d: 'Referans acik pozisyon (0-1, cizgi uzerinde). Yon tabanli modda bilgi amaclidir; asil OPEN/CLOSED hareket yonunden cikar.',
+        closed1d: 'Referans kapali pozisyon (0-1). Yon tabanli modda bilgi amaclidir.',
+        hys: 'Titreme toleransi. Yuksek = kucuk salinimlar MOVING sayilmaz; dusuk = daha hassas hareket algisi. Hareket epsilon ≈ hysteresis × 0.12.',
+        debounceMs: 'Hareketin MOVING olarak onaylanmasi icin minimum sure (ms). Kisa titremeleri filtreler.',
+        stabilityMs: 'OPEN veya CLOSED onayi icin duraklama suresi (ms). Uzun = daha gec ama kararli; kisa = hizli ama titremeye acik.',
+        occlusionGraceMs: 'Reflektor kisa sure kaybolunca son bilinen pozisyonu tutma suresi (ms). Kaporta alti / anlik kayiplarda sinyal kopmasini geciktirir.',
+        machineEnabled: 'false: makine sayimi durur, canli durum DISABLED olur.',
+        zoomSlider: 'Takip cizgisi hizalama zoom seviyesi (%50-%400). Ctrl+tekerlek ile de degistirilebilir.',
+      };
+
+      function applyFieldTips(){
+        for(const [id, text] of Object.entries(FIELD_TIPS)){
+          const el = q(id);
+          if(el) el.title = text;
+        }
+      }
 
       async function jget(path){
         const r = await fetch(API + path); if(!r.ok) throw new Error(await r.text()); return r.json();
@@ -1129,6 +1171,7 @@
       };
 
       applyZoom();
+      applyFieldTips();
       connectLiveWs();
       refreshLiveSnapshotHttp();
       setInterval(() => refreshLiveSnapshotHttp(), 1000);

@@ -44,12 +44,17 @@ export function useZigzagViewport(opts: {
   windowTo: string | undefined;
   visibleSpanMs: number;
   enabled: boolean;
+  /** Changes only when user picks machine/range/date filters — not on live dashboard refresh. */
+  resetKey: string;
 }) {
-  const { machineId, range, windowFrom, windowTo, visibleSpanMs, enabled } = opts;
+  const { machineId, range, windowFrom, windowTo, visibleSpanMs, enabled, resetKey } = opts;
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadedRangesRef = useRef<Array<[number, number]>>([]);
   const loadGenRef = useRef(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const layoutRef = useRef({ timelineMs: 0, chartWidth: 0, visibleSpanMs: 0 });
+  const prevWindowToRef = useRef(0);
+  const syncRef = useRef<() => void>(() => {});
 
   const [viewportPx, setViewportPx] = useState(960);
   const [cyclesByKey, setCyclesByKey] = useState<Map<string, ViewportCycle>>(new Map());
@@ -148,38 +153,62 @@ export function useZigzagViewport(opts: {
 
   const scheduleScrollLoad = useCallback(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(syncViewportFromScroll, 120);
-  }, [syncViewportFromScroll]);
+    debounceRef.current = setTimeout(() => syncRef.current(), 120);
+  }, []);
 
+  syncRef.current = syncViewportFromScroll;
+
+  // Hard reset only when the user changes machine / range / date filters.
   useEffect(() => {
     loadedRangesRef.current = [];
     setCyclesByKey(new Map());
+    prevWindowToRef.current = 0;
+    layoutRef.current = { timelineMs: 0, chartWidth: 0, visibleSpanMs: 0 };
     if (!enabled) return;
 
     const el = scrollRef.current;
     if (el) el.scrollLeft = 0;
 
-    // Only load the visible scroll window (+ pad), not the entire timeline.
-    const id = requestAnimationFrame(() => syncViewportFromScroll());
+    const id = requestAnimationFrame(() => syncRef.current());
     return () => cancelAnimationFrame(id);
-  }, [
-    enabled,
-    machineId,
-    range,
-    windowFrom,
-    windowTo,
-    windowFromMs,
-    windowToMs,
-    timelineMs,
-    visibleSpanMs,
-    syncViewportFromScroll,
-  ]);
+  }, [enabled, resetKey]);
 
+  // Live refresh extends windowTo ("now") — keep scroll position instead of jumping to start.
   useEffect(() => {
     if (!enabled) return;
-    const id = requestAnimationFrame(() => syncViewportFromScroll());
-    return () => cancelAnimationFrame(id);
-  }, [enabled, chartWidth, visibleSpanMs, syncViewportFromScroll]);
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const prev = layoutRef.current;
+    const layoutChanged =
+      prev.timelineMs !== timelineMs ||
+      prev.chartWidth !== chartWidth ||
+      prev.visibleSpanMs !== visibleSpanMs;
+
+    if (layoutChanged && prev.timelineMs > 0) {
+      const maxScrollOld = Math.max(1, prev.chartWidth - el.clientWidth);
+      const ratio = Math.min(1, el.scrollLeft / maxScrollOld);
+      const wasAtEnd = ratio >= 0.98;
+
+      requestAnimationFrame(() => {
+        const maxScrollNew = Math.max(0, el.scrollWidth - el.clientWidth);
+        el.scrollLeft = wasAtEnd ? maxScrollNew : ratio * maxScrollNew;
+        syncRef.current();
+      });
+    }
+
+    layoutRef.current = { timelineMs, chartWidth, visibleSpanMs };
+  }, [enabled, timelineMs, chartWidth, visibleSpanMs]);
+
+  // Fetch newly completed cycles when the reporting window grows.
+  useEffect(() => {
+    if (!enabled || !windowToMs) return;
+    const prev = prevWindowToRef.current;
+    if (prev > 0 && windowToMs > prev + 500) {
+      void loadRange(Math.max(windowFromMs, prev - 60_000), windowToMs + 60_000, { bypassCover: true });
+    }
+    prevWindowToRef.current = windowToMs;
+  }, [enabled, windowToMs, windowFromMs, loadRange]);
 
   useEffect(() => {
     const el = scrollRef.current;

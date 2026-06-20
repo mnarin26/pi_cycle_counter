@@ -56,6 +56,60 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+def _dedupe_mold_machine_links(conn) -> int:
+    """Merge duplicate mold↔machine rows before unique index enforcement."""
+    dupes = conn.execute(
+        text(
+            """
+            SELECT mold_id, machine_id, COUNT(*) AS c
+            FROM mold_machines
+            GROUP BY mold_id, machine_id
+            HAVING c > 1
+            """
+        )
+    ).fetchall()
+    removed = 0
+    for mold_id, machine_id, _count in dupes:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id, cycles_attributed, first_seen_at, last_seen_at
+                FROM mold_machines
+                WHERE mold_id = :mold_id AND machine_id = :machine_id
+                ORDER BY id
+                """
+            ),
+            {"mold_id": mold_id, "machine_id": machine_id},
+        ).fetchall()
+        if len(rows) <= 1:
+            continue
+        keep_id = rows[0][0]
+        total_cycles = sum(int(r[1] or 0) for r in rows)
+        first_seen = min(r[2] for r in rows if r[2] is not None)
+        last_seen = max(r[3] for r in rows if r[3] is not None)
+        conn.execute(
+            text(
+                """
+                UPDATE mold_machines
+                SET cycles_attributed = :cycles,
+                    first_seen_at = :first_seen,
+                    last_seen_at = :last_seen
+                WHERE id = :keep_id
+                """
+            ),
+            {
+                "cycles": total_cycles,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "keep_id": keep_id,
+            },
+        )
+        for row_id, _, _, _ in rows[1:]:
+            conn.execute(text("DELETE FROM mold_machines WHERE id = :id"), {"id": row_id})
+            removed += 1
+    return removed
+
+
 def init_db() -> None:
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
@@ -101,6 +155,13 @@ def init_db() -> None:
         )
         conn.execute(text("ANALYZE cycles"))
         conn.execute(text("ANALYZE events"))
+        _dedupe_mold_machine_links(conn)
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_mold_machines_mold_machine "
+                "ON mold_machines (mold_id, machine_id)"
+            )
+        )
     db = SessionLocal()
     try:
         changed = False

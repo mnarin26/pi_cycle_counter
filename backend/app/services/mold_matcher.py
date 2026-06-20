@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import Cycle, Event, Machine, Mold, MoldMachine, json_dumps
 from app.services.mold_names import clear_orphan_cycle_mold_labels
 
@@ -402,7 +403,7 @@ def _finalize_post_stop_decision(
         if update_stats:
             for t in decision_times:
                 apply_weighted_average(db, matched, t)
-                link_mold_machine(db, matched.id, machine.id)
+            link_mold_machine(db, matched.id, machine.id)
         ev_type = "mold_auto_matched"
         msg = (
             "Uzun duruş sonrası stabil pencere kayıtlı kalıpla eşleşti; "
@@ -1034,15 +1035,29 @@ def apply_weighted_average(db: Session, mold: Mold, sample: float) -> None:
 
 
 def link_mold_machine(db: Session, mold_id: int, machine_id: int) -> None:
-    row = (
+    rows = (
         db.query(MoldMachine)
         .filter_by(mold_id=mold_id, machine_id=machine_id)
-        .one_or_none()
+        .order_by(MoldMachine.id)
+        .all()
     )
     now = datetime.now(timezone.utc)
+    if len(rows) > 1:
+        keep = rows[0]
+        keep.cycles_attributed = sum(int(r.cycles_attributed or 0) for r in rows)
+        keep.first_seen_at = min(r.first_seen_at for r in rows if r.first_seen_at)
+        keep.last_seen_at = max(r.last_seen_at for r in rows if r.last_seen_at)
+        for extra in rows[1:]:
+            db.delete(extra)
+        row = keep
+    elif rows:
+        row = rows[0]
+    else:
+        row = None
+
     if row:
         row.last_seen_at = now
-        row.cycles_attributed = row.cycles_attributed + 1
+        row.cycles_attributed = int(row.cycles_attributed or 0) + 1
     else:
         db.add(
             MoldMachine(
@@ -1053,6 +1068,39 @@ def link_mold_machine(db: Session, mold_id: int, machine_id: int) -> None:
                 cycles_attributed=1,
             )
         )
+    db.flush()
+
+
+def _save_cycle_without_mold_matching(
+    db: Session,
+    machine: Machine,
+    cycle_s: float,
+    t_start: datetime,
+    t_end: datetime,
+    confidence: float,
+    mold_name_snapshot: str | None,
+) -> None:
+    """Persist a counted cycle without auto mold assignment or abnormal filtering."""
+    is_counted = True
+    exclude_reason: str | None = None
+    if cycle_s >= max(1.0, float(machine.no_movement_timeout_s or 120.0)):
+        is_counted = False
+        exclude_reason = "long_stop_or_no_movement"
+
+    db.add(
+        Cycle(
+            machine_id=machine.id,
+            mold_id=None,
+            cycle_time_s=cycle_s,
+            t_start=t_start,
+            t_end=t_end,
+            confidence=confidence,
+            mold_name_snapshot=mold_name_snapshot,
+            is_counted=is_counted,
+            exclude_reason=exclude_reason,
+        )
+    )
+    db.commit()
 
 
 def handle_cycle_completion(
@@ -1067,6 +1115,19 @@ def handle_cycle_completion(
     post_stop_bufs: dict[int, PostStopState] | None = None,
 ) -> None:
     bufs = _post_stop_buffers if post_stop_bufs is None else post_stop_bufs
+
+    if not settings.auto_mold_matching:
+        bufs.pop(machine.id, None)
+        _save_cycle_without_mold_matching(
+            db,
+            machine,
+            cycle_s,
+            t_start,
+            t_end,
+            confidence,
+            mold_name_snapshot,
+        )
+        return
 
     active = bufs.get(machine.id)
     if active is None:

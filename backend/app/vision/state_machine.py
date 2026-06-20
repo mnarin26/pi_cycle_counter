@@ -47,6 +47,7 @@ class ClampStateMachine:
     _last_move_dir: int = 0  # +1 or -1 (last meaningful movement direction)
     _filtered_pos: float | None = None
     _confirmed: ConfirmedZone = ConfirmedZone.UNKNOWN
+    _last_wait_zone: ConfirmedZone = ConfirmedZone.UNKNOWN
 
     def reset(self) -> None:
         self._last_pos = None
@@ -57,15 +58,24 @@ class ClampStateMachine:
         self._last_move_dir = 0
         self._filtered_pos = None
         self._confirmed = ConfirmedZone.UNKNOWN
+        self._last_wait_zone = ConfirmedZone.UNKNOWN
 
     def _classify_wait_zone(self) -> ConfirmedZone:
         # No fixed absolute endpoints: zone is inferred from the last movement direction.
         # +dir wait => CLOSED, -dir wait => OPEN.
         if self._last_move_dir > 0:
-            return ConfirmedZone.CLOSED
-        if self._last_move_dir < 0:
-            return ConfirmedZone.OPEN
-        return self._confirmed if self._confirmed in (ConfirmedZone.OPEN, ConfirmedZone.CLOSED) else ConfirmedZone.UNKNOWN
+            zone = ConfirmedZone.CLOSED
+        elif self._last_move_dir < 0:
+            zone = ConfirmedZone.OPEN
+        elif self._last_wait_zone in (ConfirmedZone.OPEN, ConfirmedZone.CLOSED):
+            zone = self._last_wait_zone
+        elif self._confirmed in (ConfirmedZone.OPEN, ConfirmedZone.CLOSED):
+            zone = self._confirmed
+        else:
+            zone = ConfirmedZone.UNKNOWN
+        if zone in (ConfirmedZone.OPEN, ConfirmedZone.CLOSED):
+            self._last_wait_zone = zone
+        return zone
 
     def step(self, position_01: float | None, now_ms: float | None = None) -> ConfirmedZone:
         if now_ms is None:
