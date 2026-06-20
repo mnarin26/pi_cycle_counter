@@ -65,6 +65,7 @@ class Machine(Base):
     learning_session: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
     current_mold_id: Mapped[int | None] = mapped_column(ForeignKey("molds.id"), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    qr_code: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
 
     camera: Mapped["Camera"] = relationship(back_populates="machines")
 
@@ -74,6 +75,7 @@ class Mold(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    qr_code: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     status: Mapped[str] = mapped_column(String(32), default="candidate")  # candidate, active, ignored
     avg_cycle_s: Mapped[float] = mapped_column(Float, default=0.0)
     tolerance_s: Mapped[float] = mapped_column(Float, default=0.35)

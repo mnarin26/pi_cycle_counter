@@ -135,6 +135,14 @@ def init_db() -> None:
         mold_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(molds)")).fetchall()}
         if "stdev_limit_s" not in mold_cols:
             conn.execute(text("ALTER TABLE molds ADD COLUMN stdev_limit_s REAL"))
+        if "qr_code" not in mold_cols:
+            conn.execute(text("ALTER TABLE molds ADD COLUMN qr_code VARCHAR(64)"))
+        if "qr_code" not in machine_cols:
+            conn.execute(text("ALTER TABLE machines ADD COLUMN qr_code VARCHAR(64)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_molds_qr_code ON molds (qr_code) WHERE qr_code IS NOT NULL"))
+        conn.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS uq_machines_qr_code ON machines (qr_code) WHERE qr_code IS NOT NULL")
+        )
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS ix_cycles_machine_counted_tend "

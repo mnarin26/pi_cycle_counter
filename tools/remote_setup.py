@@ -12,7 +12,6 @@ LOCAL_ROOT = Path(os.environ.get("LOCAL_ROOT", r"c:\Users\Bilgisayar02\injection
 REMOTE_ROOT = os.environ.get("REMOTE_ROOT", "/home/pi/injection-monitor")
 
 EXCLUDES = {".git", "node_modules", "__pycache__", ".venv", "data", "logs", ".cursor"}
-INCLUDE_ROOTS = {"backend", "frontend", "deploy", "README.md", ".gitignore"}
 
 
 def ensure_remote_dir(sftp: paramiko.SFTPClient, remote_path: str) -> None:
@@ -28,27 +27,16 @@ def ensure_remote_dir(sftp: paramiko.SFTPClient, remote_path: str) -> None:
 
 def upload_tree(sftp: paramiko.SFTPClient, local_root: Path, remote_root: str) -> None:
     ensure_remote_dir(sftp, remote_root)
-    files = []
     for p in local_root.rglob("*"):
         rel = p.relative_to(local_root)
-        if rel.parts and rel.parts[0] not in INCLUDE_ROOTS:
-            continue
         if any(part in EXCLUDES for part in rel.parts):
             continue
-        files.append(p)
-
-    sent = 0
-    for p in files:
-        rel = p.relative_to(local_root)
         remote_path = f"{remote_root}/{rel.as_posix()}"
         if p.is_dir():
             ensure_remote_dir(sftp, remote_path)
             continue
         ensure_remote_dir(sftp, f"{remote_root}/{rel.parent.as_posix()}")
         sftp.put(str(p), remote_path)
-        sent += 1
-        if sent % 30 == 0:
-            print(f"Uploaded {sent} files...")
 
 
 def run(ssh: paramiko.SSHClient, cmd: str) -> int:
@@ -84,13 +72,10 @@ def main() -> None:
         f"cd {REMOTE_ROOT}/backend && . .venv/bin/activate && pip install -r requirements.txt",
         f"cd {REMOTE_ROOT}/backend && . .venv/bin/activate && python -c \"from app.main import app; print('ok', app.title)\"",
         f"cd {REMOTE_ROOT}/frontend && (npm ci || npm install) && npm run build",
-        f"echo '{PASSWORD}' | sudo -S cp {REMOTE_ROOT}/deploy/systemd/injection-monitor.service /etc/systemd/system/injection-monitor.service",
-        f"echo '{PASSWORD}' | sudo -S cp {REMOTE_ROOT}/deploy/systemd/injection-monitor-admin.service /etc/systemd/system/injection-monitor-admin.service",
-        f"echo '{PASSWORD}' | sudo -S systemctl daemon-reload",
-        f"echo '{PASSWORD}' | sudo -S systemctl enable --now injection-monitor.service",
-        f"echo '{PASSWORD}' | sudo -S systemctl enable --now injection-monitor-admin.service",
-        f"echo '{PASSWORD}' | sudo -S systemctl status injection-monitor.service --no-pager -l | head -n 20",
-        f"echo '{PASSWORD}' | sudo -S systemctl status injection-monitor-admin.service --no-pager -l | head -n 20",
+        f"sudo cp {REMOTE_ROOT}/deploy/systemd/injection-monitor.service /etc/systemd/system/injection-monitor.service",
+        "sudo systemctl daemon-reload",
+        "sudo systemctl enable --now injection-monitor.service",
+        "sudo systemctl status injection-monitor.service --no-pager -l | head -n 20",
     ]
     for cmd in cmds:
         code = run(ssh, cmd)

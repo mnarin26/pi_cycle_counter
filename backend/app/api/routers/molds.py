@@ -30,12 +30,14 @@ router = APIRouter()
 class MoldOut(BaseModel):
     id: int
     name: str | None
+    qr_code: str | None = None
     status: str
     avg_cycle_s: float
     tolerance_s: float
     stdev_limit_s: float | None = None
     sample_count: int
     confidence: float
+    created_at: datetime | None = None
 
     class Config:
         from_attributes = True
@@ -47,6 +49,7 @@ class NameBody(BaseModel):
 
 class MoldUpdate(BaseModel):
     name: str | None = None
+    qr_code: str | None = Field(default=None, max_length=64)
     status: Literal["candidate", "active", "ignored"] | None = None
     avg_cycle_s: float | None = Field(default=None, gt=0)
     tolerance_s: float | None = Field(default=None, gt=0)
@@ -170,6 +173,13 @@ def update_mold(mold_id: int, body: MoldUpdate, db: Session = Depends(get_db)):
         data["name"] = name or None
         if name and data.get("status") is None and m.status == "candidate":
             m.status = "active"
+    if "qr_code" in data:
+        qc = (data["qr_code"] or "").strip() or None
+        if qc:
+            clash = db.query(Mold).filter(Mold.qr_code == qc, Mold.id != mold_id).first()
+            if clash:
+                raise HTTPException(400, detail="Bu QR kodu baska kalıpta kullanılıyor")
+        data["qr_code"] = qc
     for k, v in data.items():
         setattr(m, k, v)
     if m.name:

@@ -6,5 +6,6 @@ pydantic-settings==2.6.1
 python-multipart==0.0.17
 opencv-python-headless==4.10.0.84
 numpy>=1.26.4,<3
+httpx==0.28.1
 
 # Python 3.10+ (Bookworm / modern Windows). SQLAlchemy 2 + PEP 585 generics are not supported on 3.8.

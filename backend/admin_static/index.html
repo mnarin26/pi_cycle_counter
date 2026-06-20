@@ -28,6 +28,10 @@
       table.live th { background: #0f172a; color: #93c5fd; font-weight: 600; }
       table.live tr:nth-child(even) td { background: #0f172a; }
       table.live tr:nth-child(odd) td { background: #111827; }
+      .guide { font-size: 13px; line-height: 1.55; color: #cbd5e1; }
+      .guide ol { margin: 8px 0 0 18px; padding: 0; }
+      .guide li { margin-bottom: 6px; }
+      .guide code { background: #0f172a; padding: 1px 6px; border-radius: 4px; color: #93c5fd; }
       input[title], select[title], input[type="datetime-local"][title] { cursor: help; }
       input[title]:hover, select[title]:hover { border-color: #64748b; }
     </style>
@@ -119,6 +123,125 @@
         <div class="row" style="margin-top:8px;">
           <div class="col-3"><button id="wifiApRefreshBtn" class="btn-gray">Yenile</button></div>
           <div class="col-9"><div id="wifiApMsg" class="muted"></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Telegram Kalip Botu</h3>
+        <div class="guide" style="margin-bottom:12px;">
+          <b>Kurulum adimlari</b>
+          <ol>
+            <li>Telegram'da <code>@BotFather</code> acin → <code>/newbot</code> yazin.</li>
+            <li>Bot adi verin (ornek: <code>Fabrika Kalip</code>).</li>
+            <li>Kullanici adi <code>xxxxxx_bot</code> formatinda olmali (ornek: <code>alfamold_bot</code>).</li>
+            <li>BotFather'in verdigi <b>token</b>'i asagiya yapistirin → <b>Bot Ayarlarini Kaydet</b>.</li>
+            <li>Telegram aramada bot kullanici adinizi yazin (ornek <code>@alfamold_bot</code>) veya <code>t.me/alfamold_bot</code> acin.</li>
+            <li>Bota <code>/start</code> basin (bir kez yeterli).</li>
+            <li>Operatör Telegram ID ogrenmek icin: <code>@userinfobot</code> acin → Start → <code>Id: 123456789</code> satirini okuyun.</li>
+            <li>Operatör eklerken <b>Seviye 1</b> (atama+üretim) veya <b>Seviye 2</b> (sadece atama) seçin.</li>
+            <li>QR formatlari: makine <code>MACHINE:3</code> · kalip <code>MOLD:042</code></li>
+          </ol>
+        </div>
+        <div class="row">
+          <div class="col-3">
+            <label>Bot etkin</label>
+            <select id="tgEnabled"><option value="false">false</option><option value="true">true</option></select>
+          </div>
+          <div class="col-3">
+            <label>Bot kullanici adi</label>
+            <input id="tgUsername" placeholder="xxxxxx_bot" />
+          </div>
+          <div class="col-6">
+            <label>Bot token</label>
+            <input id="tgToken" type="password" autocomplete="new-password" placeholder="BotFather token (bos = mevcut korunur)" />
+            <p id="tgTokenHint" class="muted" style="margin-top:4px;"></p>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="tgSaveBtn" class="btn-orange">Bot Ayarlarini Kaydet</button>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="tgRefreshBtn" class="btn-gray">Yenile</button>
+          </div>
+          <div class="col-12"><div id="tgMsg" class="muted"></div></div>
+        </div>
+
+        <h4 style="margin:16px 0 8px;">Izinli operatörler</h4>
+        <div class="row">
+          <div class="col-4">
+            <label>Operatör adi</label>
+            <input id="tgOpName" placeholder="Ahmet Yilmaz" maxlength="128" />
+          </div>
+          <div class="col-4">
+            <label>Telegram user ID</label>
+            <input id="tgOpId" placeholder="123456789" inputmode="numeric" maxlength="32" />
+          </div>
+          <div class="col-3">
+            <label>Seviye</label>
+            <select id="tgOpLevel">
+              <option value="2">2 — Sadece kalıp ata</option>
+              <option value="1">1 — Ata + kalıp üret</option>
+            </select>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="tgOpAddBtn" class="btn-green">Operatör Ekle</button>
+          </div>
+        </div>
+        <div style="overflow-x:auto;margin-top:10px;">
+          <table class="live">
+            <thead>
+              <tr><th>Ad</th><th>Telegram ID</th><th>Seviye</th><th></th></tr>
+            </thead>
+            <tbody id="tgOpBody">
+              <tr><td colspan="3" class="muted">Henuz operatör yok.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Pi SSH Baglantisi (referans)</h3>
+        <p class="muted">Uzak erisim bilgisi (Tailscale IP, kullanici). Sifre burada saklanmaz; SSH anahtari onerilir.</p>
+        <div class="row">
+          <div class="col-3">
+            <label>Host / IP</label>
+            <input id="sshHost" placeholder="100.92.41.26" />
+          </div>
+          <div class="col-3">
+            <label>Kullanici</label>
+            <input id="sshUser" placeholder="pi" />
+          </div>
+          <div class="col-2">
+            <label>Port</label>
+            <input id="sshPort" type="number" min="1" max="65535" value="22" />
+          </div>
+          <div class="col-4">
+            <label>SSH alias (opsiyonel)</label>
+            <input id="sshAlias" placeholder="rsp3b" />
+          </div>
+          <div class="col-3">
+            <label>Kimlik</label>
+            <select id="sshAuth"><option value="key">SSH anahtari</option><option value="password">Sifre (yerel config)</option></select>
+          </div>
+          <div class="col-5">
+            <label>Anahtar yolu</label>
+            <input id="sshKeyPath" placeholder="~/.ssh/id_ed25519" />
+          </div>
+          <div class="col-4">
+            <label>Baglanti</label>
+            <div id="sshConnStr" class="muted" style="padding:10px 0;font-family:monospace;font-size:12px;">-</div>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="sshSaveBtn" class="btn-orange">SSH Kaydet</button>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="sshRefreshBtn" class="btn-gray">Yenile</button>
+          </div>
+          <div class="col-12"><div id="sshMsg" class="muted"></div></div>
         </div>
       </div>
 
@@ -315,6 +438,18 @@
         piDatetime: 'Raspberry Pi sistem saatini elle ayarlar. Kaydedince NTP kapanir; ag saati yerine bu deger kullanilir.',
         wifiApSsid: 'Pi fabrika Wi-Fi erisim noktasi adi (SSID). Kameralar ve TV bu aga baglanir.',
         wifiApPassword: 'pi-wifi ag sifresi (WPA2). En az 8 karakter. Bos birakilirsa sadece SSID guncellenir.',
+        tgEnabled: 'Telegram bot servisi kurulunca kalip atama icin acilir.',
+        tgUsername: 'BotFather kullanici adi, xxxxxx_bot formatinda (ornek alfamold_bot).',
+        tgToken: 'BotFather HTTP API token. Bos birakilirsa kayitli token korunur.',
+        tgOpName: 'Listede gorunecek operatör adi (ornek: Ahmet).',
+        tgOpId: 'Operatörün Telegram user ID (sadece rakam). @userinfobot ile ogrenilir.',
+        tgOpLevel: '1 = kalip ata + uret · 2 = sadece kalip ata.',
+        sshHost: 'Pi Tailscale veya LAN IP adresi.',
+        sshUser: 'SSH kullanici adi (genelde pi).',
+        sshPort: 'SSH portu (varsayilan 22).',
+        sshAlias: 'Yerel ~/.ssh/config Host alias (ornek rsp3b).',
+        sshAuth: 'Onerilen: SSH anahtari. Sifre web arayuzunde saklanmaz.',
+        sshKeyPath: 'Ozel anahtar dosya yolu.',
         cameraSelect: 'RTSP ve isleme ayarlarini duzenlemek icin kamera secimi.',
         rtspUrl: 'IP kameradan canli goruntu akisi (RTSP adresi). Ornek: rtsp://kullanici:sifre@192.168.1.10:554/stream2',
         camWidth: 'Kare Pi uzerinde bu genislige kucultulur; islem hizi artar, CPU yuku azalir. Kameranin kendi cozunurlugunu degistirmez. Kayittan sonra ~2 sn icinde uygulanir.',
@@ -367,6 +502,18 @@
       }
       async function jgetLocal(path){
         const r = await fetch(location.origin + path);
+        if(!r.ok) throw new Error(await r.text()); return r.json();
+      }
+      async function jpatchLocal(path, body){
+        const r = await fetch(location.origin + path, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        if(!r.ok) throw new Error(await r.text()); return r.json();
+      }
+      async function jpostLocalOp(path, body){
+        const r = await fetch(location.origin + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        if(!r.ok) throw new Error(await r.text()); return r.json();
+      }
+      async function jdeleteLocal(path){
+        const r = await fetch(location.origin + path, {method:'DELETE'});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
 
@@ -1122,6 +1269,122 @@
         return msg;
       }
 
+      async function refreshTelegramSettings(){
+        applyTelegramForm(await jgetLocal('/api/settings/telegram'));
+      }
+
+      function applyTelegramForm(t){
+        q('tgEnabled').value = t.enabled ? 'true' : 'false';
+        q('tgUsername').value = t.bot_username || '';
+        q('tgToken').value = '';
+        const hint = q('tgTokenHint');
+        if(t.token_set){
+          hint.textContent = 'Kayitli token (…' + (t.token_hint || '****') + '). Degistirmek icin yeni token yazin.';
+          hint.className = 'good';
+        }else{
+          hint.textContent = 'Henuz token kaydedilmedi.';
+          hint.className = 'warn';
+        }
+        renderTelegramOperators(t.operators || []);
+      }
+
+      function renderTelegramOperators(ops){
+        const body = q('tgOpBody');
+        if(!ops.length){
+          body.innerHTML = '<tr><td colspan="4" class="muted">Henuz operatör yok.</td></tr>';
+          return;
+        }
+        body.innerHTML = ops.map(op => `
+          <tr>
+            <td>${escapeHtml(op.name || '—')}</td>
+            <td><code>${escapeHtml(op.id)}</code></td>
+            <td>${op.level === 1 ? '1 — Ata+Üret' : '2 — Sadece ata'}</td>
+            <td><button type="button" class="btn-gray tg-op-del" data-id="${escapeHtml(op.id)}" data-name="${escapeHtml(op.name || '')}">Sil</button></td>
+          </tr>
+        `).join('');
+        body.querySelectorAll('.tg-op-del').forEach(btn=>{
+          btn.onclick = async ()=>{
+            const id = btn.getAttribute('data-id');
+            const nm = btn.getAttribute('data-name') || id;
+            if(!confirm('Operatör silinsin mi?\\n' + nm + ' (' + id + ')')) return;
+            try{
+              const t = await jdeleteLocal('/api/settings/telegram/operators/' + encodeURIComponent(id));
+              applyTelegramForm(t);
+              setMsg('tgMsg', nm + ' silindi.', 'good');
+            }catch(e){ setMsg('tgMsg', apiErrText(e), 'bad'); }
+          };
+        });
+      }
+
+      function escapeHtml(s){
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      }
+
+      function applySshForm(s){
+        q('sshHost').value = s.host || '';
+        q('sshUser').value = s.user || 'pi';
+        q('sshPort').value = String(s.port || 22);
+        q('sshAlias').value = s.alias || '';
+        q('sshAuth').value = s.auth_method === 'password' ? 'password' : 'key';
+        q('sshKeyPath').value = s.key_path || '~/.ssh/id_ed25519';
+        q('sshConnStr').textContent = s.connection_string || '-';
+      }
+
+      async function refreshSshSettings(){
+        applySshForm(await jgetLocal('/api/settings/ssh'));
+      }
+
+      q('tgRefreshBtn').onclick = ()=> refreshTelegramSettings().then(()=>setMsg('tgMsg','Yenilendi','good')).catch(e=>setMsg('tgMsg',apiErrText(e),'bad'));
+      q('tgSaveBtn').onclick = async ()=>{
+        try{
+          const body = {
+            enabled: q('tgEnabled').value === 'true',
+            bot_username: q('tgUsername').value.trim(),
+          };
+          const tok = q('tgToken').value.trim();
+          if(tok) body.bot_token = tok;
+          const t = await jpatchLocal('/api/settings/telegram', body);
+          applyTelegramForm(t);
+          setMsg('tgMsg','Bot ayarlari kaydedildi.','good');
+        }catch(e){ setMsg('tgMsg', apiErrText(e), 'bad'); }
+      };
+
+      q('tgOpAddBtn').onclick = async ()=>{
+        try{
+          const name = q('tgOpName').value.trim();
+          const telegram_user_id = q('tgOpId').value.trim();
+          if(!name || !telegram_user_id){
+            setMsg('tgMsg', 'Operatör adi ve Telegram ID gerekli.', 'bad');
+            return;
+          }
+          const t = await jpostLocalOp('/api/settings/telegram/operators', {
+            name,
+            telegram_user_id,
+            level: Number(q('tgOpLevel').value) || 2,
+          });
+          q('tgOpName').value = '';
+          q('tgOpId').value = '';
+          applyTelegramForm(t);
+          setMsg('tgMsg', name + ' eklendi.', 'good');
+        }catch(e){ setMsg('tgMsg', apiErrText(e), 'bad'); }
+      };
+
+      q('sshRefreshBtn').onclick = ()=> refreshSshSettings().then(()=>setMsg('sshMsg','Yenilendi','good')).catch(e=>setMsg('sshMsg',apiErrText(e),'bad'));
+      q('sshSaveBtn').onclick = async ()=>{
+        try{
+          const s = await jpatchLocal('/api/settings/ssh', {
+            host: q('sshHost').value.trim(),
+            user: q('sshUser').value.trim(),
+            port: Number(q('sshPort').value) || 22,
+            alias: q('sshAlias').value.trim(),
+            auth_method: q('sshAuth').value,
+            key_path: q('sshKeyPath').value.trim(),
+          });
+          applySshForm(s);
+          setMsg('sshMsg','SSH ayarlari kaydedildi','good');
+        }catch(e){ setMsg('sshMsg', apiErrText(e), 'bad'); }
+      };
+
       q('resetProdBtn').onclick = async ()=>{
         const ok = confirm('Tum sayim, olay ve kalip gecmisini sifirlamak istiyor musun? Bu islem geri alinmaz.');
         if(!ok) return;
@@ -1177,6 +1440,8 @@
       setInterval(() => refreshLiveSnapshotHttp(), 1000);
       refreshPiTime().catch(e=>setMsg('piTimeMsg', String(e), 'bad'));
       refreshWifiAp().catch(e=>setMsg('wifiApMsg', String(e), 'bad'));
+      refreshTelegramSettings().catch(e=>setMsg('tgMsg', apiErrText(e), 'bad'));
+      refreshSshSettings().catch(e=>setMsg('sshMsg', apiErrText(e), 'bad'));
       setInterval(()=>refreshPiTime().catch(()=>{}), 30000);
       loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
       setInterval(refreshCameraStatuses, 3000);

@@ -8,12 +8,14 @@ const MIN_STDEV_LIMIT = 0.25;
 type Mold = {
   id: number;
   name: string | null;
+  qr_code: string | null;
   status: string;
   avg_cycle_s: number;
   tolerance_s: number;
   stdev_limit_s: number | null;
   sample_count: number;
   confidence: number;
+  created_at?: string | null;
 };
 
 function effectiveStdevLimit(m: Pick<Mold, "avg_cycle_s" | "stdev_limit_s">): number {
@@ -50,6 +52,7 @@ type MoldUsageResponse = {
 
 type EditDraft = {
   name: string;
+  qr_code: string;
   status: "candidate" | "active" | "ignored";
   avg_cycle_s: string;
   tolerance_s: string;
@@ -60,6 +63,7 @@ type EditDraft = {
 function draftFromMold(m: Mold): EditDraft {
   return {
     name: m.name ?? "",
+    qr_code: m.qr_code ?? "",
     status: (m.status as EditDraft["status"]) || "candidate",
     avg_cycle_s: String(m.avg_cycle_s),
     tolerance_s: String(m.tolerance_s),
@@ -100,6 +104,7 @@ function MoldCard({
       }
       await apiPatch<Mold>(`/api/molds/${mold.id}`, {
         name: draft.name.trim() || null,
+        qr_code: draft.qr_code.trim() || null,
         status: draft.status,
         avg_cycle_s: avg,
         tolerance_s: tol,
@@ -136,7 +141,7 @@ function MoldCard({
           <div className="min-w-[200px] flex-1">
             <div className="font-medium">{mold.name || "İsimsiz kalıp önerisi"}</div>
             <div className="text-xs text-slate-400">
-              Durum: {mold.status} · Ort. {mold.avg_cycle_s.toFixed(2)}s · Eşleşme ±{mold.tolerance_s.toFixed(2)}s
+              QR: {mold.qr_code ? <code className="text-accent">{mold.qr_code}</code> : "—"} · Durum: {mold.status} · Ort. {mold.avg_cycle_s.toFixed(2)}s · Eşleşme ±{mold.tolerance_s.toFixed(2)}s
               · Stab. eşik {effectiveStdevLimit(mold).toFixed(2)}s
               {mold.stdev_limit_s == null ? " (oto)" : ""} · n=
               {mold.sample_count} · güven {(mold.confidence * 100).toFixed(0)}%
@@ -197,6 +202,15 @@ function MoldCard({
                 className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
                 value={draft.name}
                 onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+              />
+            </label>
+            <label className="text-sm sm:col-span-2">
+              <span className="mb-1 block text-xs text-slate-400">QR kodu (MOLD:042 plakasındaki kod)</span>
+              <input
+                className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2 font-mono"
+                placeholder="042"
+                value={draft.qr_code}
+                onChange={(e) => setDraft((d) => ({ ...d, qr_code: e.target.value }))}
               />
             </label>
             <label className="text-sm">
