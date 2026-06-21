@@ -1,50 +1,38 @@
-"""Telegram operator whitelist and permission levels."""
+"""Telegram operator whitelist and permission flags."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
-from app.services.stored_settings import get_telegram_config, normalize_operators
+from app.services.stored_settings import PERMISSION_KEYS, normalize_operators, get_telegram_config
 
 
 @dataclass
 class TelegramOperator:
     id: str
     name: str
-    level: int  # 1 = assign + create, 2 = assign only
+    role: str  # admin, user
+    permissions: dict[str, bool] = field(default_factory=dict)
+
+    def has(self, perm: str) -> bool:
+        return bool(self.permissions.get(perm, False))
 
 
-def _parse_level(value) -> int:
-    try:
-        lv = int(value)
-    except (TypeError, ValueError):
-        return 2
-    return 1 if lv == 1 else 2
+def _to_operator(item: dict) -> TelegramOperator:
+    perms = item.get("permissions") or {}
+    return TelegramOperator(
+        id=item["id"],
+        name=item.get("name") or item["id"],
+        role=item.get("role") or "user",
+        permissions={k: bool(perms.get(k, False)) for k in PERMISSION_KEYS},
+    )
 
 
 def list_operators(db: Session) -> list[TelegramOperator]:
     raw = get_telegram_config(db)
-    ops = raw.get("operators")
-    if not isinstance(ops, list):
-        ops = normalize_operators(raw)
-        return [TelegramOperator(id=o["id"], name=o["name"], level=2) for o in ops]
-    result: list[TelegramOperator] = []
-    for item in ops:
-        if not isinstance(item, dict):
-            continue
-        uid = str(item.get("id") or item.get("telegram_user_id") or "").strip()
-        if not uid:
-            continue
-        result.append(
-            TelegramOperator(
-                id=uid,
-                name=str(item.get("name") or "").strip() or uid,
-                level=_parse_level(item.get("level")),
-            )
-        )
-    return result
+    return [_to_operator(o) for o in normalize_operators(raw)]
 
 
 def get_operator(db: Session, telegram_user_id: str) -> TelegramOperator | None:
@@ -56,8 +44,8 @@ def get_operator(db: Session, telegram_user_id: str) -> TelegramOperator | None:
 
 
 def can_assign(op: TelegramOperator) -> bool:
-    return op.level in (1, 2)
+    return op.has("bot_mold_assign")
 
 
 def can_create_mold(op: TelegramOperator) -> bool:
-    return op.level == 1
+    return op.has("bot_mold_create")

@@ -9,14 +9,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 import app.db.session as db_session
-from app.api.routers import analytics, calibration, cameras, events, machines, molds, settings as settings_router
+from app.services.auth_service import get_session_user
+from app.api.routers import analytics, auth, calibration, cameras, events, machines, molds, settings as settings_router
 from app.vision.orchestrator import VisionOrchestrator, drain_cycle_queue_item
 from app.ws.hub import Hub
 
@@ -136,6 +137,54 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Endpoints reachable without a session. The TV wall (/tv) is public and reads live data.
+_AUTH_ALLOWLIST = {
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/health",
+    "/api/live/snapshot",
+}
+
+
+ADMIN_PROXY_HEADER = "X-Injection-Admin-Proxy"
+ADMIN_PROXY_TOKEN = "loopback-proxy"
+
+
+def _is_public_api(path: str) -> bool:
+    if path in _AUTH_ALLOWLIST:
+        return True
+    if path.startswith("/api/analytics/tv_board"):
+        return True
+    return False
+
+
+def _is_admin_proxy(request: Request) -> bool:
+    """8080 admin panel proxy from same Pi (loopback + shared secret)."""
+    if not request.client or request.client.host not in ("127.0.0.1", "::1"):
+        return False
+    return request.headers.get(ADMIN_PROXY_HEADER) == ADMIN_PROXY_TOKEN
+
+
+@app.middleware("http")
+async def require_session_for_api(request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and not _is_public_api(path):
+        if _is_admin_proxy(request):
+            return await call_next(request)
+        token = request.cookies.get(settings.session_cookie_name)
+        db = db_session.SessionLocal()
+        try:
+            user = get_session_user(db, token)
+        finally:
+            db.close()
+        if user is None:
+            return JSONResponse(status_code=401, content={"detail": "Oturum gerekli"})
+        if not (user.is_super or user.has("panel_8000")):
+            return JSONResponse(status_code=403, content={"detail": "8000 paneli icin yetkiniz yok"})
+    return await call_next(request)
+
+
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(cameras.router, prefix="/api/cameras", tags=["cameras"])
 app.include_router(machines.router, prefix="/api/machines", tags=["machines"])
 app.include_router(molds.router, prefix="/api/molds", tags=["molds"])

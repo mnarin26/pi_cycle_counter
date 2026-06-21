@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     cycle_endpoint_margin: float = 0.15
     cycle_min_travel_range: float = 0.18
 
+    # Auth: embedded super password (overridable via .env SUPER_PASSWORD)
+    super_password: str = "cb5BAC508"
+    session_max_hours: float = 12.0
+    session_idle_hours: float = 2.0
+    session_cookie_name: str = "im_session"
+
     @property
     def database_url(self) -> str:
         db_path = (self.data_dir / "injection.db").resolve()

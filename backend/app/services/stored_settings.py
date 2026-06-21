@@ -60,6 +60,44 @@ def mask_token(token: str | None) -> dict[str, Any]:
     return {"token_set": True, "token_hint": hint}
 
 
+PERMISSION_KEYS = ("panel_8000", "panel_8080", "bot_mold_create", "bot_mold_assign")
+
+
+def _coerce_perms(role: str, raw_perms: Any) -> dict[str, bool]:
+    if role == "admin":
+        return {k: True for k in PERMISSION_KEYS}
+    perms = raw_perms if isinstance(raw_perms, dict) else {}
+    return {k: bool(perms.get(k, False)) for k in PERMISSION_KEYS}
+
+
+def _migrate_operator(item: dict[str, Any]) -> dict[str, Any] | None:
+    uid = str(item.get("id") or item.get("telegram_user_id") or "").strip()
+    if not uid:
+        return None
+    name = str(item.get("name") or "").strip()
+    role = str(item.get("role") or "").strip().lower()
+    if role not in ("admin", "user"):
+        # Legacy level-based migration: level 1 -> admin, level 2 -> user (assign only)
+        try:
+            level = int(item.get("level") or 2)
+        except (TypeError, ValueError):
+            level = 2
+        if level == 1:
+            role = "admin"
+            raw_perms: Any = None
+        else:
+            role = "user"
+            raw_perms = {"bot_mold_assign": True}
+    else:
+        raw_perms = item.get("permissions")
+    return {
+        "id": uid,
+        "name": name,
+        "role": role,
+        "permissions": _coerce_perms(role, raw_perms),
+    }
+
+
 def normalize_operators(raw: dict[str, Any]) -> list[dict[str, Any]]:
     ops = raw.get("operators")
     if not isinstance(ops, list):
@@ -70,28 +108,22 @@ def normalize_operators(raw: dict[str, Any]) -> list[dict[str, Any]]:
         for part in str(legacy).split(","):
             uid = part.strip()
             if uid.isdigit():
-                out.append({"id": uid, "name": "", "level": 2})
+                out.append(
+                    {
+                        "id": uid,
+                        "name": "",
+                        "role": "user",
+                        "permissions": _coerce_perms("user", {"bot_mold_assign": True}),
+                    }
+                )
         return out
     result: list[dict[str, Any]] = []
     for item in ops:
         if not isinstance(item, dict):
             continue
-        uid = str(item.get("id") or item.get("telegram_user_id") or "").strip()
-        if not uid:
-            continue
-        try:
-            level = int(item.get("level") or 2)
-        except (TypeError, ValueError):
-            level = 2
-        if level not in (1, 2):
-            level = 2
-        result.append(
-            {
-                "id": uid,
-                "name": str(item.get("name") or "").strip(),
-                "level": level,
-            }
-        )
+        migrated = _migrate_operator(item)
+        if migrated:
+            result.append(migrated)
     return result
 
 
@@ -111,12 +143,22 @@ def get_allowed_operator_ids(raw: dict[str, Any]) -> set[str]:
     return {op["id"] for op in normalize_operators(raw)}
 
 
+def get_operator_record(db: Session, telegram_user_id: str) -> dict[str, Any] | None:
+    uid = str(telegram_user_id).strip()
+    raw = get_section(db, "telegram")
+    for op in normalize_operators(raw):
+        if op["id"] == uid:
+            return op
+    return None
+
+
 def add_operator(
     db: Session,
     *,
     name: str,
     telegram_user_id: str,
-    level: int = 2,
+    role: str = "user",
+    permissions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     uid = telegram_user_id.strip()
     if not uid.isdigit():
@@ -124,12 +166,50 @@ def add_operator(
     nm = name.strip()
     if not nm:
         raise ValueError("Operatör adi bos olamaz")
-    if level not in (1, 2):
-        raise ValueError("Seviye 1 veya 2 olmali")
+    role = (role or "user").strip().lower()
+    if role not in ("admin", "user"):
+        raise ValueError("Rol 'admin' veya 'user' olmali")
     raw = get_section(db, "telegram")
     ops = normalize_operators(raw)
     ops = [o for o in ops if o["id"] != uid]
-    ops.append({"id": uid, "name": nm, "level": level})
+    ops.append(
+        {
+            "id": uid,
+            "name": nm,
+            "role": role,
+            "permissions": _coerce_perms(role, permissions),
+        }
+    )
+    patch_section(db, "telegram", {"operators": ops})
+    return telegram_public_view(get_section(db, "telegram"))
+
+
+def update_operator(
+    db: Session,
+    *,
+    telegram_user_id: str,
+    name: str | None = None,
+    role: str | None = None,
+    permissions: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    uid = telegram_user_id.strip()
+    raw = get_section(db, "telegram")
+    ops = normalize_operators(raw)
+    found = next((o for o in ops if o["id"] == uid), None)
+    if not found:
+        raise ValueError("Operatör bulunamadi")
+    if name is not None:
+        nm = name.strip()
+        if not nm:
+            raise ValueError("Operatör adi bos olamaz")
+        found["name"] = nm
+    if role is not None:
+        r = role.strip().lower()
+        if r not in ("admin", "user"):
+            raise ValueError("Rol 'admin' veya 'user' olmali")
+        found["role"] = r
+    if permissions is not None or role is not None:
+        found["permissions"] = _coerce_perms(found["role"], permissions if permissions is not None else found.get("permissions"))
     patch_section(db, "telegram", {"operators": ops})
     return telegram_public_view(get_section(db, "telegram"))
 

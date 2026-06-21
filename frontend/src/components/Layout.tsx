@@ -1,10 +1,10 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useLiveSnapshot } from "../hooks/useLiveSnapshot";
+import { useAuth } from "../hooks/useAuth";
 
 const nav = [
   ["/", "Pano"],
   ["/tv", "TV Ekranı"],
-  ["/live", "Canlı"],
   ["/molds", "Kalıplar"],
   ["/analytics", "Analitik"],
   ["/events", "Olaylar"],
@@ -12,6 +12,7 @@ const nav = [
 
 export function Layout() {
   const { connected, snapshot } = useLiveSnapshot();
+  const { user, logout } = useAuth();
   const fps = snapshot.cameras.map((c) => c.fps).reduce((a, b) => a + b, 0);
 
   return (
@@ -33,10 +34,21 @@ export function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="ml-auto flex gap-4 text-xs text-slate-400">
+        <div className="ml-auto flex items-center gap-4 text-xs text-slate-400">
           <span>WS: {connected ? <span className="text-ok">bağlı</span> : <span className="text-alarm">kopuk</span>}</span>
           <span>FPS~ {fps.toFixed(1)}</span>
           <span>İşlem ms~ {snapshot.cpu_proxy.toFixed(1)}</span>
+          {user && (
+            <span className="flex items-center gap-2">
+              <span className="text-slate-300">{user.display_name}</span>
+              <button
+                onClick={logout}
+                className="px-2 py-1 rounded-md bg-slate-700 text-slate-200 hover:bg-slate-600"
+              >
+                Çıkış
+              </button>
+            </span>
+          )}
         </div>
       </header>
       <main className="flex-1 p-4">

@@ -138,5 +138,44 @@ class AppSetting(Base):
     value_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
 
 
+class WebSession(Base):
+    __tablename__ = "web_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    actor_type: Mapped[str] = mapped_column(String(16), nullable=False)  # super, operator
+    telegram_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    permissions_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DailyPassword(Base):
+    __tablename__ = "daily_passwords"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    valid_date: Mapped[str] = mapped_column(String(10), nullable=False)  # YYYY-MM-DD (Europe/Istanbul)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    actor_type: Mapped[str] = mapped_column(String(16), nullable=False)  # super, operator, system
+    telegram_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    actor_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    detail_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+
 def json_dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False)

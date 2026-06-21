@@ -21,6 +21,8 @@ from app.services.mold_registry import (
 from app.services.qr_codec import QrKind, decode_qr_from_image_bytes, parse_qr_text
 from app.services.stored_settings import get_telegram_config
 from app.services.telegram_auth import can_assign, can_create_mold, get_operator
+from app.services.daily_password import issue_daily_password
+from app.services import audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +76,20 @@ def send_message(token: str, chat_id: int, text: str, *, reply_markup: dict | No
     _api(token, "sendMessage", **body)
 
 
-def _main_keyboard(level: int) -> dict:
-    rows = [["📌 Kalıp Ata"]]
-    if level == 1:
+def _main_keyboard(operator) -> dict:
+    rows = []
+    if can_assign(operator):
+        rows.append(["📌 Kalıp Ata"])
+    if can_create_mold(operator):
         rows.append(["➕ Kalıp Üret"])
+    if _can_panel(operator):
+        rows.append(["🔑 Şifre İste"])
     rows.append(["❌ İptal"])
     return {"keyboard": rows, "resize_keyboard": True, "one_time_keyboard": False}
+
+
+def _can_panel(operator) -> bool:
+    return operator.has("panel_8000") or operator.has("panel_8080")
 
 
 def _remove_keyboard(token: str, chat_id: int, text: str) -> None:
@@ -113,12 +123,12 @@ def reset_session(user_id: str) -> None:
 
 def handle_start(token: str, chat_id: int, user_id: str, operator) -> None:
     reset_session(user_id)
-    level_label = "Seviye 1 — atama + üretim" if operator.level == 1 else "Seviye 2 — sadece atama"
+    role_label = "Yönetici" if operator.role == "admin" else "Kullanıcı"
     send_message(
         token,
         chat_id,
-        f"Merhaba {operator.name}.\n{level_label}\n\nMenüden işlem seçin.",
-        reply_markup=_main_keyboard(operator.level),
+        f"Merhaba {operator.name}.\nRol: {role_label}\n\nMenüden işlem seçin.",
+        reply_markup=_main_keyboard(operator),
     )
 
 
@@ -128,7 +138,35 @@ def handle_cancel(token: str, chat_id: int, user_id: str, operator) -> None:
         token,
         chat_id,
         "İptal edildi.",
-        reply_markup=_main_keyboard(operator.level),
+        reply_markup=_main_keyboard(operator),
+    )
+
+
+def handle_password_request(token: str, chat_id: int, user_id: str, operator) -> None:
+    if not _can_panel(operator):
+        send_message(token, chat_id, "Panel erişiminiz yok; şifre üretemezsiniz.")
+        return
+    db = db_session.SessionLocal()
+    try:
+        plain = issue_daily_password(db, operator.id)
+        audit_log.log_action(
+            db,
+            actor_type="operator",
+            action="auth.daily_password_issued",
+            actor_name=operator.name,
+            telegram_user_id=operator.id,
+        )
+    finally:
+        db.close()
+    send_message(
+        token,
+        chat_id,
+        (
+            f"🔑 Bugünkü giriş şifreniz:\n\n{plain}\n\n"
+            "Bu şifre bugün geçerlidir. Panele (8000/8080) kullanıcı adı olmadan "
+            "sadece bu şifreyle giriş yapın. Yeni şifre isterseniz eskisi geçersiz olur."
+        ),
+        reply_markup=_main_keyboard(operator),
     )
 
 
@@ -152,6 +190,9 @@ def handle_text_command(token: str, chat_id: int, user_id: str, operator, text: 
     if _match_cmd(t, "/iptal", "❌ İptal", "İptal", "iptal"):
         handle_cancel(token, chat_id, user_id, operator)
         return
+    if _match_cmd(t, "🔑 Şifre İste", "Şifre İste", "/sifre", "sifre iste"):
+        handle_password_request(token, chat_id, user_id, operator)
+        return
     if _match_cmd(t, "📌 Kalıp Ata", "Kalıp Ata", "/ata", "kalip ata"):
         if not can_assign(operator):
             send_message(token, chat_id, "Bu işlem için yetkiniz yok.")
@@ -168,7 +209,7 @@ def handle_text_command(token: str, chat_id: int, user_id: str, operator, text: 
         return
     if _match_cmd(t, "➕ Kalıp Üret", "Kalıp Üret", "/uret", "kalip uret", "KALIP URET"):
         if not can_create_mold(operator):
-            send_message(token, chat_id, "Kalıp üretme sadece 1. seviye operatörler içindir.")
+            send_message(token, chat_id, "Kalıp üretme yetkiniz yok.")
             return
         sess = _session(user_id)
         sess.state = BotState.CREATE_MOLD_QR
@@ -185,7 +226,7 @@ def handle_text_command(token: str, chat_id: int, user_id: str, operator, text: 
         _finish_create_name(token, chat_id, user_id, operator, t)
         return
     if sess.state == BotState.IDLE:
-        send_message(token, chat_id, "Menüden seçim yapın veya /start yazın.", reply_markup=_main_keyboard(operator.level))
+        send_message(token, chat_id, "Menüden seçim yapın veya /start yazın.", reply_markup=_main_keyboard(operator))
 
 
 def _finish_create_name(token: str, chat_id: int, user_id: str, operator, name: str) -> None:
@@ -203,12 +244,21 @@ def _finish_create_name(token: str, chat_id: int, user_id: str, operator, name: 
             name=name,
             operator_name=operator.name,
         )
+        audit_log.log_action(
+            db,
+            actor_type="operator",
+            action="mold.create",
+            actor_name=operator.name,
+            telegram_user_id=operator.id,
+            resource=f"mold/{mold.id}",
+            detail={"qr_code": mold.qr_code, "name": mold.name},
+        )
         reset_session(user_id)
         send_message(
             token,
             chat_id,
             f"✅ Kalıp kaydedildi.\nKod: {mold.qr_code}\nAd: {mold.name}\n\n8000/Kalıplar sayfasında görünür.",
-            reply_markup=_main_keyboard(operator.level),
+            reply_markup=_main_keyboard(operator),
         )
     except ValueError as e:
         send_message(token, chat_id, f"Hata: {e}")
@@ -261,13 +311,22 @@ def handle_qr_or_text(token: str, chat_id: int, user_id: str, operator, message:
                 operator_name=operator.name,
                 operator_id=operator.id,
             )
+            audit_log.log_action(
+                db,
+                actor_type="operator",
+                action="mold.assign",
+                actor_name=operator.name,
+                telegram_user_id=operator.id,
+                resource=f"machine/{machine.id}",
+                detail={"machine": machine.name, "mold_id": mold.id, "mold": mold.name or mold.qr_code},
+            )
             reset_session(user_id)
             label = mold.name or mold.qr_code or str(mold.id)
             send_message(
                 token,
                 chat_id,
                 f"✅ Atama tamam.\n{machine.name} → {label}\n(Kod: {mold.qr_code or '—'})",
-                reply_markup=_main_keyboard(operator.level),
+                reply_markup=_main_keyboard(operator),
             )
             return
 
@@ -286,7 +345,7 @@ def handle_qr_or_text(token: str, chat_id: int, user_id: str, operator, message:
                     token,
                     chat_id,
                     f"Bu QR zaten kayıtlı: {nm} (kod {existing.qr_code}).",
-                    reply_markup=_main_keyboard(operator.level),
+                    reply_markup=_main_keyboard(operator),
                 )
                 return
             sess.pending_qr_code = code
@@ -345,7 +404,7 @@ def process_update(token: str, update: dict[str, Any]) -> None:
                 token,
                 chat_id,
                 "Once menuden islem secin:\n📌 Kalip Ata veya ➕ Kalip Uret\n\n/start ile menuyu acin.",
-                reply_markup=_main_keyboard(operator.level),
+                reply_markup=_main_keyboard(operator),
             )
         return
 

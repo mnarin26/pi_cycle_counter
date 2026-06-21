@@ -6,8 +6,18 @@
     <title>Injection Admin 8080</title>
     <style>
       body { margin: 0; font-family: Arial, sans-serif; background: #0b1220; color: #e2e8f0; }
-      .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
-      .card { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+      .wrap { max-width: none; margin: 0; padding: 0; }
+      .admin-top { padding: 16px 16px 0; }
+      .admin-shell { display: flex; min-height: calc(100vh - 72px); }
+      .admin-nav { width: 240px; flex-shrink: 0; background: #0f172a; border-right: 1px solid #334155; padding: 12px 10px; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
+      .nav-item { display: block; width: 100%; text-align: left; margin-bottom: 6px; padding: 10px 12px; background: transparent; border: 1px solid transparent; border-radius: 8px; color: #cbd5e1; font-weight: normal; font-size: 13px; cursor: pointer; }
+      .nav-item:hover { background: #1e293b; }
+      .nav-item.active { background: #172554; border-color: #334155; color: #93c5fd; font-weight: bold; }
+      .admin-main { flex: 1; padding: 16px; overflow: auto; }
+      .admin-panel { display: none; }
+      .admin-panel.active { display: block; }
+      .section-divider { border: 0; border-top: 1px solid #334155; margin: 20px 0 16px; }
+      .card { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 12px; margin-bottom: 0; }
       label { display: block; font-size: 12px; margin-bottom: 4px; color: #93c5fd; }
       input, select, button { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; }
       button { cursor: pointer; background: #0ea5e9; color: #0b1220; font-weight: bold; }
@@ -34,16 +44,78 @@
       .guide code { background: #0f172a; padding: 1px 6px; border-radius: 4px; color: #93c5fd; }
       input[title], select[title], input[type="datetime-local"][title] { cursor: help; }
       input[title]:hover, select[title]:hover { border-color: #64748b; }
+      .chk { display:inline-flex; align-items:center; gap:6px; color:#cbd5e1; font-size:13px; }
+      .chk input { width:auto; }
+      .live-view-wrap { position:relative; border:1px solid #334155; border-radius:10px; overflow:hidden; background:#000; max-width:100%; }
+      .live-view-wrap img { display:block; width:100%; height:auto; opacity:0.92; }
+      .live-view-dots { position:absolute; inset:0; pointer-events:none; }
+      .live-view-dot { position:absolute; width:5px; height:5px; margin:-2.5px 0 0 -2.5px; border-radius:999px; background:#22c55e; box-shadow:0 0 0 1px rgba(2,6,23,0.9), 0 0 4px rgba(34,197,94,0.75); }
+      .live-view-bar { position:absolute; left:0; right:0; bottom:0; background:rgba(0,0,0,0.65); padding:8px 10px; font-size:12px; }
+      .live-view-machines { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; margin-top:10px; }
+      .live-view-mach { border:1px solid #334155; border-radius:8px; padding:8px 10px; background:#0f172a; font-size:13px; }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <h2>Admin Paneli (8080)</h2>
-      <p class="muted">Izleme paneli ayri (<a id="mainAppLink" href="#" style="color:#93c5fd">8000</a>). Burada makine canli durumu, RTSP, ROI, threshold ve kalibrasyon ayarlanir.</p>
+    <div id="loginOverlay" style="display:none;position:fixed;inset:0;background:#0b1220;z-index:1000;align-items:center;justify-content:center;">
+      <div class="card" style="width:360px;max-width:90%;">
+        <h3>Giriş</h3>
+        <p class="muted">Telegram botundan aldığınız günlük şifreyi veya yönetici şifresini girin.</p>
+        <label>Şifre</label>
+        <input id="loginPw" type="password" autocomplete="current-password" placeholder="Şifre" />
+        <div style="margin-top:10px;"><button id="loginBtn" class="btn-green">Giriş Yap</button></div>
+        <div id="loginMsg" class="muted" style="margin-top:8px;"></div>
+      </div>
+    </div>
+    <div class="wrap" id="wrapRoot" style="display:none;">
+      <div class="admin-top">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <h2>Admin Paneli (8080)</h2>
+          <div style="display:flex;gap:10px;align-items:center;">
+            <span id="whoami" class="muted"></span>
+            <button id="logoutBtn" class="btn-gray" style="width:auto;padding:8px 14px;">Çıkış</button>
+          </div>
+        </div>
+        <p class="muted" style="margin:8px 0 0;">Ozet pano: <a id="mainAppLink" href="#" style="color:#93c5fd">8000</a> · TV: <a id="tvAppLink" href="#" style="color:#93c5fd">8000/tv</a></p>
+      </div>
+      <div class="admin-shell">
+        <nav class="admin-nav" aria-label="Bolumler">
+          <button type="button" class="nav-item active" data-panel="panel-live">1. Canli goruntu</button>
+          <button type="button" class="nav-item" data-panel="panel-machines">2. Makineler</button>
+          <button type="button" class="nav-item" data-panel="panel-camera">3. Kamera</button>
+          <button type="button" class="nav-item" data-panel="panel-telegram">4. Telegram botu</button>
+          <button type="button" class="nav-item" data-panel="panel-system">5. Pi saati ve Wi-Fi</button>
+          <button type="button" class="nav-item" data-panel="panel-audit">6. Islem kayitlari</button>
+        </nav>
+        <main class="admin-main">
 
+      <section id="panel-live" class="admin-panel active">
+      <div class="card" id="live">
+        <h3>Canli goruntu</h3>
+        <p class="muted">Secili kameradan canli kare; yesil nokta reflektor merkezini gosterir.</p>
+        <div class="row">
+          <div class="col-4">
+            <label>Kamera</label>
+            <select id="liveViewCam"></select>
+          </div>
+          <div class="col-8">
+            <label>&nbsp;</label>
+            <div id="liveViewWs" class="muted">WS baglaniyor…</div>
+          </div>
+        </div>
+        <div class="live-view-wrap" id="liveViewWrap" style="margin-top:10px;">
+          <img id="liveViewImg" alt="Canli kamera" />
+          <div class="live-view-dots" id="liveViewDots"></div>
+          <div class="live-view-bar" id="liveViewBar">Kamera —</div>
+        </div>
+        <div class="live-view-machines" id="liveViewMachines"></div>
+      </div>
+      </section>
+
+      <section id="panel-machines" class="admin-panel">
       <div class="card">
-        <h3>Makineler (canli)</h3>
-        <p class="muted">Canli sinyal ve esik durumu. Detay ayarlari asagidaki makine kartindan yapilir.</p>
+        <h3>Makineler</h3>
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Canli durum</h4>
+        <p class="muted">Canli sinyal ve esik durumu.</p>
         <div id="machineLiveWs" class="muted" style="margin-bottom:8px;">WS baglaniyor…</div>
         <div style="overflow-x:auto;">
           <table class="live">
@@ -61,229 +133,9 @@
             </tbody>
           </table>
         </div>
-      </div>
 
-      <div class="card">
-        <h3>Raspberry Pi saati</h3>
-        <p class="muted">Dongu kayitlari Pi saatini kullanir. Goruntudeki tarih yazisi (OSD) <b>kameranin kendi saatidir</b> — asagidan kamera senkronu gerekir.</p>
-        <div id="piTimeStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
-        <div class="row">
-          <div class="col-3">
-            <label>Saat dilimi</label>
-            <select id="piTimezone">
-              <option value="Europe/Istanbul">Europe/Istanbul (TR)</option>
-              <option value="UTC">UTC</option>
-              <option value="Europe/London">Europe/London</option>
-              <option value="Europe/Berlin">Europe/Berlin</option>
-              <option value="Asia/Dubai">Asia/Dubai</option>
-            </select>
-          </div>
-          <div class="col-4">
-            <label>Tarih ve saat (manuel)</label>
-            <input id="piDatetime" type="datetime-local" step="60" />
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="piSetTimeBtn" class="btn-orange">Saati Ayarla</button>
-          </div>
-          <div class="col-2">
-            <label>&nbsp;</label>
-            <button id="piNtpOnBtn" class="btn-gray">NTP Ac</button>
-          </div>
-        </div>
-        <div class="row" style="margin-top:8px;">
-          <div class="col-3"><button id="piRefreshTimeBtn" class="btn-gray">Saati Yenile</button></div>
-          <div class="col-9"><div id="piTimeMsg" class="muted"></div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>Fabrika Wi-Fi (Access Point)</h3>
-        <p class="muted">
-          Kameralar ve TV bu aga baglanir (<b>pi-wifi</b> / NetworkManager profili).
-          SSID veya sifre degisince bagli cihazlar kopar; degisiklikten sonra yeni aga tekrar baglanin.
-          Bu sayfaya <b>pi-wifi</b> uzerinden bagliysaniz islem sonrasi baglanti kesilebilir.
-        </p>
-        <div id="wifiApStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
-        <div class="row">
-          <div class="col-4">
-            <label>Ag adi (SSID)</label>
-            <input id="wifiApSsid" maxlength="32" placeholder="ornek: pi-wifi" />
-          </div>
-          <div class="col-4">
-            <label>Yeni Wi-Fi sifresi (WPA2)</label>
-            <input id="wifiApPassword" type="password" maxlength="63" placeholder="Bos = sifreyi degistirme" autocomplete="new-password" />
-            <p class="muted" style="margin-top:4px;">En az 8 karakter. Bos birakirsaniz sadece SSID guncellenir.</p>
-          </div>
-          <div class="col-4">
-            <label>&nbsp;</label>
-            <button id="wifiApSaveBtn" class="btn-orange">SSID / Sifreyi Kaydet</button>
-          </div>
-        </div>
-        <div class="row" style="margin-top:8px;">
-          <div class="col-3"><button id="wifiApRefreshBtn" class="btn-gray">Yenile</button></div>
-          <div class="col-9"><div id="wifiApMsg" class="muted"></div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>Telegram Kalip Botu</h3>
-        <div class="guide" style="margin-bottom:12px;">
-          <b>Kurulum adimlari</b>
-          <ol>
-            <li>Telegram'da <code>@BotFather</code> acin → <code>/newbot</code> yazin.</li>
-            <li>Bot adi verin (ornek: <code>Fabrika Kalip</code>).</li>
-            <li>Kullanici adi <code>xxxxxx_bot</code> formatinda olmali (ornek: <code>alfamold_bot</code>).</li>
-            <li>BotFather'in verdigi <b>token</b>'i asagiya yapistirin → <b>Bot Ayarlarini Kaydet</b>.</li>
-            <li>Telegram aramada bot kullanici adinizi yazin (ornek <code>@alfamold_bot</code>) veya <code>t.me/alfamold_bot</code> acin.</li>
-            <li>Bota <code>/start</code> basin (bir kez yeterli).</li>
-            <li>Operatör Telegram ID ogrenmek icin: <code>@userinfobot</code> acin → Start → <code>Id: 123456789</code> satirini okuyun.</li>
-            <li>Operatör eklerken <b>Seviye 1</b> (atama+üretim) veya <b>Seviye 2</b> (sadece atama) seçin.</li>
-            <li>QR formatlari: makine <code>MACHINE:3</code> · kalip <code>MOLD:042</code></li>
-          </ol>
-        </div>
-        <div class="row">
-          <div class="col-3">
-            <label>Bot etkin</label>
-            <select id="tgEnabled"><option value="false">false</option><option value="true">true</option></select>
-          </div>
-          <div class="col-3">
-            <label>Bot kullanici adi</label>
-            <input id="tgUsername" placeholder="xxxxxx_bot" />
-          </div>
-          <div class="col-6">
-            <label>Bot token</label>
-            <input id="tgToken" type="password" autocomplete="new-password" placeholder="BotFather token (bos = mevcut korunur)" />
-            <p id="tgTokenHint" class="muted" style="margin-top:4px;"></p>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="tgSaveBtn" class="btn-orange">Bot Ayarlarini Kaydet</button>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="tgRefreshBtn" class="btn-gray">Yenile</button>
-          </div>
-          <div class="col-12"><div id="tgMsg" class="muted"></div></div>
-        </div>
-
-        <h4 style="margin:16px 0 8px;">Izinli operatörler</h4>
-        <div class="row">
-          <div class="col-4">
-            <label>Operatör adi</label>
-            <input id="tgOpName" placeholder="Ahmet Yilmaz" maxlength="128" />
-          </div>
-          <div class="col-4">
-            <label>Telegram user ID</label>
-            <input id="tgOpId" placeholder="123456789" inputmode="numeric" maxlength="32" />
-          </div>
-          <div class="col-3">
-            <label>Seviye</label>
-            <select id="tgOpLevel">
-              <option value="2">2 — Sadece kalıp ata</option>
-              <option value="1">1 — Ata + kalıp üret</option>
-            </select>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="tgOpAddBtn" class="btn-green">Operatör Ekle</button>
-          </div>
-        </div>
-        <div style="overflow-x:auto;margin-top:10px;">
-          <table class="live">
-            <thead>
-              <tr><th>Ad</th><th>Telegram ID</th><th>Seviye</th><th></th></tr>
-            </thead>
-            <tbody id="tgOpBody">
-              <tr><td colspan="3" class="muted">Henuz operatör yok.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>Pi SSH Baglantisi (referans)</h3>
-        <p class="muted">Uzak erisim bilgisi (Tailscale IP, kullanici). Sifre burada saklanmaz; SSH anahtari onerilir.</p>
-        <div class="row">
-          <div class="col-3">
-            <label>Host / IP</label>
-            <input id="sshHost" placeholder="100.92.41.26" />
-          </div>
-          <div class="col-3">
-            <label>Kullanici</label>
-            <input id="sshUser" placeholder="pi" />
-          </div>
-          <div class="col-2">
-            <label>Port</label>
-            <input id="sshPort" type="number" min="1" max="65535" value="22" />
-          </div>
-          <div class="col-4">
-            <label>SSH alias (opsiyonel)</label>
-            <input id="sshAlias" placeholder="rsp3b" />
-          </div>
-          <div class="col-3">
-            <label>Kimlik</label>
-            <select id="sshAuth"><option value="key">SSH anahtari</option><option value="password">Sifre (yerel config)</option></select>
-          </div>
-          <div class="col-5">
-            <label>Anahtar yolu</label>
-            <input id="sshKeyPath" placeholder="~/.ssh/id_ed25519" />
-          </div>
-          <div class="col-4">
-            <label>Baglanti</label>
-            <div id="sshConnStr" class="muted" style="padding:10px 0;font-family:monospace;font-size:12px;">-</div>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="sshSaveBtn" class="btn-orange">SSH Kaydet</button>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="sshRefreshBtn" class="btn-gray">Yenile</button>
-          </div>
-          <div class="col-12"><div id="sshMsg" class="muted"></div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="row">
-          <div class="col-3">
-            <label>Kamera</label>
-            <select id="cameraSelect"></select>
-          </div>
-          <div class="col-6">
-            <label>RTSP URL</label>
-            <input id="rtspUrl" placeholder="rtsp://user:pass@ip:554/stream2" />
-          </div>
-          <div class="col-3">
-            <label>Durum</label>
-            <div id="cameraStatus" class="muted">-</div>
-          </div>
-          <div class="col-3">
-            <label>Isleme genisligi (px)</label>
-            <input id="camWidth" type="number" min="160" max="1920" />
-            <p class="muted" style="margin-top:4px;">Ornek: 640. Kameranin kendi cozunurlugunu degistirmez.</p>
-          </div>
-          <div class="col-3">
-            <label>Isleme FPS ust siniri</label>
-            <input id="camFps" type="number" min="1" max="30" />
-            <p class="muted" style="margin-top:4px;">Ornek: 8. Dusuk = daha az CPU.</p>
-          </div>
-          <div class="col-3">
-            <label>Aktif</label>
-            <select id="camEnabled"><option value="true">true</option><option value="false">false</option></select>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="saveCamBtn">Kamera Ayarini Kaydet</button>
-          </div>
-          <div class="col-3"><button id="testCamBtn" class="btn-orange">Kamera Test</button></div>
-          <div class="col-3"><button id="syncCamTimeBtn" class="btn-green">Kamera OSD Saatini Pi ile Esitle</button></div>
-          <div class="col-6"><div id="camMsg" class="muted"></div></div>
-        </div>
-      </div>
-
-      <div class="card">
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Makine parametreleri</h4>
         <div class="row">
           <div class="col-3">
             <label>Makine</label>
@@ -378,10 +230,9 @@
           <div class="col-3"><button id="reloadSnapBtn" class="btn-gray">Snapshot Yenile</button></div>
           <div class="col-6"><div id="machineMsg" class="muted"></div></div>
         </div>
-      </div>
 
-      <div class="card">
-        <h3>Takip Cizgisi Ayari</h3>
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Takip cizgisi</h4>
         <p class="muted">Sistem sadece sari takip cizgisi + kalinlik bandini kullanir. ROI sekli sadece cizgiyi hizalamak icin yardimcidir.</p>
         <div class="row" style="margin-bottom:8px;">
           <div class="col-3"><button id="zoomOutBtn" class="btn-gray">- Zoom</button></div>
@@ -401,17 +252,235 @@
           <div class="col-6"><div id="roiMsg" class="muted"></div></div>
         </div>
       </div>
+      </section>
+
+      <section id="panel-camera" class="admin-panel">
+      <div class="card">
+        <h3>Kamera</h3>
+        <div class="row">
+          <div class="col-3">
+            <label>Kamera</label>
+            <select id="cameraSelect"></select>
+          </div>
+          <div class="col-6">
+            <label>RTSP URL</label>
+            <input id="rtspUrl" placeholder="rtsp://user:pass@ip:554/stream2" />
+          </div>
+          <div class="col-3">
+            <label>Durum</label>
+            <div id="cameraStatus" class="muted">-</div>
+          </div>
+          <div class="col-3">
+            <label>Isleme genisligi (px)</label>
+            <input id="camWidth" type="number" min="160" max="1920" />
+            <p class="muted" style="margin-top:4px;">Ornek: 640. Kameranin kendi cozunurlugunu degistirmez.</p>
+          </div>
+          <div class="col-3">
+            <label>Isleme FPS ust siniri</label>
+            <input id="camFps" type="number" min="1" max="30" />
+            <p class="muted" style="margin-top:4px;">Ornek: 8. Dusuk = daha az CPU.</p>
+          </div>
+          <div class="col-3">
+            <label>Aktif</label>
+            <select id="camEnabled"><option value="true">true</option><option value="false">false</option></select>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="saveCamBtn">Kamera Ayarini Kaydet</button>
+          </div>
+          <div class="col-3"><button id="testCamBtn" class="btn-orange">Kamera Test</button></div>
+          <div class="col-3"><button id="syncCamTimeBtn" class="btn-green">Kamera OSD Saatini Pi ile Esitle</button></div>
+          <div class="col-6"><div id="camMsg" class="muted"></div></div>
+        </div>
+      </div>
+      </section>
+
+      <section id="panel-telegram" class="admin-panel">
+      <div class="card">
+        <h3>Telegram Kalip Botu</h3>
+        <div class="guide" style="margin-bottom:12px;">
+          <b>Kurulum adimlari</b>
+          <ol>
+            <li>Telegram'da <code>@BotFather</code> acin → <code>/newbot</code> yazin.</li>
+            <li>Bot adi verin (ornek: <code>Fabrika Kalip</code>).</li>
+            <li>Kullanici adi <code>xxxxxx_bot</code> formatinda olmali (ornek: <code>alfamold_bot</code>).</li>
+            <li>BotFather'in verdigi <b>token</b>'i asagiya yapistirin → <b>Bot Ayarlarini Kaydet</b>.</li>
+            <li>Telegram aramada bot kullanici adinizi yazin (ornek <code>@alfamold_bot</code>) veya <code>t.me/alfamold_bot</code> acin.</li>
+            <li>Bota <code>/start</code> basin (bir kez yeterli).</li>
+            <li>Operatör Telegram ID ogrenmek icin: <code>@userinfobot</code> acin → Start → <code>Id: 123456789</code> satirini okuyun.</li>
+            <li>Operatör eklerken <b>Seviye 1</b> (atama+üretim) veya <b>Seviye 2</b> (sadece atama) seçin.</li>
+            <li>QR formatlari: makine <code>MACHINE:3</code> · kalip <code>MOLD:042</code></li>
+          </ol>
+        </div>
+        <div class="row">
+          <div class="col-3">
+            <label>Bot etkin</label>
+            <select id="tgEnabled"><option value="false">false</option><option value="true">true</option></select>
+          </div>
+          <div class="col-3">
+            <label>Bot kullanici adi</label>
+            <input id="tgUsername" placeholder="xxxxxx_bot" />
+          </div>
+          <div class="col-6">
+            <label>Bot token</label>
+            <input id="tgToken" type="password" autocomplete="new-password" placeholder="BotFather token (bos = mevcut korunur)" />
+            <p id="tgTokenHint" class="muted" style="margin-top:4px;"></p>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="tgSaveBtn" class="btn-orange">Bot Ayarlarini Kaydet</button>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="tgRefreshBtn" class="btn-gray">Yenile</button>
+          </div>
+          <div class="col-12"><div id="tgMsg" class="muted"></div></div>
+        </div>
+
+        <h4 style="margin:16px 0 8px;">Izinli operatörler</h4>
+        <div class="row">
+          <div class="col-4">
+            <label>Operatör adi</label>
+            <input id="tgOpName" placeholder="Ahmet Yilmaz" maxlength="128" />
+          </div>
+          <div class="col-4">
+            <label>Telegram user ID</label>
+            <input id="tgOpId" placeholder="123456789" inputmode="numeric" maxlength="32" />
+          </div>
+          <div class="col-4">
+            <label>Rol</label>
+            <select id="tgOpRole">
+              <option value="user">Kullanıcı (tiklerle yetki)</option>
+              <option value="admin">Yönetici (tüm yetkiler)</option>
+            </select>
+          </div>
+          <div class="col-12" id="tgOpPermsWrap">
+            <label>Yetkiler (kullanıcı için)</label>
+            <div style="display:flex;flex-wrap:wrap;gap:14px;padding:6px 0;">
+              <label class="chk"><input type="checkbox" id="tgPermPanel8000" /> 8000 paneli</label>
+              <label class="chk"><input type="checkbox" id="tgPermPanel8080" /> 8080 paneli</label>
+              <label class="chk"><input type="checkbox" id="tgPermMoldCreate" /> Kalıp üretme</label>
+              <label class="chk"><input type="checkbox" id="tgPermMoldAssign" /> Kalıp atama</label>
+            </div>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="tgOpAddBtn" class="btn-green">Operatör Ekle</button>
+          </div>
+          <div class="col-12"><div id="tgOpMsg" class="muted"></div></div>
+        </div>
+        <div style="overflow-x:auto;margin-top:10px;">
+          <table class="live">
+            <thead>
+              <tr><th>Ad</th><th>Telegram ID</th><th>Rol</th><th>Yetkiler</th><th></th></tr>
+            </thead>
+            <tbody id="tgOpBody">
+              <tr><td colspan="5" class="muted">Henuz operatör yok.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </section>
+
+      <section id="panel-system" class="admin-panel">
+      <div class="card">
+        <h3>Raspberry Pi saati</h3>
+        <p class="muted">Dongu kayitlari Pi saatini kullanir. Goruntudeki tarih yazisi (OSD) <b>kameranin kendi saatidir</b> — Kamera bolumunden senkron yapilir.</p>
+        <div id="piTimeStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
+        <div class="row">
+          <div class="col-3">
+            <label>Saat dilimi</label>
+            <select id="piTimezone">
+              <option value="Europe/Istanbul">Europe/Istanbul (TR)</option>
+              <option value="UTC">UTC</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="Europe/Berlin">Europe/Berlin</option>
+              <option value="Asia/Dubai">Asia/Dubai</option>
+            </select>
+          </div>
+          <div class="col-4">
+            <label>Tarih ve saat (manuel)</label>
+            <input id="piDatetime" type="datetime-local" step="60" />
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="piSetTimeBtn" class="btn-orange">Saati Ayarla</button>
+          </div>
+          <div class="col-2">
+            <label>&nbsp;</label>
+            <button id="piNtpOnBtn" class="btn-gray">NTP Ac</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div class="col-3"><button id="piRefreshTimeBtn" class="btn-gray">Saati Yenile</button></div>
+          <div class="col-9"><div id="piTimeMsg" class="muted"></div></div>
+        </div>
+
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Fabrika Wi-Fi (Access Point)</h4>
+        <p class="muted">
+          Kameralar ve TV bu aga baglanir (<b>pi-wifi</b> / NetworkManager profili).
+          SSID veya sifre degisince bagli cihazlar kopar; degisiklikten sonra yeni aga tekrar baglanin.
+        </p>
+        <div id="wifiApStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
+        <div class="row">
+          <div class="col-4">
+            <label>Ag adi (SSID)</label>
+            <input id="wifiApSsid" maxlength="32" placeholder="ornek: pi-wifi" />
+          </div>
+          <div class="col-4">
+            <label>Yeni Wi-Fi sifresi (WPA2)</label>
+            <input id="wifiApPassword" type="password" maxlength="63" placeholder="Bos = sifreyi degistirme" autocomplete="new-password" />
+            <p class="muted" style="margin-top:4px;">En az 8 karakter. Bos birakirsaniz sadece SSID guncellenir.</p>
+          </div>
+          <div class="col-4">
+            <label>&nbsp;</label>
+            <button id="wifiApSaveBtn" class="btn-orange">SSID / Sifreyi Kaydet</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div class="col-3"><button id="wifiApRefreshBtn" class="btn-gray">Yenile</button></div>
+          <div class="col-9"><div id="wifiApMsg" class="muted"></div></div>
+        </div>
+      </div>
+      </section>
+
+      <section id="panel-audit" class="admin-panel">
+      <div class="card" id="auditCard">
+        <h3>Islem Kayitlari (Audit)</h3>
+        <p class="muted">Kim, ne zaman, hangi islemi yapti. Son 100 kayit.</p>
+        <button id="auditRefreshBtn" class="btn-gray" style="width:auto;padding:8px 14px;">Yenile</button>
+        <div style="overflow-x:auto;margin-top:10px;">
+          <table class="live">
+            <thead>
+              <tr><th>Zaman</th><th>Kisi</th><th>Islem</th><th>Kaynak</th><th>IP</th></tr>
+            </thead>
+            <tbody id="auditBody">
+              <tr><td colspan="5" class="muted">Kayit yok.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </section>
+
+        </main>
+      </div>
     </div>
 
     <script>
       const API = `${location.protocol}//${location.hostname}:8000`;
-      const WS = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.hostname}:8000/ws`;
+      const WS = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
       const mainLink = document.getElementById('mainAppLink');
+      const tvLink = document.getElementById('tvAppLink');
       if(mainLink) mainLink.href = API + '/';
+      if(tvLink) tvLink.href = API + '/tv';
       let cameras = [];
       let machines = [];
-      let liveSnapshot = { machines: [] };
+      let liveSnapshot = { machines: [], cameras: [] };
       let liveWs = null;
+      let liveViewCamId = null;
+      let liveViewImgMeta = null;
+      let liveViewTick = 0;
       let roiPoly = null; // [{x,y},...4]
       let interaction = { mode: null, start: null, basePoly: null, cornerIdx: -1, rotateBaseAngle: 0, rotateStart: 0 };
       let viewZoom = 1.0;
@@ -432,6 +501,41 @@
       function q(id){ return document.getElementById(id); }
       function setMsg(id, text, cls='muted'){ const el=q(id); el.className=cls; el.textContent=text; }
 
+      const PANEL_BY_HASH = {
+        live: 'panel-live',
+        machines: 'panel-machines',
+        camera: 'panel-camera',
+        telegram: 'panel-telegram',
+        system: 'panel-system',
+        audit: 'panel-audit',
+      };
+
+      let activePanelId = 'panel-live';
+      function showPanel(panelId){
+        document.querySelectorAll('.admin-panel').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        const panel = q(panelId);
+        const nav = document.querySelector(`.nav-item[data-panel="${panelId}"]`);
+        if(panel) panel.classList.add('active');
+        if(nav) nav.classList.add('active');
+        activePanelId = panelId;
+        if(panelId === 'panel-live'){ refreshLiveViewImage(); updateLiveViewPanel(); }
+        // Makineler paneli gizliyken canvas boyutu 0 olur; acilinca snapshot'i yeniden boyutla.
+        if(panelId === 'panel-machines' && typeof refreshSnapshot === 'function'){
+          refreshSnapshot().catch(()=>{});
+        }
+      }
+
+      document.querySelectorAll('.nav-item').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const panelId = btn.getAttribute('data-panel');
+          if(panelId) showPanel(panelId);
+        });
+      });
+
+      const hashKey = (location.hash || '').replace(/^#/, '');
+      if(PANEL_BY_HASH[hashKey]) showPanel(PANEL_BY_HASH[hashKey]);
+
       /** Hover aciklamalari — degistirilebilir tum kutucuklar */
       const FIELD_TIPS = {
         piTimezone: 'Dongu kayitlari ve panel saati icin kullanilan saat dilimi. Europe/Istanbul onerilir.',
@@ -444,12 +548,6 @@
         tgOpName: 'Listede gorunecek operatör adi (ornek: Ahmet).',
         tgOpId: 'Operatörün Telegram user ID (sadece rakam). @userinfobot ile ogrenilir.',
         tgOpLevel: '1 = kalip ata + uret · 2 = sadece kalip ata.',
-        sshHost: 'Pi Tailscale veya LAN IP adresi.',
-        sshUser: 'SSH kullanici adi (genelde pi).',
-        sshPort: 'SSH portu (varsayilan 22).',
-        sshAlias: 'Yerel ~/.ssh/config Host alias (ornek rsp3b).',
-        sshAuth: 'Onerilen: SSH anahtari. Sifre web arayuzunde saklanmaz.',
-        sshKeyPath: 'Ozel anahtar dosya yolu.',
         cameraSelect: 'RTSP ve isleme ayarlarini duzenlemek icin kamera secimi.',
         rtspUrl: 'IP kameradan canli goruntu akisi (RTSP adresi). Ornek: rtsp://kullanici:sifre@192.168.1.10:554/stream2',
         camWidth: 'Kare Pi uzerinde bu genislige kucultulur; islem hizi artar, CPU yuku azalir. Kameranin kendi cozunurlugunu degistirmez. Kayittan sonra ~2 sn icinde uygulanir.',
@@ -485,15 +583,29 @@
       }
 
       async function jget(path){
-        const r = await fetch(API + path); if(!r.ok) throw new Error(await r.text()); return r.json();
+        const r = await fetch(location.origin + path, { credentials: 'include' });
+        if(!r.ok) throw new Error(await r.text());
+        return r.json();
       }
       async function jpatch(path, body){
-        const r = await fetch(API + path,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-        if(!r.ok) throw new Error(await r.text()); return r.json();
+        const r = await fetch(location.origin + path, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if(!r.ok) throw new Error(await r.text());
+        return r.json();
       }
       async function jpost(path, body){
-        const r = await fetch(API + path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-        if(!r.ok) throw new Error(await r.text()); return r.json();
+        const r = await fetch(location.origin + path, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if(!r.ok) throw new Error(await r.text());
+        return r.json();
       }
       /** POST to this origin (admin app) — avoids :8000 when only :8080 is reachable */
       async function jpostLocal(path, body){
@@ -646,8 +758,85 @@
           if(data && Array.isArray(data.machines)){
             liveSnapshot = data;
             renderMachineLiveTable();
+            updateLiveViewPanel();
           }
-        }catch(_e){ /* main app erisilemezse WS kullanilir */ }
+        }catch(_e){ /* WS yedek */ }
+      }
+
+      let liveViewCamSig = '';
+      function populateLiveViewCamSelect(){
+        const sel = q('liveViewCam');
+        if(!sel) return;
+        const liveCams = Array.isArray(liveSnapshot.cameras) && liveSnapshot.cameras.length
+          ? liveSnapshot.cameras
+          : cameras.map(c => ({ id: c.id, status: c.status, fps: 0 }));
+        if(!liveCams.length){
+          if(liveViewCamSig !== 'none'){ sel.innerHTML = '<option value="">Kamera yok</option>'; liveViewCamSig = 'none'; }
+          return;
+        }
+        const ids = liveCams.map(c => Number(c.id));
+        // Sadece kamera listesi gercekten degisince <select>'i yeniden kur.
+        const sig = ids.join(',');
+        if(sig !== liveViewCamSig){
+          sel.innerHTML = liveCams.map(c => {
+            const db = camById(c.id);
+            const label = db ? db.name : `Kamera ${c.id}`;
+            return `<option value="${c.id}">${escapeHtml(label)} (#${c.id})</option>`;
+          }).join('');
+          liveViewCamSig = sig;
+        }
+        if(liveViewCamId == null || !ids.includes(Number(liveViewCamId))){
+          liveViewCamId = ids[0];
+        }
+        if(sel.value !== String(liveViewCamId)) sel.value = String(liveViewCamId);
+      }
+
+      function refreshLiveViewImage(){
+        if(activePanelId !== 'panel-live') return; // gizli panelde goruntu cekme
+        const camId = Number(liveViewCamId);
+        const img = q('liveViewImg');
+        if(!camId || !img) return;
+        liveViewTick += 1;
+        img.src = `${location.origin}/api/cameras/${camId}/snapshot.jpg?t=${liveViewTick}`;
+      }
+
+      function updateLiveViewPanel(){
+        populateLiveViewCamSelect();
+        if(activePanelId !== 'panel-live') return;
+        const camId = Number(liveViewCamId);
+        if(!camId) return;
+        const camLive = (liveSnapshot.cameras || []).find(c => Number(c.id) === camId);
+        const camDb = camById(camId);
+        const fps = camLive && camLive.fps != null ? Number(camLive.fps).toFixed(1) : '0';
+        const status = (camLive && camLive.status) || (camDb && camDb.status) || '?';
+        const name = camDb ? camDb.name : `Kamera ${camId}`;
+        q('liveViewBar').textContent = `${name} — ${status} — FPS ~ ${fps}`;
+
+        const dots = q('liveViewDots');
+        const meta = liveViewImgMeta;
+        const active = (liveSnapshot.machines || []).filter(m => m.state !== 'DISABLED' && Number(m.camera_id) === camId);
+        if(!dots) return;
+        if(!meta || !meta.nw){
+          dots.innerHTML = '';
+        }else{
+          dots.innerHTML = active.filter(m => m.centroid).map(m => {
+            const cx = (Number(m.centroid.x) / meta.nw) * meta.cw;
+            const cy = (Number(m.centroid.y) / meta.nh) * meta.ch;
+            const title = escapeHtml(m.name || '');
+            return `<span class="live-view-dot" style="left:${cx}px;top:${cy}px" title="${title}"></span>`;
+          }).join('');
+        }
+
+        const box = q('liveViewMachines');
+        if(!box) return;
+        if(!active.length){
+          box.innerHTML = '<div class="muted">Bu kamerada aktif makine yok</div>';
+          return;
+        }
+        box.innerHTML = active.map(m => {
+          const mold = m.mold_name ? ` · ${escapeHtml(m.mold_name)}` : '';
+          return `<div class="live-view-mach"><strong>${escapeHtml(m.name || '')}</strong> ${escapeHtml(m.state || '')}${mold}</div>`;
+        }).join('');
       }
 
       function escapeHtml(s){
@@ -657,18 +846,26 @@
       function connectLiveWs(){
         if(liveWs) try{ liveWs.close(); }catch(_){}
         liveWs = new WebSocket(WS);
-        liveWs.onopen = () => { q('machineLiveWs').innerHTML = '<span class="good">WS bagli</span>'; };
+        liveWs.onopen = () => {
+          q('machineLiveWs').innerHTML = '<span class="good">WS bagli</span>';
+          if(q('liveViewWs')) q('liveViewWs').innerHTML = '<span class="good">WS bagli</span>';
+        };
         liveWs.onclose = () => {
           q('machineLiveWs').innerHTML = '<span class="warn">WS kopuk — yeniden baglaniyor…</span>';
+          if(q('liveViewWs')) q('liveViewWs').innerHTML = '<span class="warn">WS kopuk — yeniden baglaniyor…</span>';
           setTimeout(connectLiveWs, 2000);
         };
-        liveWs.onerror = () => { q('machineLiveWs').innerHTML = '<span class="bad">WS hata</span>'; };
+        liveWs.onerror = () => {
+          q('machineLiveWs').innerHTML = '<span class="bad">WS hata</span>';
+          if(q('liveViewWs')) q('liveViewWs').innerHTML = '<span class="bad">WS hata</span>';
+        };
         liveWs.onmessage = (ev) => {
           try{
             const msg = JSON.parse(ev.data);
             if(msg.type === 'snapshot' && msg.data){
               liveSnapshot = msg.data;
               renderMachineLiveTable();
+              updateLiveViewPanel();
             }
           }catch(_){}
         };
@@ -705,14 +902,42 @@
       function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 
       function getMouse(e){
+        // Ekran pikselini canvas tampon pikseline cevir; r.width zaten zoom (CSS scale)
+        // ve scrollbar kaynakli duzen degisimini icerir, bu yuzden viewZoom'a bolmeye gerek yok.
         const r = overlay.getBoundingClientRect();
-        return { x: (e.clientX - r.left)/viewZoom, y: (e.clientY - r.top)/viewZoom };
+        const sx = r.width > 0 ? overlay.width / r.width : 1;
+        const sy = r.height > 0 ? overlay.height / r.height : 1;
+        return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
+      }
+
+      /** Canvas tampon boyutunu goruntuye esitle; degisirse ROI'yi orantili tasi (kayma onler). */
+      function syncOverlayToSnap(){
+        const w = snap.clientWidth, h = snap.clientHeight;
+        if(w <= 0 || h <= 0) return;
+        if(w === overlay.width && h === overlay.height) return;
+        if(roiPoly && overlay.width > 0 && overlay.height > 0){
+          const sx = w / overlay.width, sy = h / overlay.height;
+          roiPoly = roiPoly.map(p => ({ x: p.x * sx, y: p.y * sy }));
+        }
+        overlay.width = w;
+        overlay.height = h;
       }
 
       function applyZoom(){
         canvasInner.style.transform = `scale(${viewZoom})`;
         q('zoomSlider').value = String(Math.round(viewZoom * 100));
         q('zoomLabel').textContent = `${Math.round(viewZoom * 100)}%`;
+        syncOverlayToSnap();
+        drawRoi();
+      }
+
+      /** Overlay cizimleri zoom arttikca incelir — goruntu buyur, cizgi/ nokta goreli kalmaz. */
+      function uiStrokePx(base){
+        return Math.max(0.75, base / viewZoom);
+      }
+
+      function uiMarkerRadiusPx(base){
+        return Math.max(1.1, base / viewZoom);
       }
 
       function polyCenter(poly){
@@ -743,7 +968,7 @@
         const c = polyCenter(poly);
         const vx = topMid.x - c.x, vy = topMid.y - c.y;
         const len = Math.hypot(vx, vy) || 1;
-        return { x: topMid.x + (vx/len)*ROTATE_HANDLE_DIST, y: topMid.y + (vy/len)*ROTATE_HANDLE_DIST };
+        return { x: topMid.x + (vx/len)*ROTATE_HANDLE_DIST / Math.max(0.5, viewZoom), y: topMid.y + (vy/len)*ROTATE_HANDLE_DIST / Math.max(0.5, viewZoom) };
       }
 
       function handleRadiusPx(){
@@ -806,13 +1031,13 @@
         const a = axis.a;
         const b = axis.b;
 
-        // Thickness band visualization
+        // Thickness band = gercek algilama genisligi (goruntu pikseli, zoom'dan bagimsiz)
         const thick = Math.max(1, Number(q('lineThickness')?.value || 7));
         const ux = b.x - a.x, uy = b.y - a.y;
         const ulen = Math.hypot(ux, uy) || 1;
         const nx = -uy/ulen, ny = ux/ulen;
         const hw = thick/2;
-        ctx.fillStyle = 'rgba(245,158,11,0.18)';
+        ctx.fillStyle = viewZoom >= 1.5 ? 'rgba(245,158,11,0.10)' : 'rgba(245,158,11,0.18)';
         ctx.beginPath();
         ctx.moveTo(a.x + nx*hw, a.y + ny*hw);
         ctx.lineTo(b.x + nx*hw, b.y + ny*hw);
@@ -821,18 +1046,19 @@
         ctx.closePath();
         ctx.fill();
 
-        // The yellow center line is the active detector path
+        // Sarı merkez cizgi — zoom arttikca incelir (hassas hizalama)
         ctx.strokeStyle = '#facc15';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = uiStrokePx(2.5);
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
         ctx.stroke();
-        // closed / open end markers
+        // Kapali / acik uç — zoom ile kuculur
+        const capR = uiMarkerRadiusPx(3.5);
         ctx.fillStyle = '#ef4444';
-        ctx.beginPath(); ctx.arc(a.x, a.y, 5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(a.x, a.y, capR, 0, Math.PI*2); ctx.fill();
         ctx.fillStyle = '#22c55e';
-        ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(b.x, b.y, capR, 0, Math.PI*2); ctx.fill();
 
         // Show edit handles only while editing so the user sees just the line
         // in idle state.
@@ -933,6 +1159,9 @@
         onCameraChange();
         refreshMachineOptions();
         renderMachineLiveTable();
+        populateLiveViewCamSelect();
+        updateLiveViewPanel();
+        refreshLiveViewImage();
         await refreshSnapshot();
       }
 
@@ -961,6 +1190,17 @@
         formatCameraStatus(c.status);
       }
 
+      function applyMachineRoiToOverlay(){
+        if(overlay.width <= 0 || overlay.height <= 0) return;
+        const m = machineById(machineSelect.value);
+        if(!m){ roiPoly = null; return; }
+        try{
+          const roi = JSON.parse(m.roi_polygon || '[]');
+          roiPoly = fromNorm(roi);
+          if(roiPoly) syncAngleInputFromPoly();
+        }catch(_e){ roiPoly = null; }
+      }
+
       function onMachineChange(){
         const m = machineById(machineSelect.value);
         if(!m) return;
@@ -980,21 +1220,18 @@
         q('stabilityMs').value = m.stability_confirm_ms ?? 500;
         q('occlusionGraceMs').value = m.occlusion_grace_ms ?? 300;
         q('machineEnabled').value = String(m.enabled);
-        try{
-          const roi = JSON.parse(m.roi_polygon || '[]');
-          roiPoly = fromNorm(roi);
-          if(roiPoly) syncAngleInputFromPoly();
-        }catch(_e){ roiPoly = null; }
+        applyMachineRoiToOverlay();
         drawRoi();
       }
 
       async function refreshSnapshot(){
         const camId = machineSnapshotCameraId();
         const c = camById(camId); if(!c){ setMsg('roiMsg','Goruntu kamerasi secilmedi','warn'); return; }
-        snap.src = `${API}/api/cameras/${c.id}/snapshot.jpg?t=${Date.now()}`;
+        snap.src = `${location.origin}/api/cameras/${c.id}/snapshot.jpg?t=${Date.now()}`;
         await new Promise(res=>{ snap.onload=res; snap.onerror=res; });
         overlay.width = snap.clientWidth;
         overlay.height = snap.clientHeight;
+        applyMachineRoiToOverlay();
         drawRoi();
       }
 
@@ -1288,17 +1525,29 @@
         renderTelegramOperators(t.operators || []);
       }
 
+      function permsLabel(op){
+        if(op.role === 'admin') return 'Tüm yetkiler';
+        const p = op.permissions || {};
+        const names = [];
+        if(p.panel_8000) names.push('8000');
+        if(p.panel_8080) names.push('8080');
+        if(p.bot_mold_create) names.push('Üret');
+        if(p.bot_mold_assign) names.push('Ata');
+        return names.length ? names.join(', ') : '—';
+      }
+
       function renderTelegramOperators(ops){
         const body = q('tgOpBody');
         if(!ops.length){
-          body.innerHTML = '<tr><td colspan="4" class="muted">Henuz operatör yok.</td></tr>';
+          body.innerHTML = '<tr><td colspan="5" class="muted">Henuz operatör yok.</td></tr>';
           return;
         }
         body.innerHTML = ops.map(op => `
           <tr>
             <td>${escapeHtml(op.name || '—')}</td>
             <td><code>${escapeHtml(op.id)}</code></td>
-            <td>${op.level === 1 ? '1 — Ata+Üret' : '2 — Sadece ata'}</td>
+            <td>${op.role === 'admin' ? 'Yönetici' : 'Kullanıcı'}</td>
+            <td>${escapeHtml(permsLabel(op))}</td>
             <td><button type="button" class="btn-gray tg-op-del" data-id="${escapeHtml(op.id)}" data-name="${escapeHtml(op.name || '')}">Sil</button></td>
           </tr>
         `).join('');
@@ -1310,28 +1559,10 @@
             try{
               const t = await jdeleteLocal('/api/settings/telegram/operators/' + encodeURIComponent(id));
               applyTelegramForm(t);
-              setMsg('tgMsg', nm + ' silindi.', 'good');
-            }catch(e){ setMsg('tgMsg', apiErrText(e), 'bad'); }
+              setMsg('tgOpMsg', nm + ' silindi.', 'good');
+            }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
           };
         });
-      }
-
-      function escapeHtml(s){
-        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-      }
-
-      function applySshForm(s){
-        q('sshHost').value = s.host || '';
-        q('sshUser').value = s.user || 'pi';
-        q('sshPort').value = String(s.port || 22);
-        q('sshAlias').value = s.alias || '';
-        q('sshAuth').value = s.auth_method === 'password' ? 'password' : 'key';
-        q('sshKeyPath').value = s.key_path || '~/.ssh/id_ed25519';
-        q('sshConnStr').textContent = s.connection_string || '-';
-      }
-
-      async function refreshSshSettings(){
-        applySshForm(await jgetLocal('/api/settings/ssh'));
       }
 
       q('tgRefreshBtn').onclick = ()=> refreshTelegramSettings().then(()=>setMsg('tgMsg','Yenilendi','good')).catch(e=>setMsg('tgMsg',apiErrText(e),'bad'));
@@ -1349,41 +1580,58 @@
         }catch(e){ setMsg('tgMsg', apiErrText(e), 'bad'); }
       };
 
+      function syncPermsVisibility(){
+        const isUser = q('tgOpRole').value === 'user';
+        q('tgOpPermsWrap').style.display = isUser ? '' : 'none';
+      }
+      q('tgOpRole').onchange = syncPermsVisibility;
+
       q('tgOpAddBtn').onclick = async ()=>{
         try{
           const name = q('tgOpName').value.trim();
           const telegram_user_id = q('tgOpId').value.trim();
           if(!name || !telegram_user_id){
-            setMsg('tgMsg', 'Operatör adi ve Telegram ID gerekli.', 'bad');
+            setMsg('tgOpMsg', 'Operatör adi ve Telegram ID gerekli.', 'bad');
             return;
           }
-          const t = await jpostLocalOp('/api/settings/telegram/operators', {
-            name,
-            telegram_user_id,
-            level: Number(q('tgOpLevel').value) || 2,
-          });
+          const role = q('tgOpRole').value;
+          const payload = { name, telegram_user_id, role };
+          if(role === 'user'){
+            payload.permissions = {
+              panel_8000: q('tgPermPanel8000').checked,
+              panel_8080: q('tgPermPanel8080').checked,
+              bot_mold_create: q('tgPermMoldCreate').checked,
+              bot_mold_assign: q('tgPermMoldAssign').checked,
+            };
+          }
+          const t = await jpostLocalOp('/api/settings/telegram/operators', payload);
           q('tgOpName').value = '';
           q('tgOpId').value = '';
+          ['tgPermPanel8000','tgPermPanel8080','tgPermMoldCreate','tgPermMoldAssign'].forEach(id=>{ q(id).checked = false; });
           applyTelegramForm(t);
-          setMsg('tgMsg', name + ' eklendi.', 'good');
-        }catch(e){ setMsg('tgMsg', apiErrText(e), 'bad'); }
+          setMsg('tgOpMsg', name + ' eklendi.', 'good');
+        }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
       };
 
-      q('sshRefreshBtn').onclick = ()=> refreshSshSettings().then(()=>setMsg('sshMsg','Yenilendi','good')).catch(e=>setMsg('sshMsg',apiErrText(e),'bad'));
-      q('sshSaveBtn').onclick = async ()=>{
-        try{
-          const s = await jpatchLocal('/api/settings/ssh', {
-            host: q('sshHost').value.trim(),
-            user: q('sshUser').value.trim(),
-            port: Number(q('sshPort').value) || 22,
-            alias: q('sshAlias').value.trim(),
-            auth_method: q('sshAuth').value,
-            key_path: q('sshKeyPath').value.trim(),
-          });
-          applySshForm(s);
-          setMsg('sshMsg','SSH ayarlari kaydedildi','good');
-        }catch(e){ setMsg('sshMsg', apiErrText(e), 'bad'); }
-      };
+      async function refreshAuditLogs(){
+        const r = await jgetLocal('/api/audit/logs?limit=100');
+        const body = q('auditBody');
+        const logs = (r && r.logs) || [];
+        if(!logs.length){
+          body.innerHTML = '<tr><td colspan="5" class="muted">Kayit yok.</td></tr>';
+          return;
+        }
+        body.innerHTML = logs.map(l => `
+          <tr>
+            <td>${escapeHtml((l.created_at || '').replace('T',' ').slice(0,19))}</td>
+            <td>${escapeHtml(l.actor_name || '—')}</td>
+            <td><code>${escapeHtml(l.action)}</code></td>
+            <td>${escapeHtml(l.resource || '—')}</td>
+            <td>${escapeHtml(l.ip || '—')}</td>
+          </tr>
+        `).join('');
+      }
+      q('auditRefreshBtn').onclick = ()=> refreshAuditLogs().catch(e=>{});
 
       q('resetProdBtn').onclick = async ()=>{
         const ok = confirm('Tum sayim, olay ve kalip gecmisini sifirlamak istiyor musun? Bu islem geri alinmaz.');
@@ -1433,18 +1681,84 @@
         }
       };
 
-      applyZoom();
-      applyFieldTips();
-      connectLiveWs();
-      refreshLiveSnapshotHttp();
-      setInterval(() => refreshLiveSnapshotHttp(), 1000);
-      refreshPiTime().catch(e=>setMsg('piTimeMsg', String(e), 'bad'));
-      refreshWifiAp().catch(e=>setMsg('wifiApMsg', String(e), 'bad'));
-      refreshTelegramSettings().catch(e=>setMsg('tgMsg', apiErrText(e), 'bad'));
-      refreshSshSettings().catch(e=>setMsg('sshMsg', apiErrText(e), 'bad'));
-      setInterval(()=>refreshPiTime().catch(()=>{}), 30000);
-      loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
-      setInterval(refreshCameraStatuses, 3000);
+      let _appStarted = false;
+      function startApp(){
+        if(_appStarted) return;
+        _appStarted = true;
+        applyZoom();
+        applyFieldTips();
+        connectLiveWs();
+        refreshLiveSnapshotHttp(); // ilk dolum; sonrasi WS uzerinden gelir
+        refreshPiTime().catch(e=>setMsg('piTimeMsg', String(e), 'bad'));
+        refreshWifiAp().catch(e=>setMsg('wifiApMsg', String(e), 'bad'));
+        refreshTelegramSettings().catch(e=>setMsg('tgMsg', apiErrText(e), 'bad'));
+        refreshAuditLogs().catch(()=>{});
+        setInterval(()=>refreshPiTime().catch(()=>{}), 30000);
+        loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
+        setInterval(refreshCameraStatuses, 3000);
+        q('liveViewCam').onchange = ()=>{
+          liveViewCamId = Number(q('liveViewCam').value);
+          liveViewImgMeta = null;
+          refreshLiveViewImage();
+          updateLiveViewPanel();
+        };
+        q('liveViewImg').onload = ()=>{
+          const el = q('liveViewImg');
+          liveViewImgMeta = {
+            nw: el.naturalWidth || 1,
+            nh: el.naturalHeight || 1,
+            cw: el.clientWidth || 1,
+            ch: el.clientHeight || 1,
+          };
+          updateLiveViewPanel();
+        };
+        setInterval(()=> refreshLiveViewImage(), 1000);
+      }
+
+      function showLogin(show){
+        q('loginOverlay').style.display = show ? 'flex' : 'none';
+        q('wrapRoot').style.display = show ? 'none' : '';
+      }
+
+      async function doLogin(){
+        const pw = q('loginPw').value;
+        if(!pw){ setMsg('loginMsg','Sifre girin','bad'); return; }
+        try{
+          const r = await fetch(location.origin + '/api/auth/login', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({password: pw}),
+          });
+          if(!r.ok){ throw new Error(await r.text()); }
+          const me = await r.json();
+          q('loginPw').value = '';
+          q('whoami').textContent = me.display_name + (me.is_super ? ' (Super)' : '');
+          showLogin(false);
+          startApp();
+        }catch(e){ setMsg('loginMsg', apiErrText(e), 'bad'); }
+      }
+
+      async function doLogout(){
+        try{ await fetch(location.origin + '/api/auth/logout', {method:'POST'}); }catch(_){}
+        location.reload();
+      }
+
+      q('loginBtn').onclick = doLogin;
+      q('loginPw').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+      q('logoutBtn').onclick = doLogout;
+
+      (async function bootstrap(){
+        try{
+          const r = await fetch(location.origin + '/api/auth/me');
+          if(r.ok){
+            const me = await r.json();
+            q('whoami').textContent = me.display_name + (me.is_super ? ' (Super)' : '');
+            showLogin(false);
+            startApp();
+            return;
+          }
+        }catch(_){}
+        showLogin(true);
+      })();
     </script>
   </body>
 </html>

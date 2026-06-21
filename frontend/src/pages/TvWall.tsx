@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   Bar,
   BarChart,
@@ -13,6 +13,7 @@ import {
   YAxis,
 } from "recharts";
 import { apiGet } from "../api/client";
+import { useAuth } from "../hooks/useAuth";
 import { useLiveSnapshot, type MachineSnap } from "../hooks/useLiveSnapshot";
 
 const STORAGE_KEY = "tv_selected_machine_ids";
@@ -216,9 +217,11 @@ function Stat({ label, value, color }: { label: string; value: string; color: st
 }
 
 export function TvWallPage() {
+  const { user, loading: authLoading } = useAuth();
+  const navigate = useNavigate();
   const { snapshot, connected } = useLiveSnapshot();
   const [allMachines, setAllMachines] = useState<MachineRow[]>([]);
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [selectedIds, setSelectedIds] = useState<number[]>(() => loadSelectedIds() ?? []);
   const [board, setBoard] = useState<TvBoard | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -231,29 +234,22 @@ export function TvWallPage() {
   }, []);
 
   useEffect(() => {
-    apiGet<MachineRow[]>("/api/machines")
-      .then((rows) => {
-        const enabled = rows.filter((m) => m.enabled);
-        setAllMachines(enabled);
-        const saved = loadSelectedIds();
-        if (saved?.length) {
-          setSelectedIds(saved.filter((id) => enabled.some((m) => m.id === id)));
-        } else {
-          setSelectedIds(enabled.map((m) => m.id));
-        }
-      })
-      .catch((e) => setErr(String(e)));
-  }, []);
-
-  const loadBoard = useCallback(async () => {
-    if (!selectedIds.length) {
-      setBoard({ window_label: "Makine seçilmedi", machines: [] });
+    if (!user) {
+      setAllMachines([]);
       return;
     }
+    apiGet<MachineRow[]>("/api/machines")
+      .then((rows) => setAllMachines(rows.filter((m) => m.enabled)))
+      .catch(() => setAllMachines([]));
+  }, [user]);
+
+  const loadBoard = useCallback(async () => {
     try {
-      const data = await apiGet<TvBoard>(
-        `/api/analytics/tv_board?machine_ids=${selectedIds.join(",")}`,
-      );
+      const url =
+        selectedIds.length > 0
+          ? `/api/analytics/tv_board?machine_ids=${selectedIds.join(",")}`
+          : "/api/analytics/tv_board";
+      const data = await apiGet<TvBoard>(url);
       setBoard(data);
       setLastRefresh(new Date());
       setErr(null);
@@ -263,11 +259,10 @@ export function TvWallPage() {
   }, [selectedIds]);
 
   useEffect(() => {
-    if (!selectedIds.length) return;
     void loadBoard();
     const t = setInterval(() => void loadBoard(), REFRESH_MS);
     return () => clearInterval(t);
-  }, [loadBoard, selectedIds]);
+  }, [loadBoard]);
 
   const liveById = useMemo(
     () => new Map(snapshot.machines.map((m) => [m.id, m])),
@@ -304,13 +299,21 @@ export function TvWallPage() {
     void loadBoard();
   }
 
+  function openSetup() {
+    if (!user) {
+      navigate("/login", { state: { from: "/tv" } });
+      return;
+    }
+    setSetupOpen(true);
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {/* Header */}
       <header className="flex flex-wrap items-center gap-4 border-b border-slate-800 px-6 py-3">
         <div>
           <h1 className="text-xl font-bold text-sky-400">Üretim TV</h1>
-          <p className="text-xs text-slate-500">{board?.window_label ?? "Bugün · canlı özet"}</p>
+          <p className="text-xs text-slate-500">{board?.window_label || "Bugün · canlı özet"}</p>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-4 text-sm">
           <span className="tabular-nums text-base text-slate-300">{clockStr}</span>
@@ -327,13 +330,26 @@ export function TvWallPage() {
               {lastRefresh.toLocaleTimeString("tr-TR", { timeZone: "Europe/Istanbul" })}
             </span>
           )}
-          <button
-            type="button"
-            className="rounded-lg bg-slate-800 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-700"
-            onClick={() => setSetupOpen(true)}
-          >
-            Makineleri seç
-          </button>
+          {!authLoading && user ? (
+            <button
+              type="button"
+              className="rounded-lg bg-slate-800 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-700"
+              onClick={openSetup}
+            >
+              Makineleri seç
+            </button>
+          ) : !authLoading ? (
+            <Link
+              to="/login"
+              state={{ from: "/tv" }}
+              className="rounded-lg bg-sky-800 px-3 py-1.5 text-sm text-sky-100 hover:bg-sky-700"
+            >
+              Giriş yap (makine seç)
+            </Link>
+          ) : null}
+          {user && (
+            <span className="text-xs text-slate-500">{user.display_name}</span>
+          )}
           <Link to="/" className="text-xs text-slate-600 hover:text-slate-400">
             ← Pano
           </Link>
@@ -347,8 +363,11 @@ export function TvWallPage() {
       {/* Machine rows */}
       <main className="flex-1 flex flex-col gap-4 p-4 overflow-auto">
         {tiles.length === 0 ? (
-          <div className="flex flex-1 items-center justify-center text-slate-500 text-xl">
-            TV için en az bir makine seçin
+          <div className="flex flex-1 flex-col items-center justify-center text-slate-500 text-xl gap-2">
+            <span>TV için makine seçilmedi</span>
+            <span className="text-sm text-slate-600">
+              Giriş yapıp &quot;Makineleri seç&quot; ile bu cihazda kaydedin; TV şifresiz açık kalır
+            </span>
           </div>
         ) : (
           tiles.map((t) => (
@@ -357,12 +376,14 @@ export function TvWallPage() {
         )}
       </main>
 
-      {/* Setup modal */}
-      {setupOpen && (
+      {/* Setup modal — only reachable when logged in */}
+      {setupOpen && user && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
           <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-2xl border border-slate-600 bg-slate-900 p-6 shadow-2xl">
-            <h2 className="text-xl font-semibold mb-2">TV'de gösterilecek makineler</h2>
-            <p className="text-sm text-slate-400 mb-4">Seçim tarayıcıda saklanır. F11 ile tam ekran yap.</p>
+            <h2 className="text-xl font-semibold mb-2">TV&apos;de gösterilecek makineler</h2>
+            <p className="text-sm text-slate-400 mb-4">
+              Seçim bu tarayıcıda saklanır. TV şifresiz açılır; değiştirmek için giriş gerekir.
+            </p>
             <div className="space-y-2 mb-4">
               {allMachines.map((m) => (
                 <label

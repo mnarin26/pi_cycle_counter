@@ -170,6 +170,15 @@ def init_db() -> None:
                 "ON mold_machines (mold_id, machine_id)"
             )
         )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_web_sessions_token ON web_sessions (session_token)")
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_daily_passwords_date ON daily_passwords (valid_date)")
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_audit_logs_created ON audit_logs (created_at)")
+        )
     db = SessionLocal()
     try:
         changed = False
