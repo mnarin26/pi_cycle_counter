@@ -5,17 +5,30 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Integer, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.db.models import Cycle, Event, Machine, Mold
+from app.services.efficiency import (
+    overall_efficiency_pct,
+    performance_efficiency_pct,
+    realization_pct,
+    theoretical_target_from_cycle,
+)
 from app.services.mold_names import (
     enrich_series_mold_names,
     mold_name_map,
     resolve_cycle_mold_label,
     resolve_mold_display_name,
+)
+from app.services.shifts import (
+    current_shift,
+    daily_target_for_shift,
+    get_shift_defs,
+    shift_duration_hours,
+    shift_window,
 )
 from app.services.time_windows import format_window_label, resolve_window
 
@@ -844,3 +857,194 @@ def histogram(
         counts[i] += 1
     edges = [lo + i * width for i in range(bins + 1)]
     return {"bin_edges": edges, "counts": counts}
+
+
+def _count_cycles(db: Session, machine_id: int, start: datetime, end: datetime) -> int:
+    return int(
+        db.query(func.count(Cycle.id))
+        .filter(
+            Cycle.machine_id == machine_id,
+            Cycle.t_end >= start,
+            Cycle.t_end <= end,
+            Cycle.is_counted.is_(True),
+        )
+        .scalar()
+        or 0
+    )
+
+
+def _avg_cycle_s(db: Session, machine_id: int, start: datetime, end: datetime, mold_id: int | None = None) -> float:
+    q = db.query(func.avg(Cycle.cycle_time_s)).filter(
+        Cycle.machine_id == machine_id,
+        Cycle.t_end >= start,
+        Cycle.t_end <= end,
+        Cycle.is_counted.is_(True),
+    )
+    if mold_id is not None:
+        q = q.filter(Cycle.mold_id == mold_id)
+    return round(float(q.scalar() or 0.0), 2)
+
+
+def _active_mold_for_machine(db: Session, machine_id: int, start: datetime, end: datetime) -> tuple[int | None, str | None]:
+    row = (
+        db.query(Cycle.mold_id, Cycle.mold_name_snapshot)
+        .filter(
+            Cycle.machine_id == machine_id,
+            Cycle.t_end >= start,
+            Cycle.t_end <= end,
+            Cycle.is_counted.is_(True),
+            Cycle.mold_id.is_not(None),
+        )
+        .order_by(Cycle.t_end.desc())
+        .limit(1)
+        .first()
+    )
+    if not row or row[0] is None:
+        machine = db.get(Machine, machine_id)
+        if machine and machine.current_mold_id:
+            mold = db.get(Mold, machine.current_mold_id)
+            if mold:
+                return mold.id, resolve_mold_display_name(db, mold.id, mold.name)
+        return None, None
+    mold_id = int(row[0])
+    return mold_id, resolve_mold_display_name(db, mold_id, row[1])
+
+
+def _efficiency_block(
+    *,
+    actual_count: int,
+    target_count: int,
+    target_cycle_s: float | None,
+    avg_cycle_s: float,
+) -> dict:
+    realization = realization_pct(actual_count, target_count)
+    performance = performance_efficiency_pct(target_cycle_s, avg_cycle_s)
+    return {
+        "actual_count": actual_count,
+        "target_count": target_count,
+        "realization_pct": realization,
+        "performance_pct": performance,
+        "efficiency_pct": overall_efficiency_pct(realization, performance),
+        "avg_cycle_s": avg_cycle_s,
+        "target_cycle_s": target_cycle_s,
+    }
+
+
+@router.get("/tv_machine")
+def tv_machine(machine_id: int, db: Session = Depends(get_db)):
+    """Full-screen TV payload for a single machine (daily + current shift KPIs)."""
+    machine = db.get(Machine, machine_id)
+    if not machine:
+        raise HTTPException(404, detail="Makine bulunamadı")
+
+    start, end = resolve_window("daily", None, None)
+    shift = current_shift(db)
+    shift_start, shift_end = shift_window(shift, end)
+
+    active_mold_id, active_mold_name = _active_mold_for_machine(db, machine_id, start, end)
+    mold_row = db.get(Mold, active_mold_id) if active_mold_id else None
+
+    target_cycle_s = None
+    daily_target = None
+    if mold_row:
+        target_cycle_s = mold_row.target_cycle_s or (mold_row.avg_cycle_s if mold_row.avg_cycle_s > 0 else None)
+        daily_target = mold_row.daily_target_count
+        if not daily_target and target_cycle_s:
+            daily_target = theoretical_target_from_cycle(24.0, target_cycle_s)
+
+    daily_actual = _count_cycles(db, machine_id, start, end)
+    daily_avg = _avg_cycle_s(db, machine_id, start, end, active_mold_id)
+    daily_target_count = int(daily_target or 0)
+    if not daily_target_count and target_cycle_s:
+        daily_target_count = theoretical_target_from_cycle(24.0, target_cycle_s)
+
+    shift_actual = _count_cycles(db, machine_id, shift_start, shift_end)
+    shift_avg = _avg_cycle_s(db, machine_id, shift_start, shift_end, active_mold_id)
+    shift_target_count = daily_target_for_shift(daily_target_count or None, shift, db)
+    if not shift_target_count and target_cycle_s:
+        shift_target_count = theoretical_target_from_cycle(shift_duration_hours(shift), target_cycle_s)
+
+    hour_col = func.cast(
+        func.strftime("%H", func.datetime(Cycle.t_end, "+3 hours")),
+        Integer,
+    ).label("hour")
+    hourly_rows = (
+        db.query(hour_col, func.count(Cycle.id))
+        .filter(
+            Cycle.machine_id == machine_id,
+            Cycle.t_end >= start,
+            Cycle.t_end <= end,
+            Cycle.is_counted.is_(True),
+        )
+        .group_by(hour_col)
+        .order_by(hour_col)
+        .all()
+    )
+    hourly = [{"hour": int(h or 0), "count": int(c or 0)} for h, c in hourly_rows]
+
+    mold_stats = {"cycle_count": 0, "avg_cycle_s": 0.0, "min_cycle_s": 0.0, "max_cycle_s": 0.0}
+    if active_mold_id:
+        stats_row = (
+            db.query(
+                func.count(Cycle.id),
+                func.avg(Cycle.cycle_time_s),
+                func.min(Cycle.cycle_time_s),
+                func.max(Cycle.cycle_time_s),
+            )
+            .filter(
+                Cycle.machine_id == machine_id,
+                Cycle.mold_id == active_mold_id,
+                Cycle.t_end >= start,
+                Cycle.t_end <= end,
+                Cycle.is_counted.is_(True),
+            )
+            .one()
+        )
+        cnt = int(stats_row[0] or 0)
+        mold_stats = {
+            "cycle_count": cnt,
+            "avg_cycle_s": round(float(stats_row[1] or 0), 2) if cnt else 0.0,
+            "min_cycle_s": round(float(stats_row[2] or 0), 2) if cnt else 0.0,
+            "max_cycle_s": round(float(stats_row[3] or 0), 2) if cnt else 0.0,
+        }
+
+    return {
+        "machine_id": machine.id,
+        "name": machine.name,
+        "range": "daily",
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "window_label": format_window_label("daily", start, end),
+        "active_mold_id": active_mold_id,
+        "active_mold_name": active_mold_name,
+        "active_mold": {
+            "mold_id": active_mold_id,
+            "mold_name": active_mold_name,
+            "target_cycle_s": target_cycle_s,
+            "daily_target_count": daily_target_count,
+        }
+        if active_mold_id
+        else None,
+        "daily": _efficiency_block(
+            actual_count=daily_actual,
+            target_count=daily_target_count,
+            target_cycle_s=target_cycle_s,
+            avg_cycle_s=daily_avg,
+        ),
+        "shift": {
+            "id": shift.id,
+            "name": shift.name,
+            **_efficiency_block(
+                actual_count=shift_actual,
+                target_count=shift_target_count,
+                target_cycle_s=target_cycle_s,
+                avg_cycle_s=shift_avg,
+            ),
+        },
+        "summary": mold_stats,
+        "hourly": hourly,
+        "shifts": [
+            {"id": s.id, "name": s.name, "start": s.start.strftime("%H:%M"), "end": s.end.strftime("%H:%M")}
+            for s in get_shift_defs(db)
+        ],
+    }

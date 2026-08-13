@@ -6,7 +6,8 @@ import {
   CartesianGrid,
   Cell,
   LabelList,
-  ReferenceLine,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -17,8 +18,43 @@ import { useAuth } from "../hooks/useAuth";
 import { useLiveSnapshot, type MachineSnap } from "../hooks/useLiveSnapshot";
 
 const STORAGE_KEY = "tv_selected_machine_ids";
-const REFRESH_MS = 45_000;
+const REFRESH_MS = 30_000;
+const ROTATE_MS = 20_000;
 const DISPLAY_TZ = "Europe/Istanbul";
+
+type MachineRow = { id: number; name: string; enabled: boolean };
+
+type EfficiencyBlock = {
+  actual_count: number;
+  target_count: number;
+  realization_pct: number;
+  performance_pct: number;
+  efficiency_pct: number;
+  avg_cycle_s: number;
+  target_cycle_s: number | null;
+};
+
+type TvMachineData = {
+  machine_id: number;
+  name: string;
+  window_label: string;
+  active_mold_name: string | null;
+  active_mold: {
+    mold_id: number;
+    mold_name: string | null;
+    target_cycle_s: number | null;
+    daily_target_count: number;
+  } | null;
+  daily: EfficiencyBlock;
+  shift: EfficiencyBlock & { id: string; name: string };
+  summary: {
+    cycle_count: number;
+    avg_cycle_s: number;
+    min_cycle_s: number;
+    max_cycle_s: number;
+  };
+  hourly: Array<{ hour: number; count: number }>;
+};
 
 function istanbulHourNow(): number {
   const parts = new Intl.DateTimeFormat("en-GB", {
@@ -28,32 +64,6 @@ function istanbulHourNow(): number {
   }).formatToParts(new Date());
   return Number(parts.find((p) => p.type === "hour")?.value ?? 0);
 }
-
-type MachineRow = { id: number; name: string; enabled: boolean };
-
-type TvSummary = {
-  cycle_count: number;
-  avg_cycle_s: number;
-  min_cycle_s: number;
-  max_cycle_s: number;
-};
-
-type HourBucket = { hour: number; count: number; avg_cycle_s: number };
-
-type TvBoardMachine = {
-  machine_id: number;
-  name: string;
-  total_cycle_count: number;
-  active_mold_id: number | null;
-  active_mold_name: string | null;
-  summary: TvSummary;
-  hourly: HourBucket[];
-};
-
-type TvBoard = {
-  window_label: string;
-  machines: TvBoardMachine[];
-};
 
 function loadSelectedIds(): number[] | null {
   try {
@@ -71,24 +81,23 @@ function saveSelectedIds(ids: number[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
 }
 
-function stateInfo(state: string): { label: string; border: string; dot: string } {
+function stateInfo(state: string): { label: string; color: string; bg: string } {
   switch (state) {
     case "OPEN":
-      return { label: "AÇIK", border: "border-emerald-500", dot: "bg-emerald-400" };
+      return { label: "ÇALIŞIYOR", color: "text-emerald-300", bg: "bg-emerald-500" };
     case "CLOSED":
-      return { label: "KAPALI", border: "border-sky-500", dot: "bg-sky-400" };
+      return { label: "KAPALI", color: "text-sky-300", bg: "bg-sky-500" };
     case "MOVING":
-      return { label: "HAREKET", border: "border-amber-400", dot: "bg-amber-300" };
+      return { label: "HAREKET", color: "text-amber-300", bg: "bg-amber-400" };
     default:
-      return { label: state || "—", border: "border-slate-600", dot: "bg-slate-500" };
+      return { label: state || "—", color: "text-slate-300", bg: "bg-slate-500" };
   }
 }
 
-/** Fill 0–23 Istanbul hours from server data; show through current hour. */
-function fillHours(hourly: HourBucket[]): HourBucket[] {
-  const map = new Map(hourly.map((h) => [h.hour, h]));
+function fillHours(hourly: Array<{ hour: number; count: number }>): Array<{ hour: number; count: number }> {
+  const map = new Map(hourly.map((h) => [h.hour, h.count]));
   const nowHour = istanbulHourNow();
-  return Array.from({ length: 24 }, (_, h) => map.get(h) ?? { hour: h, count: 0, avg_cycle_s: 0 }).filter(
+  return Array.from({ length: 24 }, (_, h) => ({ hour: h, count: map.get(h) ?? 0 })).filter(
     (h) => h.hour <= nowHour,
   );
 }
@@ -97,100 +106,207 @@ function hourLabel(h: number): string {
   return `${String(h).padStart(2, "0")}:00`;
 }
 
-function TvMachineRow({
-  board,
-  live,
+function pctColor(pct: number): string {
+  if (pct >= 90) return "text-emerald-400";
+  if (pct >= 70) return "text-amber-300";
+  return "text-red-400";
+}
+
+function KpiCard({
+  title,
+  value,
+  subtitle,
+  accent = "text-white",
 }: {
-  board: TvBoardMachine;
+  title: string;
+  value: string;
+  subtitle?: string;
+  accent?: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-700 bg-slate-900/80 p-5 shadow-lg">
+      <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">{title}</div>
+      <div className={`mt-2 text-4xl font-black tabular-nums ${accent}`}>{value}</div>
+      {subtitle && <div className="mt-1 text-sm text-slate-400">{subtitle}</div>}
+    </div>
+  );
+}
+
+function statusFill(state: string): string {
+  switch (state) {
+    case "OPEN":
+      return "#34d399";
+    case "CLOSED":
+      return "#38bdf8";
+    case "MOVING":
+      return "#fbbf24";
+    default:
+      return "#64748b";
+  }
+}
+
+function MachineStatusDonut({ state }: { state: string }) {
+  const st = stateInfo(state);
+  const data = [{ name: st.label, value: 1, fill: statusFill(state) }];
+  return (
+    <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/80 p-4">
+      <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Makine Durumu</div>
+      <div className="h-36 w-36">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie data={data} dataKey="value" innerRadius={48} outerRadius={68} stroke="none" />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+      <div className={`text-xl font-bold ${st.color}`}>{st.label}</div>
+    </div>
+  );
+}
+
+function TvMachineScreen({
+  data,
+  live,
+  index,
+  total,
+}: {
+  data: TvMachineData;
   live: MachineSnap | undefined;
+  index: number;
+  total: number;
 }) {
   const st = stateInfo(live?.state ?? "—");
-  const s = board.summary;
-  const chartData = fillHours(board.hourly);
+  const chartData = fillHours(data.hourly);
   const maxCount = Math.max(1, ...chartData.map((h) => h.count));
-  const moldName = board.active_mold_name || live?.mold_name || "—";
-  const hasMoldStats = s.cycle_count > 0;
+  const moldName = data.active_mold_name || live?.mold_name || "—";
 
   return (
-    <article className={`rounded-2xl border-2 ${st.border} bg-slate-900 overflow-hidden`}>
-      {/* ── Top info bar ── */}
-      <div className="flex flex-wrap items-center gap-x-8 gap-y-2 px-5 py-4">
-        {/* Name + state */}
-        <div className="flex items-center gap-3 min-w-[180px]">
-          <span className={`h-3 w-3 rounded-full shrink-0 ${st.dot}`} />
-          <span className="text-2xl font-bold text-white">{board.name}</span>
-          <span className="rounded-full bg-slate-800 px-3 py-0.5 text-base font-semibold text-slate-200">
-            {st.label}
-          </span>
+    <div className="flex h-full flex-col gap-4 p-6">
+      <div className="flex flex-wrap items-center gap-4">
+        <div>
+          <div className="flex items-center gap-3">
+            <span className={`h-4 w-4 rounded-full ${st.bg}`} />
+            <h2 className="text-3xl font-bold text-white">{data.name}</h2>
+            <span className={`rounded-full px-3 py-1 text-sm font-semibold ${st.color} bg-slate-800`}>
+              {st.label}
+            </span>
+          </div>
+          <p className="mt-1 text-sm text-slate-500">
+            {data.window_label} · Aktif kalıp: <span className="text-amber-300">{moldName}</span>
+          </p>
         </div>
-
-        {/* Daily total count */}
-        <div className="flex items-baseline gap-2">
-          <span className="text-4xl font-black tabular-nums text-white">
-            {board.total_cycle_count.toLocaleString("tr-TR")}
-          </span>
-          <span className="text-base text-slate-400">döngü bugün</span>
-        </div>
-
-        {/* Active mold + its stats */}
-        <div className="flex flex-wrap gap-6 text-base">
-          <Stat label="Aktif kalıp" value={moldName} color="text-amber-300" />
-          <Stat
-            label="Kalıp döngüsü"
-            value={hasMoldStats ? s.cycle_count.toLocaleString("tr-TR") : "—"}
-            color="text-slate-200"
-          />
-          <Stat
-            label="Ort. süre"
-            value={hasMoldStats ? `${s.avg_cycle_s.toFixed(2)} s` : "—"}
-            color="text-sky-300"
-          />
-          <Stat
-            label="Son döngü"
-            value={live?.cycle_time_last != null ? `${live.cycle_time_last.toFixed(2)} s` : "—"}
-            color="text-sky-300"
-          />
-          <Stat
-            label="Min / Max"
-            value={hasMoldStats ? `${s.min_cycle_s.toFixed(2)} / ${s.max_cycle_s.toFixed(2)} s` : "—"}
-            color="text-slate-300"
-          />
+        <div className="ml-auto text-right text-sm text-slate-500">
+          Ekran {index + 1} / {total}
         </div>
       </div>
 
-      {/* ── Hourly bar chart ── */}
-      <div className="h-32 border-t border-slate-800 px-2 pt-1 pb-2">
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={chartData} margin={{ top: 16, right: 4, bottom: 0, left: 4 }} barCategoryGap="10%">
+      <div className="grid flex-1 gap-4 lg:grid-cols-12">
+        <div className="grid gap-4 sm:grid-cols-2 lg:col-span-8 lg:grid-cols-3">
+          <KpiCard
+            title="Günlük Üretim"
+            value={data.daily.actual_count.toLocaleString("tr-TR")}
+            subtitle="Gerçekleşen baskı"
+          />
+          <KpiCard
+            title="Hedef Üretim"
+            value={data.daily.target_count.toLocaleString("tr-TR")}
+            subtitle="Günlük hedef"
+            accent="text-sky-300"
+          />
+          <KpiCard
+            title="Gerçekleşme Oranı"
+            value={`%${data.daily.realization_pct.toFixed(0)}`}
+            subtitle={`${data.daily.actual_count} / ${data.daily.target_count || "—"}`}
+            accent={pctColor(data.daily.realization_pct)}
+          />
+          <KpiCard
+            title={`${data.shift.name} Vardiyası`}
+            value={data.shift.actual_count.toLocaleString("tr-TR")}
+            subtitle={`Hedef: ${data.shift.target_count.toLocaleString("tr-TR")}`}
+          />
+          <KpiCard
+            title="Vardiya Gerçekleşme"
+            value={`%${data.shift.realization_pct.toFixed(0)}`}
+            subtitle="Vardiya bazlı"
+            accent={pctColor(data.shift.realization_pct)}
+          />
+          <KpiCard
+            title="Verimlilik"
+            value={`%${data.daily.efficiency_pct.toFixed(0)}`}
+            subtitle={
+              data.daily.target_cycle_s
+                ? `Hedef ${data.daily.target_cycle_s.toFixed(2)}s · Ort ${data.daily.avg_cycle_s.toFixed(2)}s`
+                : "Kalıp hedef süresi tanımlı değil"
+            }
+            accent={pctColor(data.daily.efficiency_pct)}
+          />
+        </div>
+
+        <div className="grid gap-4 lg:col-span-4">
+          <MachineStatusDonut state={live?.state ?? "—"} />
+          <div className="rounded-2xl border border-slate-700 bg-slate-900/80 p-4">
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Kalıp Özeti</div>
+            <div className="mt-3 space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Kalıp döngüsü</span>
+                <span className="font-semibold tabular-nums">{data.summary.cycle_count}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Ort. süre</span>
+                <span className="font-semibold tabular-nums">
+                  {data.summary.cycle_count > 0 ? `${data.summary.avg_cycle_s.toFixed(2)} s` : "—"}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Son döngü</span>
+                <span className="font-semibold tabular-nums">
+                  {live?.cycle_time_last != null ? `${live.cycle_time_last.toFixed(2)} s` : "—"}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Min / Max</span>
+                <span className="font-semibold tabular-nums">
+                  {data.summary.cycle_count > 0
+                    ? `${data.summary.min_cycle_s.toFixed(2)} / ${data.summary.max_cycle_s.toFixed(2)} s`
+                    : "—"}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Performans</span>
+                <span className={`font-semibold tabular-nums ${pctColor(data.daily.performance_pct)}`}>
+                  %{data.daily.performance_pct.toFixed(0)}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="h-40 rounded-2xl border border-slate-700 bg-slate-900/80 p-3">
+        <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Üretim Grafiği</div>
+        <ResponsiveContainer width="100%" height="90%">
+          <BarChart data={chartData} margin={{ top: 12, right: 8, bottom: 0, left: 4 }} barCategoryGap="12%">
             <CartesianGrid strokeDasharray="2 4" stroke="#1e293b" vertical={false} />
-            <XAxis
-              dataKey="hour"
-              tickFormatter={hourLabel}
-              tick={{ fill: "#64748b", fontSize: 10 }}
-              interval={2}
-            />
-            <YAxis hide domain={[0, maxCount * 1.1]} />
+            <XAxis dataKey="hour" tickFormatter={hourLabel} tick={{ fill: "#64748b", fontSize: 11 }} interval={2} />
+            <YAxis hide domain={[0, maxCount * 1.15]} />
             <Tooltip
               cursor={{ fill: "#1e293b" }}
               content={({ payload, label }) => {
-                const d = payload?.[0]?.payload as HourBucket | undefined;
+                const d = payload?.[0]?.payload as { hour: number; count: number } | undefined;
                 if (!d) return null;
                 return (
                   <div className="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-xs text-slate-200">
                     <div className="font-semibold">{hourLabel(Number(label))}</div>
                     <div>{d.count} döngü</div>
-                    {d.avg_cycle_s > 0 && <div>Ort: {d.avg_cycle_s.toFixed(2)} s</div>}
                   </div>
                 );
               }}
             />
-            <ReferenceLine y={0} stroke="#334155" />
-            <Bar dataKey="count" radius={[2, 2, 0, 0]} isAnimationActive={false}>
+            <Bar dataKey="count" radius={[3, 3, 0, 0]} isAnimationActive={false}>
               {chartData.map((entry) => (
                 <Cell
                   key={entry.hour}
-                  fill={entry.count > 0 ? "#38bdf8" : "#1e293b"}
-                  opacity={entry.count > 0 ? 0.85 : 0.4}
+                  fill={entry.count > 0 ? "#22c55e" : "#1e293b"}
+                  opacity={entry.count > 0 ? 0.9 : 0.35}
                 />
               ))}
               <LabelList
@@ -203,15 +319,6 @@ function TvMachineRow({
           </BarChart>
         </ResponsiveContainer>
       </div>
-    </article>
-  );
-}
-
-function Stat({ label, value, color }: { label: string; value: string; color: string }) {
-  return (
-    <div>
-      <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
-      <div className={`text-lg font-semibold tabular-nums ${color}`}>{value}</div>
     </div>
   );
 }
@@ -222,11 +329,12 @@ export function TvWallPage() {
   const { snapshot, connected } = useLiveSnapshot();
   const [allMachines, setAllMachines] = useState<MachineRow[]>([]);
   const [selectedIds, setSelectedIds] = useState<number[]>(() => loadSelectedIds() ?? []);
-  const [board, setBoard] = useState<TvBoard | null>(null);
+  const [machineData, setMachineData] = useState<Map<number, TvMachineData>>(new Map());
   const [setupOpen, setSetupOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [clock, setClock] = useState(() => new Date());
+  const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000);
@@ -243,20 +351,29 @@ export function TvWallPage() {
       .catch(() => setAllMachines([]));
   }, [user]);
 
+  const displayIds = useMemo(() => {
+    if (selectedIds.length > 0) return selectedIds;
+    return allMachines.map((m) => m.id);
+  }, [selectedIds, allMachines]);
+
   const loadBoard = useCallback(async () => {
+    if (displayIds.length === 0) {
+      setMachineData(new Map());
+      return;
+    }
     try {
-      const url =
-        selectedIds.length > 0
-          ? `/api/analytics/tv_board?machine_ids=${selectedIds.join(",")}`
-          : "/api/analytics/tv_board";
-      const data = await apiGet<TvBoard>(url);
-      setBoard(data);
+      const results = await Promise.all(
+        displayIds.map((id) => apiGet<TvMachineData>(`/api/analytics/tv_machine?machine_id=${id}`)),
+      );
+      const map = new Map<number, TvMachineData>();
+      results.forEach((row) => map.set(row.machine_id, row));
+      setMachineData(map);
       setLastRefresh(new Date());
       setErr(null);
     } catch (e) {
       setErr(String(e));
     }
-  }, [selectedIds]);
+  }, [displayIds]);
 
   useEffect(() => {
     void loadBoard();
@@ -264,21 +381,28 @@ export function TvWallPage() {
     return () => clearInterval(t);
   }, [loadBoard]);
 
+  useEffect(() => {
+    if (displayIds.length <= 1) return;
+    const t = setInterval(() => {
+      setActiveIndex((i) => (i + 1) % displayIds.length);
+    }, ROTATE_MS);
+    return () => clearInterval(t);
+  }, [displayIds.length]);
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [displayIds.join(",")]);
+
   const liveById = useMemo(
     () => new Map(snapshot.machines.map((m) => [m.id, m])),
     [snapshot.machines],
   );
 
-  const tiles = useMemo<TvBoardMachine[]>(() => {
-    if (!board) return [];
-    const order = new Map(selectedIds.map((id, i) => [id, i]));
-    return [...board.machines].sort(
-      (a, b) => (order.get(a.machine_id) ?? 0) - (order.get(b.machine_id) ?? 0),
-    );
-  }, [board, selectedIds]);
+  const currentId = displayIds[activeIndex];
+  const currentData = currentId ? machineData.get(currentId) : undefined;
 
   const clockStr = clock.toLocaleString("tr-TR", {
-    timeZone: "Europe/Istanbul",
+    timeZone: DISPLAY_TZ,
     weekday: "short",
     day: "numeric",
     month: "short",
@@ -308,26 +432,21 @@ export function TvWallPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      {/* Header */}
+    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100">
       <header className="flex flex-wrap items-center gap-4 border-b border-slate-800 px-6 py-3">
         <div>
-          <h1 className="text-xl font-bold text-sky-400">Üretim TV</h1>
-          <p className="text-xs text-slate-500">{board?.window_label || "Bugün · canlı özet"}</p>
+          <h1 className="text-xl font-bold text-emerald-400">Üretim TV</h1>
+          <p className="text-xs text-slate-500">Tam ekran makine özeti · {displayIds.length} makine</p>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-4 text-sm">
           <span className="tabular-nums text-base text-slate-300">{clockStr}</span>
           <span className="text-xs">
             WS:{" "}
-            {connected ? (
-              <span className="text-emerald-400">bağlı</span>
-            ) : (
-              <span className="text-red-400">kopuk</span>
-            )}
+            {connected ? <span className="text-emerald-400">bağlı</span> : <span className="text-red-400">kopuk</span>}
           </span>
           {lastRefresh && (
             <span className="text-xs text-slate-600">
-              {lastRefresh.toLocaleTimeString("tr-TR", { timeZone: "Europe/Istanbul" })}
+              {lastRefresh.toLocaleTimeString("tr-TR", { timeZone: DISPLAY_TZ })}
             </span>
           )}
           {!authLoading && user ? (
@@ -347,9 +466,20 @@ export function TvWallPage() {
               Giriş yap (makine seç)
             </Link>
           ) : null}
-          {user && (
-            <span className="text-xs text-slate-500">{user.display_name}</span>
+          {displayIds.length > 1 && (
+            <div className="flex gap-1">
+              {displayIds.map((id, i) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={`h-2.5 w-2.5 rounded-full ${i === activeIndex ? "bg-emerald-400" : "bg-slate-700"}`}
+                  onClick={() => setActiveIndex(i)}
+                  aria-label={`Makine ${i + 1}`}
+                />
+              ))}
+            </div>
           )}
+          {user && <span className="text-xs text-slate-500">{user.display_name}</span>}
           <Link to="/" className="text-xs text-slate-600 hover:text-slate-400">
             ← Pano
           </Link>
@@ -357,34 +487,37 @@ export function TvWallPage() {
       </header>
 
       {err && (
-        <p className="px-6 py-2 text-sm text-red-400 bg-red-950/40 border-b border-red-900">{err}</p>
+        <p className="border-b border-red-900 bg-red-950/40 px-6 py-2 text-sm text-red-400">{err}</p>
       )}
 
-      {/* Machine rows */}
-      <main className="flex-1 flex flex-col gap-4 p-4 overflow-auto">
-        {tiles.length === 0 ? (
-          <div className="flex flex-1 flex-col items-center justify-center text-slate-500 text-xl gap-2">
+      <main className="flex-1 overflow-hidden">
+        {displayIds.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-xl text-slate-500">
             <span>TV için makine seçilmedi</span>
             <span className="text-sm text-slate-600">
               Giriş yapıp &quot;Makineleri seç&quot; ile bu cihazda kaydedin; TV şifresiz açık kalır
             </span>
           </div>
+        ) : currentData ? (
+          <TvMachineScreen
+            data={currentData}
+            live={liveById.get(currentData.machine_id)}
+            index={activeIndex}
+            total={displayIds.length}
+          />
         ) : (
-          tiles.map((t) => (
-            <TvMachineRow key={t.machine_id} board={t} live={liveById.get(t.machine_id)} />
-          ))
+          <div className="flex h-full items-center justify-center text-slate-500">Yükleniyor…</div>
         )}
       </main>
 
-      {/* Setup modal — only reachable when logged in */}
       {setupOpen && user && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
           <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-2xl border border-slate-600 bg-slate-900 p-6 shadow-2xl">
-            <h2 className="text-xl font-semibold mb-2">TV&apos;de gösterilecek makineler</h2>
-            <p className="text-sm text-slate-400 mb-4">
-              Seçim bu tarayıcıda saklanır. TV şifresiz açılır; değiştirmek için giriş gerekir.
+            <h2 className="mb-2 text-xl font-semibold">TV&apos;de gösterilecek makineler</h2>
+            <p className="mb-4 text-sm text-slate-400">
+              Her makine tam ekran gösterilir ve {ROTATE_MS / 1000} saniyede bir döner. Seçim bu tarayıcıda saklanır.
             </p>
-            <div className="space-y-2 mb-4">
+            <div className="mb-4 space-y-2">
               {allMachines.map((m) => (
                 <label
                   key={m.id}

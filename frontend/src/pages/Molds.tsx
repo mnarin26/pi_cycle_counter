@@ -11,6 +11,8 @@ type Mold = {
   qr_code: string | null;
   status: string;
   avg_cycle_s: number;
+  target_cycle_s: number | null;
+  daily_target_count: number | null;
   tolerance_s: number;
   stdev_limit_s: number | null;
   sample_count: number;
@@ -55,6 +57,8 @@ type EditDraft = {
   qr_code: string;
   status: "candidate" | "active" | "ignored";
   avg_cycle_s: string;
+  target_cycle_s: string;
+  daily_target_count: string;
   tolerance_s: string;
   stdev_auto: boolean;
   stdev_limit_s: string;
@@ -66,6 +70,8 @@ function draftFromMold(m: Mold): EditDraft {
     qr_code: m.qr_code ?? "",
     status: (m.status as EditDraft["status"]) || "candidate",
     avg_cycle_s: String(m.avg_cycle_s),
+    target_cycle_s: m.target_cycle_s != null ? String(m.target_cycle_s) : "",
+    daily_target_count: m.daily_target_count != null ? String(m.daily_target_count) : "",
     tolerance_s: String(m.tolerance_s),
     stdev_auto: m.stdev_limit_s == null,
     stdev_limit_s: m.stdev_limit_s != null ? String(m.stdev_limit_s) : "",
@@ -96,6 +102,18 @@ function MoldCard({
       const tol = parseFloat(draft.tolerance_s);
       if (!Number.isFinite(avg) || avg <= 0) throw new Error("Ort. döngü geçerli bir sayı olmalı");
       if (!Number.isFinite(tol) || tol <= 0) throw new Error("Eşleşme toleransı geçerli bir sayı olmalı");
+      let target_cycle_s: number | null = null;
+      if (draft.target_cycle_s.trim()) {
+        const target = parseFloat(draft.target_cycle_s);
+        if (!Number.isFinite(target) || target <= 0) throw new Error("Hedef süre geçerli bir sayı olmalı");
+        target_cycle_s = target;
+      }
+      let daily_target_count: number | null = null;
+      if (draft.daily_target_count.trim()) {
+        const daily = parseInt(draft.daily_target_count, 10);
+        if (!Number.isFinite(daily) || daily <= 0) throw new Error("Günlük hedef geçerli bir sayı olmalı");
+        daily_target_count = daily;
+      }
       let stdev_limit_s: number | null = null;
       if (!draft.stdev_auto) {
         const st = parseFloat(draft.stdev_limit_s);
@@ -107,6 +125,8 @@ function MoldCard({
         qr_code: draft.qr_code.trim() || null,
         status: draft.status,
         avg_cycle_s: avg,
+        target_cycle_s,
+        daily_target_count,
         tolerance_s: tol,
         stdev_limit_s,
       });
@@ -141,7 +161,10 @@ function MoldCard({
           <div className="min-w-[200px] flex-1">
             <div className="font-medium">{mold.name || "İsimsiz kalıp önerisi"}</div>
             <div className="text-xs text-slate-400">
-              QR: {mold.qr_code ? <code className="text-accent">{mold.qr_code}</code> : "—"} · Durum: {mold.status} · Ort. {mold.avg_cycle_s.toFixed(2)}s · Eşleşme ±{mold.tolerance_s.toFixed(2)}s
+              QR: {mold.qr_code ? <code className="text-accent">{mold.qr_code}</code> : "—"} · Durum: {mold.status} · Ort. {mold.avg_cycle_s.toFixed(2)}s
+              {mold.target_cycle_s != null ? ` · Hedef ${mold.target_cycle_s.toFixed(2)}s` : ""}
+              {mold.daily_target_count != null ? ` · Günlük hedef ${mold.daily_target_count}` : ""}
+              {" · Eşleşme ±"}{mold.tolerance_s.toFixed(2)}s
               · Stab. eşik {effectiveStdevLimit(mold).toFixed(2)}s
               {mold.stdev_limit_s == null ? " (oto)" : ""} · n=
               {mold.sample_count} · güven {(mold.confidence * 100).toFixed(0)}%
@@ -228,6 +251,30 @@ function MoldCard({
               </select>
             </label>
             <label className="text-sm">
+              <span className="mb-1 block text-xs text-slate-400">Hedef çalışma süresi (s)</span>
+              <input
+                type="number"
+                step="0.01"
+                min="0.1"
+                className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+                placeholder="örn. 12.50"
+                value={draft.target_cycle_s}
+                onChange={(e) => setDraft((d) => ({ ...d, target_cycle_s: e.target.value }))}
+              />
+            </label>
+            <label className="text-sm">
+              <span className="mb-1 block text-xs text-slate-400">Günlük hedef baskı</span>
+              <input
+                type="number"
+                step="1"
+                min="1"
+                className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+                placeholder="örn. 15000"
+                value={draft.daily_target_count}
+                onChange={(e) => setDraft((d) => ({ ...d, daily_target_count: e.target.value }))}
+              />
+            </label>
+            <label className="text-sm">
               <span className="mb-1 block text-xs text-slate-400">Ort. döngü (s)</span>
               <input
                 type="number"
@@ -311,6 +358,150 @@ function MoldCard({
   );
 }
 
+function CreateMoldForm({ onCreated }: { onCreated: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [qrCode, setQrCode] = useState("");
+  const [targetCycleS, setTargetCycleS] = useState("");
+  const [dailyTarget, setDailyTarget] = useState("");
+  const [toleranceS, setToleranceS] = useState("0.35");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function submit() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const target = parseFloat(targetCycleS);
+      if (!Number.isFinite(target) || target <= 0) throw new Error("Hedef çalışma süresi zorunlu");
+      const tol = parseFloat(toleranceS);
+      if (!Number.isFinite(tol) || tol <= 0) throw new Error("Tolerans geçerli bir sayı olmalı");
+      let daily_target_count: number | undefined;
+      if (dailyTarget.trim()) {
+        const daily = parseInt(dailyTarget, 10);
+        if (!Number.isFinite(daily) || daily <= 0) throw new Error("Günlük hedef geçerli bir sayı olmalı");
+        daily_target_count = daily;
+      }
+      await apiPost<Mold>("/api/molds", {
+        name: name.trim(),
+        qr_code: qrCode.trim(),
+        target_cycle_s: target,
+        daily_target_count,
+        tolerance_s: tol,
+      });
+      setOpen(false);
+      setName("");
+      setQrCode("");
+      setTargetCycleS("");
+      setDailyTarget("");
+      setToleranceS("0.35");
+      onCreated();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="mb-4 rounded bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-600"
+        onClick={() => setOpen(true)}
+      >
+        + Yeni Kalıp
+      </button>
+    );
+  }
+
+  return (
+    <div className="mb-4 rounded border border-emerald-800 bg-emerald-950/30 p-4">
+      <h3 className="mb-3 text-lg font-semibold text-emerald-300">Yeni Kalıp Oluştur</h3>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <label className="text-sm sm:col-span-2">
+          <span className="mb-1 block text-xs text-slate-400">Kalıp adı *</span>
+          <input
+            className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Kapak A"
+          />
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-slate-400">QR kodu *</span>
+          <input
+            className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2 font-mono"
+            value={qrCode}
+            onChange={(e) => setQrCode(e.target.value)}
+            placeholder="042"
+          />
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-slate-400">Hedef çalışma süresi (sn) *</span>
+          <input
+            type="number"
+            step="0.01"
+            min="0.1"
+            className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+            value={targetCycleS}
+            onChange={(e) => setTargetCycleS(e.target.value)}
+            placeholder="12.50"
+          />
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-slate-400">Günlük hedef baskı</span>
+          <input
+            type="number"
+            step="1"
+            min="1"
+            className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+            value={dailyTarget}
+            onChange={(e) => setDailyTarget(e.target.value)}
+            placeholder="15000"
+          />
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-slate-400">Eşleşme toleransı (± s)</span>
+          <input
+            type="number"
+            step="0.01"
+            min="0.01"
+            className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+            value={toleranceS}
+            onChange={(e) => setToleranceS(e.target.value)}
+          />
+        </label>
+      </div>
+      <p className="mt-2 text-xs text-slate-500">
+        Hedef süre ve günlük hedef, TV ekranında verimlilik ve gerçekleşme oranı hesabında kullanılır.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="rounded bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+          disabled={busy}
+          onClick={() => void submit()}
+        >
+          {busy ? "Kaydediliyor…" : "Oluştur"}
+        </button>
+        <button
+          type="button"
+          className="rounded bg-slate-700 px-4 py-2 text-sm"
+          disabled={busy}
+          onClick={() => {
+            setOpen(false);
+            setErr(null);
+          }}
+        >
+          İptal
+        </button>
+      </div>
+      {err && <p className="mt-2 text-xs text-red-300">{err}</p>}
+    </div>
+  );
+}
+
 export function MoldsPage() {
   const [rows, setRows] = useState<Mold[]>([]);
   const [usage, setUsage] = useState<MoldUsageResponse | null>(null);
@@ -389,6 +580,7 @@ export function MoldsPage() {
   return (
     <div>
       <h2 className="mb-4 text-xl font-semibold">Kalıplar</h2>
+      <CreateMoldForm onCreated={() => void reloadAll()} />
       {err && <p className="mb-3 text-sm text-red-300">{err}</p>}
 
       <div className="mb-4 rounded border border-slate-700 bg-panel2 p-3">

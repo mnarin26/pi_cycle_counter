@@ -93,6 +93,9 @@ def create_mold_from_qr(
     name: str,
     source: str = "telegram",
     operator_name: str | None = None,
+    target_cycle_s: float | None = None,
+    daily_target_count: int | None = None,
+    tolerance_s: float = 0.35,
 ) -> Mold:
     code = qr_code.strip()
     if not code:
@@ -102,12 +105,17 @@ def create_mold_from_qr(
     nm = name.strip()
     if not nm:
         raise ValueError("Kalip adi bos")
+    target = float(target_cycle_s) if target_cycle_s and target_cycle_s > 0 else None
+    daily_target = int(daily_target_count) if daily_target_count and daily_target_count > 0 else None
+    tol = float(tolerance_s) if tolerance_s and tolerance_s > 0 else 0.35
     mold = Mold(
         qr_code=code,
         name=nm,
         status="active",
-        avg_cycle_s=0.0,
-        tolerance_s=0.35,
+        avg_cycle_s=target or 0.0,
+        target_cycle_s=target,
+        daily_target_count=daily_target,
+        tolerance_s=tol,
         sample_count=0,
         confidence=0.0,
     )

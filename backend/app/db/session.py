@@ -137,6 +137,10 @@ def init_db() -> None:
             conn.execute(text("ALTER TABLE molds ADD COLUMN stdev_limit_s REAL"))
         if "qr_code" not in mold_cols:
             conn.execute(text("ALTER TABLE molds ADD COLUMN qr_code VARCHAR(64)"))
+        if "target_cycle_s" not in mold_cols:
+            conn.execute(text("ALTER TABLE molds ADD COLUMN target_cycle_s REAL"))
+        if "daily_target_count" not in mold_cols:
+            conn.execute(text("ALTER TABLE molds ADD COLUMN daily_target_count INTEGER"))
         if "qr_code" not in machine_cols:
             conn.execute(text("ALTER TABLE machines ADD COLUMN qr_code VARCHAR(64)"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_molds_qr_code ON molds (qr_code) WHERE qr_code IS NOT NULL"))

@@ -10,8 +10,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_panel_8000
 from app.db.models import Cycle, Machine, Mold, MoldMachine
+from app.services.audit_log import log_action
 from app.services.cycle_export import (
     export_filename,
     mold_cycles_csv,
@@ -22,6 +23,7 @@ from app.services.mold_names import (
     clear_mold_name_snapshots,
     clear_orphan_cycle_mold_labels,
 )
+from app.services.mold_registry import create_mold_from_qr
 from app.services.time_windows import resolve_window
 
 router = APIRouter()
@@ -33,6 +35,8 @@ class MoldOut(BaseModel):
     qr_code: str | None = None
     status: str
     avg_cycle_s: float
+    target_cycle_s: float | None = None
+    daily_target_count: int | None = None
     tolerance_s: float
     stdev_limit_s: float | None = None
     sample_count: int
@@ -41,6 +45,14 @@ class MoldOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class MoldCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=256)
+    qr_code: str = Field(..., min_length=1, max_length=64)
+    target_cycle_s: float = Field(..., gt=0, description="Hedef ortalama çalışma süresi (sn)")
+    daily_target_count: int | None = Field(default=None, gt=0, description="Günlük hedef baskı adedi")
+    tolerance_s: float = Field(default=0.35, gt=0)
 
 
 class NameBody(BaseModel):
@@ -52,6 +64,8 @@ class MoldUpdate(BaseModel):
     qr_code: str | None = Field(default=None, max_length=64)
     status: Literal["candidate", "active", "ignored"] | None = None
     avg_cycle_s: float | None = Field(default=None, gt=0)
+    target_cycle_s: float | None = Field(default=None, gt=0)
+    daily_target_count: int | None = Field(default=None, gt=0)
     tolerance_s: float | None = Field(default=None, gt=0)
     stdev_limit_s: float | None = Field(default=None, gt=0)
 
@@ -65,6 +79,37 @@ class ConfirmMatchBody(BaseModel):
 @router.get("", response_model=list[MoldOut])
 def list_molds(db: Session = Depends(get_db)):
     return db.query(Mold).order_by(Mold.id.desc()).limit(200).all()
+
+
+@router.post("", response_model=MoldOut)
+def create_mold(
+    body: MoldCreate,
+    db: Session = Depends(get_db),
+    user=Depends(require_panel_8000),
+):
+    try:
+        mold = create_mold_from_qr(
+            db,
+            qr_code=body.qr_code.strip(),
+            name=body.name.strip(),
+            source="web",
+            operator_name=user.display_name,
+            target_cycle_s=body.target_cycle_s,
+            daily_target_count=body.daily_target_count,
+            tolerance_s=body.tolerance_s,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    log_action(
+        db,
+        actor_type=user.actor_type,
+        actor_name=user.display_name,
+        telegram_user_id=user.telegram_user_id,
+        action="mold.create",
+        resource=f"mold:{mold.id}",
+        detail={"name": mold.name, "qr_code": mold.qr_code, "source": "web"},
+    )
+    return mold
 
 
 @router.get("/usage")
