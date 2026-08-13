@@ -373,7 +373,9 @@ function CreateMoldForm({ onCreated }: { onCreated: () => void }) {
     setErr(null);
     try {
       const target = parseFloat(targetCycleS);
-      if (!Number.isFinite(target) || target <= 0) throw new Error("Hedef çalışma süresi zorunlu");
+      if (targetCycleS.trim() && (!Number.isFinite(target) || target <= 0)) {
+        throw new Error("Hedef çalışma süresi geçerli bir sayı olmalı");
+      }
       const tol = parseFloat(toleranceS);
       if (!Number.isFinite(tol) || tol <= 0) throw new Error("Tolerans geçerli bir sayı olmalı");
       let daily_target_count: number | undefined;
@@ -385,7 +387,7 @@ function CreateMoldForm({ onCreated }: { onCreated: () => void }) {
       await apiPost<Mold>("/api/molds", {
         name: name.trim(),
         qr_code: qrCode.trim(),
-        target_cycle_s: target,
+        target_cycle_s: targetCycleS.trim() ? target : undefined,
         daily_target_count,
         tolerance_s: tol,
       });
@@ -438,7 +440,7 @@ function CreateMoldForm({ onCreated }: { onCreated: () => void }) {
           />
         </label>
         <label className="text-sm">
-          <span className="mb-1 block text-xs text-slate-400">Hedef çalışma süresi (sn) *</span>
+          <span className="mb-1 block text-xs text-slate-400">Hedef çalışma süresi (sn)</span>
           <input
             type="number"
             step="0.01"
@@ -446,7 +448,7 @@ function CreateMoldForm({ onCreated }: { onCreated: () => void }) {
             className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
             value={targetCycleS}
             onChange={(e) => setTargetCycleS(e.target.value)}
-            placeholder="12.50"
+            placeholder="Opsiyonel — verimlilik için önerilir"
           />
         </label>
         <label className="text-sm">

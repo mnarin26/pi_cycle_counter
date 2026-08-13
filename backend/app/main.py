@@ -155,6 +155,10 @@ def _is_public_api(path: str) -> bool:
         return True
     if path.startswith("/api/analytics/tv_board"):
         return True
+    if path.startswith("/api/analytics/tv_machine"):
+        return True
+    if path == "/api/settings/production":
+        return True
     return False
 
 

@@ -50,7 +50,7 @@ class MoldOut(BaseModel):
 class MoldCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=256)
     qr_code: str = Field(..., min_length=1, max_length=64)
-    target_cycle_s: float = Field(..., gt=0, description="Hedef ortalama çalışma süresi (sn)")
+    target_cycle_s: float | None = Field(default=None, gt=0, description="Hedef ortalama çalışma süresi (sn)")
     daily_target_count: int | None = Field(default=None, gt=0, description="Günlük hedef baskı adedi")
     tolerance_s: float = Field(default=0.35, gt=0)
 

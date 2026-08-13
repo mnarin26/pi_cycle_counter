@@ -23,6 +23,7 @@ from app.api.deps import client_ip, get_db, require_super_or_admin
 from app.services import audit_log
 from app.services.auth_service import get_session_user, invalidate_operator_sessions
 from app.services.reset_production import wipe_production_history
+from app.services.production_settings import get_production_settings, patch_production_settings
 from app.services.stored_settings import (
     add_operator,
     get_section,
@@ -156,6 +157,18 @@ class SshSettingsPatch(BaseModel):
     auth_method: str | None = None
     key_path: str | None = None
     alias: str | None = None
+
+
+class ProductionShift(BaseModel):
+    id: str = Field(..., min_length=1, max_length=32)
+    name: str = Field(..., min_length=1, max_length=64)
+    start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    end: str = Field(..., pattern=r"^(\d{2}:\d{2}|24:00)$")
+
+
+class ProductionSettingsPatch(BaseModel):
+    tv_rotate_seconds: int | None = Field(default=None, ge=5, le=300)
+    shifts: list[ProductionShift] | None = None
 
 
 @app.post("/api/system/wifi-ap")
@@ -450,6 +463,44 @@ def patch_ssh_settings_admin(body: SshSettingsPatch):
         view = ssh_public_view(raw)
         view["connection_string"] = ssh_connection_string(raw)
         return view
+    finally:
+        db.close()
+
+
+@app.get("/api/settings/production")
+def get_production_settings_admin():
+    db = db_session.SessionLocal()
+    try:
+        return get_production_settings(db)
+    finally:
+        db.close()
+
+
+@app.patch("/api/settings/production")
+def patch_production_settings_admin(
+    body: ProductionSettingsPatch,
+    request: Request,
+    user=Depends(require_super_or_admin),
+):
+    db = db_session.SessionLocal()
+    try:
+        patch = body.model_dump(exclude_unset=True)
+        if "shifts" in patch and patch["shifts"] is not None:
+            patch["shifts"] = [s.model_dump() for s in body.shifts or []]
+        try:
+            result = patch_production_settings(db, patch)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        audit_log.log_action(
+            db,
+            actor_type=user.actor_type,
+            action="settings.production.update",
+            actor_name=user.display_name,
+            telegram_user_id=user.telegram_user_id,
+            detail={"fields": list(patch.keys())},
+            ip=client_ip(request),
+        )
+        return result
     finally:
         db.close()
 

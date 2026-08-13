@@ -19,7 +19,7 @@ import { useLiveSnapshot, type MachineSnap } from "../hooks/useLiveSnapshot";
 
 const STORAGE_KEY = "tv_selected_machine_ids";
 const REFRESH_MS = 30_000;
-const ROTATE_MS = 20_000;
+const DEFAULT_ROTATE_MS = 20_000;
 const DISPLAY_TZ = "Europe/Istanbul";
 
 type MachineRow = { id: number; name: string; enabled: boolean };
@@ -335,6 +335,16 @@ export function TvWallPage() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [clock, setClock] = useState(() => new Date());
   const [activeIndex, setActiveIndex] = useState(0);
+  const [rotateMs, setRotateMs] = useState(DEFAULT_ROTATE_MS);
+
+  useEffect(() => {
+    apiGet<{ tv_rotate_seconds: number }>("/api/settings/production")
+      .then((cfg) => {
+        const sec = Number(cfg.tv_rotate_seconds);
+        if (Number.isFinite(sec) && sec >= 5) setRotateMs(sec * 1000);
+      })
+      .catch(() => setRotateMs(DEFAULT_ROTATE_MS));
+  }, []);
 
   useEffect(() => {
     const t = setInterval(() => setClock(new Date()), 1000);
@@ -385,9 +395,9 @@ export function TvWallPage() {
     if (displayIds.length <= 1) return;
     const t = setInterval(() => {
       setActiveIndex((i) => (i + 1) % displayIds.length);
-    }, ROTATE_MS);
+    }, rotateMs);
     return () => clearInterval(t);
-  }, [displayIds.length]);
+  }, [displayIds.length, rotateMs]);
 
   useEffect(() => {
     setActiveIndex(0);
@@ -515,7 +525,7 @@ export function TvWallPage() {
           <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-2xl border border-slate-600 bg-slate-900 p-6 shadow-2xl">
             <h2 className="mb-2 text-xl font-semibold">TV&apos;de gösterilecek makineler</h2>
             <p className="mb-4 text-sm text-slate-400">
-              Her makine tam ekran gösterilir ve {ROTATE_MS / 1000} saniyede bir döner. Seçim bu tarayıcıda saklanır.
+              Her makine tam ekran gösterilir ve ayarlardaki sürede otomatik döner. Seçim bu tarayıcıda saklanır.
             </p>
             <div className="mb-4 space-y-2">
               {allMachines.map((m) => (

@@ -7,14 +7,10 @@ from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from app.services.stored_settings import get_section
+from app.services.production_settings import DEFAULT_SHIFTS, get_production_settings
 from app.services.time_windows import DISPLAY_TZ, ensure_utc
 
-DEFAULT_SHIFTS: list[dict[str, str]] = [
-    {"id": "night", "name": "Gece", "start": "00:00", "end": "08:00"},
-    {"id": "day", "name": "Gündüz", "start": "08:00", "end": "16:00"},
-    {"id": "evening", "name": "Akşam", "start": "16:00", "end": "24:00"},
-]
+DEFAULT_SHIFT_DEFS = DEFAULT_SHIFTS
 
 
 @dataclass(frozen=True)
@@ -52,10 +48,7 @@ def _normalize_shift(raw: dict) -> ShiftDef | None:
 def get_shift_defs(db: Session | None = None) -> list[ShiftDef]:
     raw_shifts = DEFAULT_SHIFTS
     if db is not None:
-        section = get_section(db, "production")
-        configured = section.get("shifts")
-        if isinstance(configured, list) and configured:
-            raw_shifts = configured
+        raw_shifts = get_production_settings(db)["shifts"]
     out: list[ShiftDef] = []
     for item in raw_shifts:
         if not isinstance(item, dict):

@@ -84,7 +84,8 @@
           <button type="button" class="nav-item" data-panel="panel-camera">3. Kamera</button>
           <button type="button" class="nav-item" data-panel="panel-telegram">4. Telegram botu</button>
           <button type="button" class="nav-item" data-panel="panel-system">5. Pi saati ve Wi-Fi</button>
-          <button type="button" class="nav-item" data-panel="panel-audit">6. Islem kayitlari</button>
+          <button type="button" class="nav-item" data-panel="panel-tv">6. TV ve vardiya</button>
+          <button type="button" class="nav-item" data-panel="panel-audit">7. Islem kayitlari</button>
         </nav>
         <main class="admin-main">
 
@@ -445,6 +446,37 @@
       </div>
       </section>
 
+      <section id="panel-tv" class="admin-panel">
+      <div class="card">
+        <h3>TV ekrani ve vardiya ayarlari</h3>
+        <p class="muted">
+          <a id="tvPreviewLink" href="#" target="_blank" style="color:#93c5fd">8000/tv</a> tam ekran makine ozetini gosterir.
+          Birden fazla makine seciliyse asagidaki surede otomatik gecis yapilir.
+        </p>
+        <div class="row">
+          <div class="col-4">
+            <label>TV ekran gecis suresi (sn)</label>
+            <input id="tvRotateSec" type="number" min="5" max="300" step="1" value="20" />
+            <p class="muted" style="margin-top:4px;">Makineler arasi tam ekran gecis suresi (5–300 sn).</p>
+          </div>
+          <div class="col-8">
+            <label>&nbsp;</label>
+            <div id="tvProdStatus" class="muted">Yukleniyor…</div>
+          </div>
+        </div>
+
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Vardiyalar</h4>
+        <p class="muted">Gunluk ve vardiya verimlilik hesabi bu saat araliklarina gore yapilir. En az 1, en fazla 4 vardiya.</p>
+        <div id="shiftRows"></div>
+        <div class="row" style="margin-top:8px;">
+          <div class="col-3"><button id="shiftAddBtn" type="button" class="btn-gray">+ Vardiya ekle</button></div>
+          <div class="col-3"><button id="tvProdSaveBtn" type="button" class="btn-green">Kaydet</button></div>
+          <div class="col-6"><div id="tvProdMsg" class="muted"></div></div>
+        </div>
+      </div>
+      </section>
+
       <section id="panel-audit" class="admin-panel">
       <div class="card" id="auditCard">
         <h3>Islem Kayitlari (Audit)</h3>
@@ -474,6 +506,8 @@
       const tvLink = document.getElementById('tvAppLink');
       if(mainLink) mainLink.href = API + '/';
       if(tvLink) tvLink.href = API + '/tv';
+      const tvPreviewLink = document.getElementById('tvPreviewLink');
+      if(tvPreviewLink) tvPreviewLink.href = API + '/tv';
       let cameras = [];
       let machines = [];
       let liveSnapshot = { machines: [], cameras: [] };
@@ -507,6 +541,7 @@
         camera: 'panel-camera',
         telegram: 'panel-telegram',
         system: 'panel-system',
+        tv: 'panel-tv',
         audit: 'panel-audit',
       };
 
@@ -524,6 +559,7 @@
         if(panelId === 'panel-machines' && typeof refreshSnapshot === 'function'){
           refreshSnapshot().catch(()=>{});
         }
+        if(panelId === 'panel-tv') refreshProductionSettings().catch(e=>setMsg('tvProdMsg', String(e), 'bad'));
       }
 
       document.querySelectorAll('.nav-item').forEach(btn => {
@@ -542,6 +578,7 @@
         piDatetime: 'Raspberry Pi sistem saatini elle ayarlar. Kaydedince NTP kapanir; ag saati yerine bu deger kullanilir.',
         wifiApSsid: 'Pi fabrika Wi-Fi erisim noktasi adi (SSID). Kameralar ve TV bu aga baglanir.',
         wifiApPassword: 'pi-wifi ag sifresi (WPA2). En az 8 karakter. Bos birakilirsa sadece SSID guncellenir.',
+        tvRotateSec: 'TV ekraninda birden fazla makine seciliyse tam ekran gecis suresi (saniye).',
         tgEnabled: 'Telegram bot servisi kurulunca kalip atama icin acilir.',
         tgUsername: 'BotFather kullanici adi, xxxxxx_bot formatinda (ornek alfamold_bot).',
         tgToken: 'BotFather HTTP API token. Bos birakilirsa kayitli token korunur.',
@@ -685,6 +722,105 @@
           q('wifiApStatus').innerHTML = `<span class="bad">${String(e)}</span>`;
           throw e;
         }
+      }
+
+      let productionShifts = [];
+
+      function renderShiftRows(){
+        const host = q('shiftRows');
+        if(!host) return;
+        host.innerHTML = '';
+        productionShifts.forEach((sh, idx) => {
+          const row = document.createElement('div');
+          row.className = 'row';
+          row.style.marginBottom = '8px';
+          row.innerHTML = `
+            <div class="col-3">
+              <label>Vardiya adi</label>
+              <input data-shift-field="name" data-shift-idx="${idx}" value="${sh.name || ''}" />
+            </div>
+            <div class="col-2">
+              <label>Baslangic</label>
+              <input data-shift-field="start" data-shift-idx="${idx}" type="time" value="${(sh.start || '08:00').slice(0,5)}" />
+            </div>
+            <div class="col-2">
+              <label>Bitis</label>
+              <input data-shift-field="end" data-shift-idx="${idx}" type="time" value="${(sh.end || '16:00') === '24:00' ? '23:59' : (sh.end || '16:00').slice(0,5)}" />
+            </div>
+            <div class="col-3">
+              <label>Kimlik (id)</label>
+              <input data-shift-field="id" data-shift-idx="${idx}" value="${sh.id || ''}" />
+            </div>
+            <div class="col-2">
+              <label>&nbsp;</label>
+              <button type="button" class="btn-gray" data-shift-remove="${idx}" ${productionShifts.length <= 1 ? 'disabled' : ''}>Sil</button>
+            </div>
+          `;
+          host.appendChild(row);
+        });
+        host.querySelectorAll('[data-shift-field]').forEach(inp => {
+          inp.addEventListener('change', () => {
+            const idx = Number(inp.getAttribute('data-shift-idx'));
+            const field = inp.getAttribute('data-shift-field');
+            if(!productionShifts[idx] || !field) return;
+            productionShifts[idx][field] = inp.value;
+          });
+        });
+        host.querySelectorAll('[data-shift-remove]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const idx = Number(btn.getAttribute('data-shift-remove'));
+            if(productionShifts.length <= 1) return;
+            productionShifts.splice(idx, 1);
+            renderShiftRows();
+          });
+        });
+        q('shiftAddBtn').disabled = productionShifts.length >= 4;
+      }
+
+      function collectShiftsFromForm(){
+        const host = q('shiftRows');
+        const rows = host ? host.querySelectorAll('.row') : [];
+        const out = [];
+        rows.forEach((row, idx) => {
+          const name = row.querySelector('[data-shift-field="name"]')?.value?.trim() || `Vardiya ${idx + 1}`;
+          let start = row.querySelector('[data-shift-field="start"]')?.value || '08:00';
+          let end = row.querySelector('[data-shift-field="end"]')?.value || '16:00';
+          const id = row.querySelector('[data-shift-field="id"]')?.value?.trim() || `shift_${idx + 1}`;
+          if(end === '23:59') end = '24:00';
+          out.push({ id, name, start, end });
+        });
+        return out;
+      }
+
+      function applyProductionForm(data){
+        q('tvRotateSec').value = String(data.tv_rotate_seconds || 20);
+        productionShifts = Array.isArray(data.shifts) ? data.shifts.map(s => ({...s})) : [];
+        if(!productionShifts.length){
+          productionShifts = [
+            { id: 'night', name: 'Gece', start: '00:00', end: '08:00' },
+            { id: 'day', name: 'Gunduz', start: '08:00', end: '16:00' },
+            { id: 'evening', name: 'Aksam', start: '16:00', end: '24:00' },
+          ];
+        }
+        renderShiftRows();
+        q('tvProdStatus').innerHTML =
+          `<span class="good">${productionShifts.length} vardiya</span> &nbsp;|&nbsp; TV gecis: <b>${data.tv_rotate_seconds || 20} sn</b>`;
+      }
+
+      async function refreshProductionSettings(){
+        const data = await jgetLocal('/api/settings/production');
+        applyProductionForm(data);
+        setMsg('tvProdMsg', '');
+      }
+
+      async function saveProductionSettings(){
+        const body = {
+          tv_rotate_seconds: Number(q('tvRotateSec').value || 20),
+          shifts: collectShiftsFromForm(),
+        };
+        const data = await jpatchLocal('/api/settings/production', body);
+        applyProductionForm(data);
+        setMsg('tvProdMsg', 'Kaydedildi.', 'good');
       }
 
       function thresholdLabel(m, sm){
@@ -1494,6 +1630,17 @@
             'good'
           );
         }catch(e){ setMsg('wifiApMsg', apiErrText(e), 'bad'); }
+      };
+
+      q('shiftAddBtn').onclick = () => {
+        if(productionShifts.length >= 4) return;
+        const n = productionShifts.length + 1;
+        productionShifts.push({ id: `shift_${n}`, name: `Vardiya ${n}`, start: '08:00', end: '16:00' });
+        renderShiftRows();
+      };
+      q('tvProdSaveBtn').onclick = async () => {
+        try { await saveProductionSettings(); }
+        catch(e){ setMsg('tvProdMsg', apiErrText(e), 'bad'); }
       };
 
       function apiErrText(e){
