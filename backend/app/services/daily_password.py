@@ -23,8 +23,12 @@ def today_str() -> str:
     return datetime.now(_TZ).strftime("%Y-%m-%d")
 
 
-def _hash_password(password: str) -> str:
+def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _hash_password(password: str) -> str:
+    return hash_password(password)
 
 
 def _generate_plain() -> str:

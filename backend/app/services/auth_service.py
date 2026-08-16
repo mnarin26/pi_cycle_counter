@@ -15,9 +15,29 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.models import WebSession
 from app.services.daily_password import match_daily_password
-from app.services.stored_settings import PERMISSION_KEYS, get_operator_record
+from app.services.network_scope import login_mode_for_ip
+from app.services.stored_settings import (
+    PERMISSION_KEYS,
+    find_operator_by_name,
+    get_operator_record,
+    operator_password_matches,
+    update_operator,
+)
 
+_SUPER_USERNAMES = {"", "super", "super kullanici", "super kullanıcı"}
 _SUPER_PERMISSIONS = {k: True for k in PERMISSION_KEYS}
+
+
+def _is_super_username(username: str | None) -> bool:
+    return " ".join((username or "").strip().split()).casefold() in _SUPER_USERNAMES
+
+
+def _telegram_password_for(rec: dict, db: Session, password: str) -> bool:
+    tg = str(rec.get("telegram_user_id") or "").strip()
+    if not tg:
+        return False
+    uid = match_daily_password(db, password)
+    return bool(uid) and uid in {tg, str(rec.get("id") or "")}
 
 # Simple in-memory brute-force guard: ip -> list[timestamp]
 _failed_attempts: dict[str, list[float]] = {}
@@ -93,13 +113,31 @@ def _create_session(
     return token
 
 
-def login(db: Session, password: str) -> tuple[str, CurrentUser] | None:
-    """Validate password, create session. Returns (token, user) or None."""
+def _user_from_operator(rec: dict) -> CurrentUser:
+    perms = dict(rec.get("permissions") or {})
+    oid = str(rec.get("id") or "")
+    return CurrentUser(
+        actor_type="operator",
+        telegram_user_id=oid or None,
+        display_name=rec.get("name") or oid,
+        permissions={k: bool(perms.get(k, False)) for k in PERMISSION_KEYS},
+    )
+
+
+def login(
+    db: Session,
+    password: str,
+    client_ip: str | None = None,
+    username: str | None = None,
+) -> tuple[str, CurrentUser] | None:
+    """Validate username + password (fixed and/or Telegram daily). Super uses name 'super'."""
     pw = (password or "").strip()
     if not pw:
         return None
 
-    if secrets.compare_digest(pw, settings.super_password):
+    if _is_super_username(username) and len(pw) == len(settings.super_password) and secrets.compare_digest(
+        pw, settings.super_password
+    ):
         user = CurrentUser(
             actor_type="super",
             telegram_user_id=None,
@@ -115,28 +153,39 @@ def login(db: Session, password: str) -> tuple[str, CurrentUser] | None:
         )
         return token, user
 
-    uid = match_daily_password(db, pw)
-    if uid:
-        rec = get_operator_record(db, uid)
-        if rec is None:
-            return None
-        perms = dict(rec.get("permissions") or {})
-        user = CurrentUser(
-            actor_type="operator",
-            telegram_user_id=uid,
-            display_name=rec.get("name") or uid,
-            permissions={k: bool(perms.get(k, False)) for k in PERMISSION_KEYS},
-        )
-        token = _create_session(
-            db,
-            actor_type="operator",
-            telegram_user_id=uid,
-            display_name=user.display_name,
-            permissions=user.permissions,
-        )
-        return token, user
+    rec = find_operator_by_name(db, username or "")
+    if rec is None:
+        return None
+    if not operator_password_matches(rec, pw) and not _telegram_password_for(rec, db, pw):
+        return None
+    user = _user_from_operator(rec)
+    token = _create_session(
+        db,
+        actor_type="operator",
+        telegram_user_id=user.telegram_user_id,
+        display_name=user.display_name,
+        permissions=user.permissions,
+    )
+    return token, user
 
-    return None
+
+def login_hint(client_ip: str | None = None) -> dict[str, str]:
+    return {
+        "login_mode": login_mode_for_ip(client_ip),
+        "hint": "Kayıtlı adınız ve şifreniz (sabit veya Telegram günlük). Yönetici: kullanıcı adı super.",
+    }
+
+
+def change_own_password(db: Session, user: CurrentUser, current_password: str, new_password: str) -> None:
+    if user.is_super or not user.telegram_user_id:
+        raise ValueError("Yonetici sifresi buradan degistirilemez")
+    rec = get_operator_record(db, user.telegram_user_id)
+    if rec is None:
+        raise ValueError("Kullanici bulunamadi")
+    cur = (current_password or "").strip()
+    if not operator_password_matches(rec, cur) and not _telegram_password_for(rec, db, cur):
+        raise ValueError("Mevcut sifre hatali")
+    update_operator(db, telegram_user_id=str(rec["id"]), password=new_password)
 
 
 def get_session_user(db: Session, token: str | None) -> CurrentUser | None:

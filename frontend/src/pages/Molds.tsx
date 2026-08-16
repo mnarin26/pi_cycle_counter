@@ -1,9 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { datetimeLocalInputToUtcIso } from "../lib/chartTheme";
 import { apiDelete, apiDownloadCsv, apiGet, apiPatch, apiPost } from "../api/client";
-
-const DEFAULT_STDEV_RATIO = 0.05;
-const MIN_STDEV_LIMIT = 0.25;
 
 type Mold = {
   id: number;
@@ -13,24 +10,11 @@ type Mold = {
   avg_cycle_s: number;
   target_cycle_s: number | null;
   daily_target_count: number | null;
-  tolerance_s: number;
-  stdev_limit_s: number | null;
-  sample_count: number;
-  confidence: number;
+  work_mode: "auto" | "manual";
+  mount_minutes: number | null;
+  removal_minutes: number | null;
   created_at?: string | null;
 };
-
-function effectiveStdevLimit(m: Pick<Mold, "avg_cycle_s" | "stdev_limit_s">): number {
-  if (m.stdev_limit_s != null && m.stdev_limit_s > 0) return m.stdev_limit_s;
-  if (m.avg_cycle_s > 0) return Math.max(MIN_STDEV_LIMIT, m.avg_cycle_s * DEFAULT_STDEV_RATIO);
-  return MIN_STDEV_LIMIT;
-}
-
-function autoStdevHint(avgStr: string): string {
-  const avg = parseFloat(avgStr);
-  if (!Number.isFinite(avg) || avg <= 0) return "Otomatik: ort. sürenin %5'i (min 0,25 sn)";
-  return `Otomatik: ${Math.max(MIN_STDEV_LIMIT, avg * DEFAULT_STDEV_RATIO).toFixed(2)} sn`;
-}
 
 type MoldUsageRow = {
   mold_id: number;
@@ -55,26 +39,62 @@ type MoldUsageResponse = {
 type EditDraft = {
   name: string;
   qr_code: string;
-  status: "candidate" | "active" | "ignored";
-  avg_cycle_s: string;
   target_cycle_s: string;
   daily_target_count: string;
-  tolerance_s: string;
-  stdev_auto: boolean;
-  stdev_limit_s: string;
+  work_mode: "auto" | "manual";
+  mount_minutes: string;
+  removal_minutes: string;
 };
+
+type SortField = "qr" | "daily_target" | "name";
+type SortDir = "asc" | "desc";
+
+function localeText(value: string | null | undefined): string {
+  return (value ?? "").trim().toLocaleLowerCase("tr-TR");
+}
+
+function qrSortParts(qr: string | null): { num: number; str: string } {
+  const str = localeText(qr);
+  if (/^\d+$/.test(str)) return { num: parseInt(str, 10), str };
+  return { num: Number.POSITIVE_INFINITY, str };
+}
+
+function compareMolds(a: Mold, b: Mold, field: SortField, dir: SortDir): number {
+  let cmp = 0;
+  let aMissing = false;
+  let bMissing = false;
+  if (field === "qr") {
+    aMissing = !a.qr_code?.trim();
+    bMissing = !b.qr_code?.trim();
+    if (!aMissing && !bMissing) {
+      const qa = qrSortParts(a.qr_code);
+      const qb = qrSortParts(b.qr_code);
+      cmp = qa.num - qb.num;
+      if (cmp === 0) cmp = qa.str.localeCompare(qb.str, "tr");
+    }
+  } else if (field === "daily_target") {
+    aMissing = a.daily_target_count == null;
+    bMissing = b.daily_target_count == null;
+    if (!aMissing && !bMissing) cmp = (a.daily_target_count as number) - (b.daily_target_count as number);
+  } else {
+    aMissing = !a.name?.trim();
+    bMissing = !b.name?.trim();
+    if (!aMissing && !bMissing) cmp = localeText(a.name).localeCompare(localeText(b.name), "tr");
+  }
+  if (aMissing !== bMissing) return aMissing ? 1 : -1;
+  if (cmp === 0) cmp = a.id - b.id;
+  return dir === "asc" ? cmp : -cmp;
+}
 
 function draftFromMold(m: Mold): EditDraft {
   return {
     name: m.name ?? "",
     qr_code: m.qr_code ?? "",
-    status: (m.status as EditDraft["status"]) || "candidate",
-    avg_cycle_s: String(m.avg_cycle_s),
     target_cycle_s: m.target_cycle_s != null ? String(m.target_cycle_s) : "",
     daily_target_count: m.daily_target_count != null ? String(m.daily_target_count) : "",
-    tolerance_s: String(m.tolerance_s),
-    stdev_auto: m.stdev_limit_s == null,
-    stdev_limit_s: m.stdev_limit_s != null ? String(m.stdev_limit_s) : "",
+    work_mode: m.work_mode === "manual" ? "manual" : "auto",
+    mount_minutes: m.mount_minutes != null ? String(m.mount_minutes) : "",
+    removal_minutes: m.removal_minutes != null ? String(m.removal_minutes) : "",
   };
 }
 
@@ -98,10 +118,6 @@ function MoldCard({
     setBusy(true);
     setErr(null);
     try {
-      const avg = parseFloat(draft.avg_cycle_s);
-      const tol = parseFloat(draft.tolerance_s);
-      if (!Number.isFinite(avg) || avg <= 0) throw new Error("Ort. döngü geçerli bir sayı olmalı");
-      if (!Number.isFinite(tol) || tol <= 0) throw new Error("Eşleşme toleransı geçerli bir sayı olmalı");
       let target_cycle_s: number | null = null;
       if (draft.target_cycle_s.trim()) {
         const target = parseFloat(draft.target_cycle_s);
@@ -114,21 +130,21 @@ function MoldCard({
         if (!Number.isFinite(daily) || daily <= 0) throw new Error("Günlük hedef geçerli bir sayı olmalı");
         daily_target_count = daily;
       }
-      let stdev_limit_s: number | null = null;
-      if (!draft.stdev_auto) {
-        const st = parseFloat(draft.stdev_limit_s);
-        if (!Number.isFinite(st) || st <= 0) throw new Error("Stabilite eşiği geçerli bir sayı olmalı");
-        stdev_limit_s = st;
-      }
+      const mount_minutes = draft.mount_minutes.trim() ? parseInt(draft.mount_minutes, 10) : null;
+      if (mount_minutes != null && (!Number.isFinite(mount_minutes) || mount_minutes < 0))
+        throw new Error("Montaj süresi geçerli bir sayı olmalı");
+      const removal_minutes = draft.removal_minutes.trim() ? parseInt(draft.removal_minutes, 10) : null;
+      if (removal_minutes != null && (!Number.isFinite(removal_minutes) || removal_minutes < 0))
+        throw new Error("Sökme süresi geçerli bir sayı olmalı");
       await apiPatch<Mold>(`/api/molds/${mold.id}`, {
         name: draft.name.trim() || null,
         qr_code: draft.qr_code.trim() || null,
-        status: draft.status,
-        avg_cycle_s: avg,
+        status: "active",
         target_cycle_s,
         daily_target_count,
-        tolerance_s: tol,
-        stdev_limit_s,
+        work_mode: draft.work_mode,
+        mount_minutes,
+        removal_minutes,
       });
       setEditing(false);
       onChanged();
@@ -159,15 +175,12 @@ function MoldCard({
       {!editing ? (
         <div className="flex flex-wrap items-center gap-3">
           <div className="min-w-[200px] flex-1">
-            <div className="font-medium">{mold.name || "İsimsiz kalıp önerisi"}</div>
+            <div className="font-medium">{mold.name || "İsimsiz kalıp"}</div>
             <div className="text-xs text-slate-400">
-              QR: {mold.qr_code ? <code className="text-accent">{mold.qr_code}</code> : "—"} · Durum: {mold.status} · Ort. {mold.avg_cycle_s.toFixed(2)}s
+              QR: {mold.qr_code ? <code className="text-accent">{mold.qr_code}</code> : "—"}
               {mold.target_cycle_s != null ? ` · Hedef ${mold.target_cycle_s.toFixed(2)}s` : ""}
               {mold.daily_target_count != null ? ` · Günlük hedef ${mold.daily_target_count}` : ""}
-              {" · Eşleşme ±"}{mold.tolerance_s.toFixed(2)}s
-              · Stab. eşik {effectiveStdevLimit(mold).toFixed(2)}s
-              {mold.stdev_limit_s == null ? " (oto)" : ""} · n=
-              {mold.sample_count} · güven {(mold.confidence * 100).toFixed(0)}%
+              {` · ${mold.work_mode === "manual" ? "Manuel" : "Otomatik"}`}
             </div>
           </div>
           <button
@@ -186,35 +199,6 @@ function MoldCard({
           >
             Sil
           </button>
-          {mold.status === "candidate" && (
-            <>
-              <button
-                type="button"
-                className="min-h-[44px] rounded bg-slate-800 px-3 text-sm disabled:opacity-50"
-                disabled={busy}
-                onClick={async () => {
-                  const name = prompt("Kalıp adı?");
-                  if (name) {
-                    await apiPost(`/api/molds/${mold.id}/name`, { name });
-                    onChanged();
-                  }
-                }}
-              >
-                Ad ver
-              </button>
-              <button
-                type="button"
-                className="min-h-[44px] rounded bg-slate-800 px-3 text-sm disabled:opacity-50"
-                disabled={busy}
-                onClick={async () => {
-                  await apiPost(`/api/molds/${mold.id}/ignore`);
-                  onChanged();
-                }}
-              >
-                Yok say
-              </button>
-            </>
-          )}
         </div>
       ) : (
         <div className="space-y-3">
@@ -235,20 +219,6 @@ function MoldCard({
                 value={draft.qr_code}
                 onChange={(e) => setDraft((d) => ({ ...d, qr_code: e.target.value }))}
               />
-            </label>
-            <label className="text-sm">
-              <span className="mb-1 block text-xs text-slate-400">Durum</span>
-              <select
-                className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
-                value={draft.status}
-                onChange={(e) =>
-                  setDraft((d) => ({ ...d, status: e.target.value as EditDraft["status"] }))
-                }
-              >
-                <option value="active">active</option>
-                <option value="candidate">candidate</option>
-                <option value="ignored">ignored</option>
-              </select>
             </label>
             <label className="text-sm">
               <span className="mb-1 block text-xs text-slate-400">Hedef çalışma süresi (s)</span>
@@ -275,61 +245,48 @@ function MoldCard({
               />
             </label>
             <label className="text-sm">
-              <span className="mb-1 block text-xs text-slate-400">Ort. döngü (s)</span>
+              <span className="mb-1 block text-xs text-slate-400">Çalışma modu</span>
+              <select
+                className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+                value={draft.work_mode}
+                onChange={(e) =>
+                  setDraft((d) => ({ ...d, work_mode: e.target.value as "auto" | "manual" }))
+                }
+              >
+                <option value="auto">Otomatik</option>
+                <option value="manual">Manuel</option>
+              </select>
+            </label>
+            <label className="text-sm">
+              <span className="mb-1 block text-xs text-slate-400">Montaj süresi (dk)</span>
               <input
                 type="number"
-                step="0.01"
-                min="0.1"
+                step="1"
+                min="0"
                 className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
-                value={draft.avg_cycle_s}
-                onChange={(e) => setDraft((d) => ({ ...d, avg_cycle_s: e.target.value }))}
+                placeholder="örn. 30"
+                value={draft.mount_minutes}
+                onChange={(e) => setDraft((d) => ({ ...d, mount_minutes: e.target.value }))}
               />
             </label>
             <label className="text-sm">
-              <span className="mb-1 block text-xs text-slate-400">Eşleşme toleransı (± s)</span>
+              <span className="mb-1 block text-xs text-slate-400">Sökme süresi (dk)</span>
               <input
                 type="number"
-                step="0.01"
-                min="0.01"
+                step="1"
+                min="0"
                 className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
-                value={draft.tolerance_s}
-                onChange={(e) => setDraft((d) => ({ ...d, tolerance_s: e.target.value }))}
+                placeholder="örn. 20"
+                value={draft.removal_minutes}
+                onChange={(e) => setDraft((d) => ({ ...d, removal_minutes: e.target.value }))}
               />
             </label>
-            <label className="text-sm sm:col-span-2">
-              <span className="mb-1 block text-xs text-slate-400">Stabilite eşiği (s)</span>
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex items-center gap-2 text-xs text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={draft.stdev_auto}
-                    onChange={(e) =>
-                      setDraft((d) => ({
-                        ...d,
-                        stdev_auto: e.target.checked,
-                        stdev_limit_s: e.target.checked ? "" : d.stdev_limit_s,
-                      }))
-                    }
-                  />
-                  Otomatik
-                </label>
-                {!draft.stdev_auto && (
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    className="min-w-[120px] flex-1 rounded border border-slate-600 bg-slate-900 px-2 py-2"
-                    value={draft.stdev_limit_s}
-                    onChange={(e) => setDraft((d) => ({ ...d, stdev_limit_s: e.target.value }))}
-                    placeholder="örn. 0.70"
-                  />
-                )}
-              </div>
-              <p className="mt-1 text-xs text-slate-500">
-                Duruş sonrası pencere std. sapma limiti. {autoStdevHint(draft.avg_cycle_s)}
-              </p>
-            </label>
           </div>
+          <p className="rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+            Günlük hedef girilirse verimlilik ona göre (vardiya saatine oranlı) hesaplanır; boşsa hedef
+            çalışma süresi kullanılır. Manuel kalıpta vardiya mola süreleri; her kalıp değişiminde eski
+            kalıbın sökme + yeni kalıbın montaj süresi verimlilik süresinden düşülür.
+          </p>
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
@@ -364,7 +321,9 @@ function CreateMoldForm({ onCreated }: { onCreated: () => void }) {
   const [qrCode, setQrCode] = useState("");
   const [targetCycleS, setTargetCycleS] = useState("");
   const [dailyTarget, setDailyTarget] = useState("");
-  const [toleranceS, setToleranceS] = useState("0.35");
+  const [workMode, setWorkMode] = useState<"auto" | "manual">("auto");
+  const [mountMinutes, setMountMinutes] = useState("");
+  const [removalMinutes, setRemovalMinutes] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -376,27 +335,41 @@ function CreateMoldForm({ onCreated }: { onCreated: () => void }) {
       if (targetCycleS.trim() && (!Number.isFinite(target) || target <= 0)) {
         throw new Error("Hedef çalışma süresi geçerli bir sayı olmalı");
       }
-      const tol = parseFloat(toleranceS);
-      if (!Number.isFinite(tol) || tol <= 0) throw new Error("Tolerans geçerli bir sayı olmalı");
       let daily_target_count: number | undefined;
       if (dailyTarget.trim()) {
         const daily = parseInt(dailyTarget, 10);
         if (!Number.isFinite(daily) || daily <= 0) throw new Error("Günlük hedef geçerli bir sayı olmalı");
         daily_target_count = daily;
       }
+      let mount_minutes: number | undefined;
+      if (mountMinutes.trim()) {
+        const m = parseInt(mountMinutes, 10);
+        if (!Number.isFinite(m) || m < 0) throw new Error("Montaj süresi geçerli bir sayı olmalı");
+        mount_minutes = m;
+      }
+      let removal_minutes: number | undefined;
+      if (removalMinutes.trim()) {
+        const r = parseInt(removalMinutes, 10);
+        if (!Number.isFinite(r) || r < 0) throw new Error("Sökme süresi geçerli bir sayı olmalı");
+        removal_minutes = r;
+      }
       await apiPost<Mold>("/api/molds", {
         name: name.trim(),
         qr_code: qrCode.trim(),
         target_cycle_s: targetCycleS.trim() ? target : undefined,
         daily_target_count,
-        tolerance_s: tol,
+        work_mode: workMode,
+        mount_minutes,
+        removal_minutes,
       });
       setOpen(false);
       setName("");
       setQrCode("");
       setTargetCycleS("");
       setDailyTarget("");
-      setToleranceS("0.35");
+      setWorkMode("auto");
+      setMountMinutes("");
+      setRemovalMinutes("");
       onCreated();
     } catch (e) {
       setErr(String(e));
@@ -464,19 +437,45 @@ function CreateMoldForm({ onCreated }: { onCreated: () => void }) {
           />
         </label>
         <label className="text-sm">
-          <span className="mb-1 block text-xs text-slate-400">Eşleşme toleransı (± s)</span>
+          <span className="mb-1 block text-xs text-slate-400">Çalışma modu</span>
+          <select
+            className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+            value={workMode}
+            onChange={(e) => setWorkMode(e.target.value as "auto" | "manual")}
+          >
+            <option value="auto">Otomatik</option>
+            <option value="manual">Manuel</option>
+          </select>
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-slate-400">Montaj süresi (dk)</span>
           <input
             type="number"
-            step="0.01"
-            min="0.01"
+            step="1"
+            min="0"
             className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
-            value={toleranceS}
-            onChange={(e) => setToleranceS(e.target.value)}
+            value={mountMinutes}
+            onChange={(e) => setMountMinutes(e.target.value)}
+            placeholder="örn. 30"
+          />
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-slate-400">Sökme süresi (dk)</span>
+          <input
+            type="number"
+            step="1"
+            min="0"
+            className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+            value={removalMinutes}
+            onChange={(e) => setRemovalMinutes(e.target.value)}
+            placeholder="örn. 20"
           />
         </label>
       </div>
       <p className="mt-2 text-xs text-slate-500">
-        Hedef süre ve günlük hedef, TV ekranında verimlilik ve gerçekleşme oranı hesabında kullanılır.
+        Hedef süre ve günlük hedef, bilgi ekranında verimlilik ve gerçekleşme oranı hesabında kullanılır.
+        Günlük hedef girilirse öncelikli olup vardiya saatine oranlı bölünür. Manuel kalıpta vardiya
+        mola süreleri, her kalıp değişiminde sökme + montaj süreleri verimlilikten düşülür.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         <button
@@ -516,6 +515,24 @@ export function MoldsPage() {
     null,
   );
   const [err, setErr] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [sortField, setSortField] = useState<SortField>("name");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  const filteredMolds = useMemo(() => {
+    const q = localeText(search);
+    const matched = q
+      ? rows.filter((m) => {
+          if (localeText(m.name).includes(q) || localeText(m.qr_code).includes(q)) return true;
+          if (/^\d+$/.test(q) && m.qr_code && /^\d+$/.test(m.qr_code.trim())) {
+            return parseInt(q, 10) === parseInt(m.qr_code.trim(), 10);
+          }
+          return false;
+        })
+      : rows.slice();
+    matched.sort((a, b) => compareMolds(a, b, sortField, sortDir));
+    return matched;
+  }, [rows, search, sortField, sortDir]);
 
   const usageQuery = useCallback(() => {
     const p = new URLSearchParams({ range });
@@ -585,8 +602,61 @@ export function MoldsPage() {
       <CreateMoldForm onCreated={() => void reloadAll()} />
       {err && <p className="mb-3 text-sm text-red-300">{err}</p>}
 
-      <div className="mb-4 rounded border border-slate-700 bg-panel2 p-3">
-        <div className="flex flex-wrap items-end gap-3">
+      {loadingMolds && rows.length === 0 ? (
+        <p className="text-sm text-slate-400">Kalıp listesi yükleniyor…</p>
+      ) : (
+        <div className="space-y-3">
+          <div className="mb-1 flex flex-wrap items-end gap-3">
+            <label className="min-w-[220px] flex-1 text-sm">
+              <span className="mb-1 block text-xs text-slate-400">Ara (isim veya QR)</span>
+              <input
+                className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+                placeholder="Kalıp adı veya QR kodu"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </label>
+            <label className="text-sm">
+              <span className="mb-1 block text-xs text-slate-400">Sırala</span>
+              <select
+                className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
+                value={sortField}
+                onChange={(e) => setSortField(e.target.value as SortField)}
+              >
+                <option value="name">İsim</option>
+                <option value="qr">QR kod</option>
+                <option value="daily_target">Hedef baskı adedi</option>
+              </select>
+            </label>
+            <label className="text-sm">
+              <span className="mb-1 block text-xs text-slate-400">Yön</span>
+              <select
+                className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
+                value={sortDir}
+                onChange={(e) => setSortDir(e.target.value as SortDir)}
+              >
+                <option value="asc">Düşükten yükseğe</option>
+                <option value="desc">Yüksekten düşüğe</option>
+              </select>
+            </label>
+          </div>
+          {filteredMolds.map((m) => (
+            <MoldCard key={m.id} mold={m} onChanged={() => void reloadAll()} />
+          ))}
+          {rows.length === 0 && !loadingMolds && (
+            <p className="text-sm text-slate-400">Kayıtlı kalıp yok.</p>
+          )}
+          {rows.length > 0 && filteredMolds.length === 0 && (
+            <p className="text-sm text-slate-400">Aramaya uyan kalıp yok.</p>
+          )}
+        </div>
+      )}
+
+      <div className="relative mt-6 rounded border border-slate-700 bg-panel2 p-4">
+        {loadingUsage && (
+          <div className="absolute right-3 top-3 text-xs text-sky-300">Üretim detayı yükleniyor…</div>
+        )}
+        <div className="mb-4 flex flex-wrap items-end gap-3">
           <div className="flex gap-2">
             {(["daily", "weekly", "monthly", "yearly"] as const).map((r) => (
               <button
@@ -625,32 +695,12 @@ export function MoldsPage() {
             Aralığı Uygula
           </button>
         </div>
-      </div>
-
-      {loadingMolds && rows.length === 0 ? (
-        <p className="text-sm text-slate-400">Kalıp listesi yükleniyor…</p>
-      ) : (
-        <div className="space-y-3">
-          {rows.map((m) => (
-            <MoldCard key={m.id} mold={m} onChanged={() => void reloadAll()} />
-          ))}
-          {rows.length === 0 && !loadingMolds && (
-            <p className="text-sm text-slate-400">Kayıtlı kalıp yok.</p>
-          )}
-        </div>
-      )}
-
-      <div className="relative mt-6 rounded border border-slate-700 bg-panel2 p-4">
-        {loadingUsage && (
-          <div className="absolute right-3 top-3 text-xs text-sky-300">Üretim detayı yükleniyor…</div>
-        )}
         <h3 className="mb-3 text-lg font-semibold">Kalıp Bazlı Makine Üretim Detayı</h3>
         <div className="space-y-3">
           {(usage?.rows ?? []).map((r) => (
             <div key={r.mold_id} className="rounded border border-slate-700 bg-slate-900/40 p-3">
               <div className="mb-2 flex flex-wrap items-center gap-3">
                 <div className="font-medium">{r.mold_name}</div>
-                <div className="text-xs text-slate-400">Durum: {r.status}</div>
                 <div className="text-xs text-slate-400">Toplam Adet: {r.total_cycles}</div>
                 <div className="text-xs text-slate-400">Ort. Döngü: {r.avg_cycle_s.toFixed(2)}s</div>
                 <div className="ml-auto flex flex-wrap gap-2">

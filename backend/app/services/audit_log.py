@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from app.db.models import AuditLog
+
+# Keep the audit log bounded so it never bloats device storage.
+MAX_AUDIT_ROWS = 1000
 
 
 def log_action(
@@ -37,6 +40,27 @@ def log_action(
         )
         db.add(entry)
         db.commit()
+        _prune(db)
+    except Exception:
+        db.rollback()
+
+
+def _prune(db: Session) -> None:
+    """Delete oldest rows beyond MAX_AUDIT_ROWS. Never raises."""
+    try:
+        total = int(db.query(func.count(AuditLog.id)).scalar() or 0)
+        if total <= MAX_AUDIT_ROWS:
+            return
+        cutoff = (
+            db.query(AuditLog.id)
+            .order_by(desc(AuditLog.id))
+            .offset(MAX_AUDIT_ROWS)
+            .limit(1)
+            .scalar()
+        )
+        if cutoff:
+            db.query(AuditLog).filter(AuditLog.id <= cutoff).delete(synchronize_session=False)
+            db.commit()
     except Exception:
         db.rollback()
 

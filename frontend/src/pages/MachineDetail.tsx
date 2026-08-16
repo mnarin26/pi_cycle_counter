@@ -23,7 +23,6 @@ import {
   computeZigzagYDomain,
   applyZigzagYScale,
   datetimeLocalInputToUtcIso,
-  eventColor,
   formatAxisTime,
   formatZigzagAxisTick,
   parseApiTime,
@@ -42,6 +41,7 @@ import {
 } from "../lib/chartTheme";
 import { useLiveSnapshot } from "../hooks/useLiveSnapshot";
 import { useZigzagViewport } from "../hooks/useZigzagViewport";
+import { DEFAULT_IDLE_STOPPED_S, machineStatusView } from "../lib/machineStatus";
 
 type Machine = {
   id: number;
@@ -107,6 +107,14 @@ type DashboardPayload = {
     min_cycle_s: number;
     max_cycle_s: number;
   } | null;
+  range_efficiency?: {
+    actual_count: number;
+    target_count: number;
+    efficiency_pct: number | null;
+    avg_cycle_s: number;
+    target_cycle_s: number | null;
+    available: boolean;
+  } | null;
   mold_breakdown: Array<{
     mold_id: number | null;
     mold_name: string;
@@ -120,6 +128,8 @@ type DashboardPayload = {
   trend_mold_names: string[];
   series: CyclePoint[];
   series_total: number;
+  series_shown?: number;
+  series_truncated?: boolean;
   series_lazy?: boolean;
   events: EventRow[];
 };
@@ -293,17 +303,16 @@ export function MachineDetailPage() {
   const [range, setRange] = useState<RangeKey>("daily");
   const [fromInput, setFromInput] = useState("");
   const [toInput, setToInput] = useState("");
-  const [replayMode, setReplayMode] = useState<"missing_only" | "reprocess">("missing_only");
-  const [replayBusy, setReplayBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState<"summary" | "cycles" | null>(null);
-  const [replayMsg, setReplayMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [zigzagResolution, setZigzagResolution] = useState<ZigzagResolution>("6h");
+  const [idleStoppedSeconds, setIdleStoppedSeconds] = useState(DEFAULT_IDLE_STOPPED_S);
+  const [zigzagResolution, setZigzagResolution] = useState<ZigzagResolution>("24h");
   const lastLiveEmitRef = useRef<number>(-1);
   const liveDashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadGenRef = useRef(0);
   const machineLoadedRef = useRef(0);
+  const viewLoggedRef = useRef(0);
 
   const snapMachine = useMemo(
     () => snapshot.machines.find((m) => m.id === machineId) ?? null,
@@ -330,14 +339,32 @@ export function MachineDetailPage() {
     }
   }, [machineId]);
 
+  useEffect(() => {
+    apiGet<{ idle_stopped_seconds?: number }>("/api/settings/production")
+      .then((cfg) => {
+        const idle = Number(cfg.idle_stopped_seconds);
+        if (Number.isFinite(idle) && idle >= 30) setIdleStoppedSeconds(idle);
+      })
+      .catch(() => setIdleStoppedSeconds(DEFAULT_IDLE_STOPPED_S));
+  }, []);
+
+  // Record a single "detail viewed" activity per machine navigation.
+  useEffect(() => {
+    if (!machineId || viewLoggedRef.current === machineId) return;
+    viewLoggedRef.current = machineId;
+    void apiPost("/api/activity", {
+      action: "machine.detail.view",
+      machine_id: machineId,
+      machine_name: machine?.name,
+    }).catch(() => {});
+  }, [machineId, machine?.name]);
+
   const loadDash = useCallback(async () => {
     if (!machineId) return;
     const gen = ++loadGenRef.current;
     setLoading(true);
     try {
-      const eventsCap =
-        range === "yearly" ? 60 : range === "monthly" ? 80 : range === "weekly" ? 120 : 100;
-      const dashPath = `/api/analytics/machine_dashboard?${buildWindowQuery()}&events_limit=${eventsCap}`;
+      const dashPath = `/api/analytics/machine_dashboard?${buildWindowQuery()}&events_limit=10`;
       const [machineData, dashData] = await Promise.all([
         apiGet<Machine>(`/api/machines/${machineId}`),
         apiGet<DashboardPayload>(dashPath),
@@ -352,35 +379,6 @@ export function MachineDetailPage() {
       if (gen === loadGenRef.current) setLoading(false);
     }
   }, [machineId, buildWindowQuery, range]);
-
-  const runReplay = useCallback(async () => {
-    if (!machineId) return;
-    setReplayBusy(true);
-    setReplayMsg(null);
-    try {
-      const body: Record<string, unknown> = { range, mode: replayMode };
-      if (fromInput) body.from = datetimeLocalInputToUtcIso(fromInput);
-      if (toInput) body.to = datetimeLocalInputToUtcIso(toInput);
-      const res = await apiPost<{
-        cycles_total: number;
-        cycles_assigned: number;
-        cycles_skipped_existing: number;
-        events_created: number;
-      }>(`/api/machines/${machineId}/replay-mold-matching`, body);
-      setReplayMsg(
-        `${res.cycles_total} döngü tarandı · ${res.cycles_assigned} kalıp atandı` +
-          (res.cycles_skipped_existing
-            ? ` · ${res.cycles_skipped_existing} zaten kayıtlıydı (atlanıldı)`
-            : "") +
-          (res.events_created ? ` · ${res.events_created} olay` : ""),
-      );
-      await loadDash();
-    } catch (e) {
-      setReplayMsg(String(e));
-    } finally {
-      setReplayBusy(false);
-    }
-  }, [machineId, range, replayMode, fromInput, toInput, loadDash]);
 
   const downloadExport = useCallback(
     async (kind: "summary" | "cycles") => {
@@ -593,6 +591,7 @@ export function MachineDetailPage() {
   }
 
   const summary = dash?.summary;
+  const rangeEff = dash?.range_efficiency ?? null;
   const activeMold = dash?.active_mold ?? null;
   // Prefer active-mold stats for avg/min/max; fall back to global summary
   const moldStats = activeMold ?? summary;
@@ -649,26 +648,6 @@ export function MachineDetailPage() {
               onChange={(e) => setToInput(e.target.value)}
             />
           </label>
-          <label className="text-sm">
-            <span className="mb-1 block text-xs text-slate-400">Geçmiş işleme</span>
-            <select
-              className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
-              value={replayMode}
-              onChange={(e) => setReplayMode(e.target.value as "missing_only" | "reprocess")}
-              disabled={replayBusy}
-            >
-              <option value="missing_only">Sadece boş olanlar</option>
-              <option value="reprocess">Aralığı yeniden işle</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            className="rounded bg-amber-700 px-3 py-2 text-sm font-medium disabled:opacity-50"
-            disabled={replayBusy || loading}
-            onClick={() => void runReplay()}
-          >
-            {replayBusy ? "İşleniyor…" : "Kalıp eşleştirmesini çalıştır"}
-          </button>
           <button
             type="button"
             className="rounded bg-emerald-800 px-3 py-2 text-sm font-medium disabled:opacity-50"
@@ -686,20 +665,14 @@ export function MachineDetailPage() {
             {exportBusy === "cycles" ? "İndiriliyor…" : "Döngü CSV indir"}
           </button>
         </div>
-        <p className="mt-2 text-xs text-slate-500">
-          Yukarıdaki aralık kullanılır (günlük ≈ bugün, haftalık ≈ bu hafta). En fazla 7 gün.
-          <strong className="font-normal text-slate-400"> Sadece boş olanlar:</strong> daha önce
-          kayıtlı kalıplara dokunulmaz.
-          <strong className="font-normal text-slate-400"> Yeniden işle:</strong> seçili aralıktaki
-          atamalar silinip matcher baştan çalışır.
-        </p>
-        {replayMsg && <p className="mt-1 text-xs text-amber-200">{replayMsg}</p>}
       </div>
 
-      <div className="grid gap-3 md:grid-cols-6">
+      <div className="grid gap-3 md:grid-cols-7">
         <div className="rounded border border-slate-700 bg-panel2 p-3">
           <div className="text-xs text-slate-400">Canlı Durum</div>
-          <div className="text-lg font-semibold">{snapMachine?.state || "—"}</div>
+          <div className={`text-lg font-semibold ${machineStatusView(snapMachine, idleStoppedSeconds).colorClass}`}>
+            {snapMachine ? machineStatusView(snapMachine, idleStoppedSeconds).label : "—"}
+          </div>
         </div>
         <div className="rounded border border-slate-700 bg-panel2 p-3">
           <div className="text-xs text-slate-400">Toplam Döngü</div>
@@ -729,6 +702,23 @@ export function MachineDetailPage() {
           <div className="text-lg font-semibold">
             {summary ? `${summary.last_cycle_s.toFixed(2)}s` : "—"}
           </div>
+        </div>
+        <div className="rounded border border-slate-700 bg-panel2 p-3">
+          <div className="text-xs text-slate-400">Aralık Verimliliği</div>
+          {rangeEff && rangeEff.available && rangeEff.efficiency_pct != null ? (
+            <>
+              <div className="text-lg font-semibold text-amber-300">
+                %{rangeEff.efficiency_pct.toFixed(0)}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {rangeEff.actual_count} / {rangeEff.target_count || "—"} gereken
+              </div>
+            </>
+          ) : (
+            <div className="text-sm font-semibold text-slate-500">
+              {rangeEff && !rangeEff.available ? "Kalıp tanımlı değil" : "—"}
+            </div>
+          )}
         </div>
       </div>
       {moldStats && summary && moldStats !== summary && (
@@ -775,7 +765,7 @@ export function MachineDetailPage() {
           <p className="mb-2 text-xs text-amber-200">
             {seriesLazy
               ? `${viewport.mergedSeries.length.toLocaleString("tr-TR")} / ${totalCycles.toLocaleString("tr-TR")} döngü`
-              : `${dash!.series_shown.toLocaleString("tr-TR")} / ${dash!.series_total.toLocaleString("tr-TR")} döngü`}
+              : `${(dash?.series_shown ?? 0).toLocaleString("tr-TR")} / ${(dash?.series_total ?? 0).toLocaleString("tr-TR")} döngü`}
           </p>
         )}
         <div
@@ -957,90 +947,6 @@ export function MachineDetailPage() {
         </div>
       </div>
 
-      <div className="rounded border border-slate-700 bg-panel2 p-3">
-        <h3 className="mb-2 text-sm font-semibold">Canlı Tespit Telemetrisi</h3>
-        <div className="grid gap-2 text-sm md:grid-cols-3">
-          <div>Pozisyon: {snapMachine?.position_01 != null ? snapMachine.position_01.toFixed(3) : "—"}</div>
-          <div>Prominence: {snapMachine?.prominence ?? "—"}</div>
-          <div>Segment Len: {snapMachine?.segment_len ?? "—"}</div>
-          <div>
-            Peak/Bg: {snapMachine ? `${snapMachine.peak ?? 0}/${snapMachine.background ?? 0}` : "—"}
-          </div>
-          <div>
-            Len Aralığı:{" "}
-            {machine?.reflector_len_min != null && machine?.reflector_len_max != null
-              ? `${machine.reflector_len_min}-${machine.reflector_len_max}`
-              : "—"}
-          </div>
-          <div>Kamera FPS: {snapMachine?.fps != null ? snapMachine.fps.toFixed(1) : "—"}</div>
-        </div>
-      </div>
-
-      <div className="rounded border border-slate-700 bg-panel2 p-3">
-        <h3 className="mb-2 text-sm font-semibold">Makine Ayarları</h3>
-        <div className="grid gap-2 text-sm md:grid-cols-3">
-          <div>Debounce: {machine?.debounce_ms ?? "—"} ms</div>
-          <div>Sabit Onay: {machine?.stability_confirm_ms ?? "—"} ms</div>
-          <div>Hysteresis: {machine?.hysteresis ?? "—"}</div>
-          <div>Threshold: {machine ? `${machine.threshold_mode} / ${machine.threshold_min}` : "—"}</div>
-          <div>Offset: {machine?.threshold_offset ?? "—"}</div>
-          <div>Line Thickness: {machine?.line_thickness ?? "—"}</div>
-        </div>
-      </div>
-
-      <div className="rounded border border-slate-700 bg-panel2 p-3">
-        <h3 className="mb-2 text-sm font-semibold">Son 20 Döngü</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-left text-slate-400">
-              <tr>
-                <th className="py-1 pr-3">Zaman</th>
-                <th className="py-1 pr-3">Döngü (s)</th>
-                <th className="py-1 pr-3">Kalıp</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(dash?.series ?? []).slice(-20).map((x, i) => (
-                <tr key={`${x.t}-${i}`} className="border-t border-slate-800">
-                  <td className="py-1 pr-3">
-                    {new Date(parseApiTime(x.t)).toLocaleString("tr-TR", {
-                      timeZone: "Europe/Istanbul",
-                    })}
-                  </td>
-                  <td className="py-1 pr-3">{x.cycle_time_s.toFixed(2)}</td>
-                  <td className="py-1 pr-3">{x.mold || "—"}</td>
-                </tr>
-              ))}
-              {(dash?.series?.length ?? 0) === 0 && (
-                <tr>
-                  <td className="py-2 text-slate-500" colSpan={3}>
-                    Kayıt yok
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className="rounded border border-slate-700 bg-panel2 p-3">
-        <h3 className="mb-2 text-sm font-semibold">Son Olaylar</h3>
-        <ul className="space-y-1 text-sm">
-          {(dash?.events ?? []).slice(-10).reverse().map((e) => (
-            <li key={e.id} className="border-b border-slate-800 pb-1">
-              <span
-                className="mr-2 inline-block h-2 w-2 rounded-full"
-                style={{ background: eventColor(e.type) }}
-              />
-              <span className="mr-2 text-slate-400">
-                {e.created_at ? new Date(e.created_at).toLocaleString("tr-TR") : "—"}
-              </span>
-              <span className="font-medium">{e.type}</span>
-            </li>
-          ))}
-          {(dash?.events?.length ?? 0) === 0 && <li className="text-slate-500">Olay yok</li>}
-        </ul>
-      </div>
     </div>
   );
 }

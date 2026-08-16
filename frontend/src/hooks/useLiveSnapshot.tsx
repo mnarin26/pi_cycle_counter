@@ -25,6 +25,7 @@ export type MachineSnap = {
   reflector_len_min?: number | null;
   reflector_len_max?: number | null;
   dbg_cycle_emit_count?: number;
+  idle_s?: number | null;
 };
 
 export type Snapshot = {

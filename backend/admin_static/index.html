@@ -59,7 +59,9 @@
     <div id="loginOverlay" style="display:none;position:fixed;inset:0;background:#0b1220;z-index:1000;align-items:center;justify-content:center;">
       <div class="card" style="width:360px;max-width:90%;">
         <h3>Giriş</h3>
-        <p class="muted">Telegram botundan aldığınız günlük şifreyi veya yönetici şifresini girin.</p>
+        <p class="muted" id="loginHint">Kayıtlı adınız ve şifreniz (sabit veya Telegram günlük). Yönetici: super</p>
+        <label>Kullanıcı adı</label>
+        <input id="loginUser" type="text" autocomplete="username" placeholder="Adınız" />
         <label>Şifre</label>
         <input id="loginPw" type="password" autocomplete="current-password" placeholder="Şifre" />
         <div style="margin-top:10px;"><button id="loginBtn" class="btn-green">Giriş Yap</button></div>
@@ -338,15 +340,20 @@
           <div class="col-12"><div id="tgMsg" class="muted"></div></div>
         </div>
 
-        <h4 style="margin:16px 0 8px;">Izinli operatörler</h4>
+        <h4 style="margin:16px 0 8px;">Izinli kullanicilar</h4>
+        <p class="muted">Sirket ici (ethernet / AP) giris sabit sifre ile olur. Telegram ID varsa Tailscale uzerinden gunluk sifre de alinabilir. Sadece sabit sifre varsa yalnizca fabrika agindan girilir.</p>
         <div class="row">
           <div class="col-4">
-            <label>Operatör adi</label>
+            <label>Kullanici adi</label>
             <input id="tgOpName" placeholder="Ahmet Yilmaz" maxlength="128" />
           </div>
           <div class="col-4">
-            <label>Telegram user ID</label>
-            <input id="tgOpId" placeholder="123456789" inputmode="numeric" maxlength="32" />
+            <label>Telegram user ID (opsiyonel)</label>
+            <input id="tgOpId" placeholder="Bos = sadece sirket ici" inputmode="numeric" maxlength="32" />
+          </div>
+          <div class="col-4">
+            <label>Sabit sifre (sirket ici)</label>
+            <input id="tgOpPassword" type="password" placeholder="En az 4 karakter" maxlength="64" autocomplete="new-password" />
           </div>
           <div class="col-4">
             <label>Rol</label>
@@ -366,17 +373,17 @@
           </div>
           <div class="col-3">
             <label>&nbsp;</label>
-            <button id="tgOpAddBtn" class="btn-green">Operatör Ekle</button>
+            <button id="tgOpAddBtn" class="btn-green">Kullanici Ekle</button>
           </div>
           <div class="col-12"><div id="tgOpMsg" class="muted"></div></div>
         </div>
         <div style="overflow-x:auto;margin-top:10px;">
           <table class="live">
             <thead>
-              <tr><th>Ad</th><th>Telegram ID</th><th>Rol</th><th>Yetkiler</th><th></th></tr>
+              <tr><th>Ad</th><th>Telegram</th><th>Sabit sifre</th><th>Rol</th><th>Yetkiler</th><th></th></tr>
             </thead>
             <tbody id="tgOpBody">
-              <tr><td colspan="5" class="muted">Henuz operatör yok.</td></tr>
+              <tr><td colspan="6" class="muted">Henuz kullanici yok.</td></tr>
             </tbody>
           </table>
         </div>
@@ -459,7 +466,12 @@
             <input id="tvRotateSec" type="number" min="5" max="300" step="1" value="20" />
             <p class="muted" style="margin-top:4px;">Makineler arasi tam ekran gecis suresi (5–300 sn).</p>
           </div>
-          <div class="col-8">
+          <div class="col-4">
+            <label>Hareket yoksa DURUYOR (sn)</label>
+            <input id="idleStoppedSec" type="number" min="30" max="3600" step="10" value="180" />
+            <p class="muted" style="margin-top:4px;">Bu sure boyunca hareket yoksa TV'de DURUYOR yazilir (30–3600 sn). Varsayilan 180 sn (3 dk).</p>
+          </div>
+          <div class="col-4">
             <label>&nbsp;</label>
             <div id="tvProdStatus" class="muted">Yukleniyor…</div>
           </div>
@@ -579,11 +591,12 @@
         wifiApSsid: 'Pi fabrika Wi-Fi erisim noktasi adi (SSID). Kameralar ve TV bu aga baglanir.',
         wifiApPassword: 'pi-wifi ag sifresi (WPA2). En az 8 karakter. Bos birakilirsa sadece SSID guncellenir.',
         tvRotateSec: 'TV ekraninda birden fazla makine seciliyse tam ekran gecis suresi (saniye).',
+        idleStoppedSec: 'TV makine kartinda bu sure boyunca hareket yoksa DURUYOR yazilir. Varsayilan 180 sn (3 dk).',
         tgEnabled: 'Telegram bot servisi kurulunca kalip atama icin acilir.',
         tgUsername: 'BotFather kullanici adi, xxxxxx_bot formatinda (ornek alfamold_bot).',
         tgToken: 'BotFather HTTP API token. Bos birakilirsa kayitli token korunur.',
-        tgOpName: 'Listede gorunecek operatör adi (ornek: Ahmet).',
-        tgOpId: 'Operatörün Telegram user ID (sadece rakam). @userinfobot ile ogrenilir.',
+        tgOpName: 'Listede gorunecek kullanici adi (ornek: Ahmet).',
+        tgOpId: 'Opsiyonel Telegram user ID (sadece rakam). Bos birakilirsa yalnizca sirket icinden sabit sifreyle girer. @userinfobot ile ogrenilir.',
         tgOpLevel: '1 = kalip ata + uret · 2 = sadece kalip ata.',
         cameraSelect: 'RTSP ve isleme ayarlarini duzenlemek icin kamera secimi.',
         rtspUrl: 'IP kameradan canli goruntu akisi (RTSP adresi). Ornek: rtsp://kullanici:sifre@192.168.1.10:554/stream2',
@@ -646,23 +659,23 @@
       }
       /** POST to this origin (admin app) — avoids :8000 when only :8080 is reachable */
       async function jpostLocal(path, body){
-        const r = await fetch(location.origin + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        const r = await fetch(location.origin + path, {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
       async function jgetLocal(path){
-        const r = await fetch(location.origin + path);
+        const r = await fetch(location.origin + path, { credentials:'include' });
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
       async function jpatchLocal(path, body){
-        const r = await fetch(location.origin + path, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        const r = await fetch(location.origin + path, {method:'PATCH', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
       async function jpostLocalOp(path, body){
-        const r = await fetch(location.origin + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        const r = await fetch(location.origin + path, {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
       async function jdeleteLocal(path){
-        const r = await fetch(location.origin + path, {method:'DELETE'});
+        const r = await fetch(location.origin + path, {method:'DELETE', credentials:'include'});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
 
@@ -731,32 +744,54 @@
         if(!host) return;
         host.innerHTML = '';
         productionShifts.forEach((sh, idx) => {
-          const row = document.createElement('div');
-          row.className = 'row';
-          row.style.marginBottom = '8px';
-          row.innerHTML = `
-            <div class="col-3">
-              <label>Vardiya adi</label>
-              <input data-shift-field="name" data-shift-idx="${idx}" value="${sh.name || ''}" />
+          if(!Array.isArray(sh.breaks)) sh.breaks = [];
+          const wrap = document.createElement('div');
+          wrap.style.marginBottom = '14px';
+          wrap.style.paddingBottom = '10px';
+          wrap.style.borderBottom = '1px solid #26304a';
+          const breaksHtml = sh.breaks.map((b, bidx) => `
+            <div class="row" style="margin-bottom:4px">
+              <div class="col-3">
+                <input data-break-field="start" data-shift-idx="${idx}" data-break-idx="${bidx}" type="time" value="${(b.start || '12:00').slice(0,5)}" />
+              </div>
+              <div class="col-3">
+                <input data-break-field="end" data-shift-idx="${idx}" data-break-idx="${bidx}" type="time" value="${(b.end || '12:30').slice(0,5)}" />
+              </div>
+              <div class="col-2">
+                <button type="button" class="btn-gray" data-break-remove="${idx}:${bidx}">Sil</button>
+              </div>
             </div>
-            <div class="col-2">
-              <label>Baslangic</label>
-              <input data-shift-field="start" data-shift-idx="${idx}" type="time" value="${(sh.start || '08:00').slice(0,5)}" />
+          `).join('');
+          wrap.innerHTML = `
+            <div class="row">
+              <div class="col-3">
+                <label>Vardiya adi</label>
+                <input data-shift-field="name" data-shift-idx="${idx}" value="${sh.name || ''}" />
+              </div>
+              <div class="col-2">
+                <label>Baslangic</label>
+                <input data-shift-field="start" data-shift-idx="${idx}" type="time" value="${(sh.start || '08:00').slice(0,5)}" />
+              </div>
+              <div class="col-2">
+                <label>Bitis</label>
+                <input data-shift-field="end" data-shift-idx="${idx}" type="time" value="${(sh.end || '16:00') === '24:00' ? '23:59' : (sh.end || '16:00').slice(0,5)}" />
+              </div>
+              <div class="col-3">
+                <label>Kimlik (id)</label>
+                <input data-shift-field="id" data-shift-idx="${idx}" value="${sh.id || ''}" />
+              </div>
+              <div class="col-2">
+                <label>&nbsp;</label>
+                <button type="button" class="btn-gray" data-shift-remove="${idx}" ${productionShifts.length <= 1 ? 'disabled' : ''}>Sil</button>
+              </div>
             </div>
-            <div class="col-2">
-              <label>Bitis</label>
-              <input data-shift-field="end" data-shift-idx="${idx}" type="time" value="${(sh.end || '16:00') === '24:00' ? '23:59' : (sh.end || '16:00').slice(0,5)}" />
-            </div>
-            <div class="col-3">
-              <label>Kimlik (id)</label>
-              <input data-shift-field="id" data-shift-idx="${idx}" value="${sh.id || ''}" />
-            </div>
-            <div class="col-2">
-              <label>&nbsp;</label>
-              <button type="button" class="btn-gray" data-shift-remove="${idx}" ${productionShifts.length <= 1 ? 'disabled' : ''}>Sil</button>
+            <div style="margin-left:6px;margin-top:4px">
+              <label style="font-size:12px;color:#9aa6c0">Molalar (manuel kalıpta verimlilikten düşülür)</label>
+              ${breaksHtml || '<div style="font-size:12px;color:#6b7690;margin-bottom:4px">Mola yok</div>'}
+              <button type="button" class="btn-gray" data-break-add="${idx}">+ Mola ekle</button>
             </div>
           `;
-          host.appendChild(row);
+          host.appendChild(wrap);
         });
         host.querySelectorAll('[data-shift-field]').forEach(inp => {
           inp.addEventListener('change', () => {
@@ -764,6 +799,32 @@
             const field = inp.getAttribute('data-shift-field');
             if(!productionShifts[idx] || !field) return;
             productionShifts[idx][field] = inp.value;
+          });
+        });
+        host.querySelectorAll('[data-break-field]').forEach(inp => {
+          inp.addEventListener('change', () => {
+            const idx = Number(inp.getAttribute('data-shift-idx'));
+            const bidx = Number(inp.getAttribute('data-break-idx'));
+            const field = inp.getAttribute('data-break-field');
+            if(!productionShifts[idx] || !productionShifts[idx].breaks[bidx] || !field) return;
+            productionShifts[idx].breaks[bidx][field] = inp.value;
+          });
+        });
+        host.querySelectorAll('[data-break-add]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const idx = Number(btn.getAttribute('data-break-add'));
+            if(!productionShifts[idx]) return;
+            if(!Array.isArray(productionShifts[idx].breaks)) productionShifts[idx].breaks = [];
+            productionShifts[idx].breaks.push({ start: '12:00', end: '12:30' });
+            renderShiftRows();
+          });
+        });
+        host.querySelectorAll('[data-break-remove]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const [idx, bidx] = btn.getAttribute('data-break-remove').split(':').map(Number);
+            if(!productionShifts[idx] || !Array.isArray(productionShifts[idx].breaks)) return;
+            productionShifts[idx].breaks.splice(bidx, 1);
+            renderShiftRows();
           });
         });
         host.querySelectorAll('[data-shift-remove]').forEach(btn => {
@@ -778,22 +839,24 @@
       }
 
       function collectShiftsFromForm(){
-        const host = q('shiftRows');
-        const rows = host ? host.querySelectorAll('.row') : [];
         const out = [];
-        rows.forEach((row, idx) => {
-          const name = row.querySelector('[data-shift-field="name"]')?.value?.trim() || `Vardiya ${idx + 1}`;
-          let start = row.querySelector('[data-shift-field="start"]')?.value || '08:00';
-          let end = row.querySelector('[data-shift-field="end"]')?.value || '16:00';
-          const id = row.querySelector('[data-shift-field="id"]')?.value?.trim() || `shift_${idx + 1}`;
+        productionShifts.forEach((sh, idx) => {
+          const name = (sh.name || '').trim() || `Vardiya ${idx + 1}`;
+          let start = sh.start || '08:00';
+          let end = sh.end || '16:00';
+          const id = (sh.id || '').trim() || `shift_${idx + 1}`;
           if(end === '23:59') end = '24:00';
-          out.push({ id, name, start, end });
+          const breaks = (Array.isArray(sh.breaks) ? sh.breaks : [])
+            .map(b => ({ start: (b.start || '').slice(0,5), end: (b.end || '').slice(0,5) }))
+            .filter(b => b.start && b.end);
+          out.push({ id, name, start, end, breaks });
         });
         return out;
       }
 
       function applyProductionForm(data){
         q('tvRotateSec').value = String(data.tv_rotate_seconds || 20);
+        q('idleStoppedSec').value = String(data.idle_stopped_seconds || 180);
         productionShifts = Array.isArray(data.shifts) ? data.shifts.map(s => ({...s})) : [];
         if(!productionShifts.length){
           productionShifts = [
@@ -804,7 +867,7 @@
         }
         renderShiftRows();
         q('tvProdStatus').innerHTML =
-          `<span class="good">${productionShifts.length} vardiya</span> &nbsp;|&nbsp; TV gecis: <b>${data.tv_rotate_seconds || 20} sn</b>`;
+          `<span class="good">${productionShifts.length} vardiya</span> &nbsp;|&nbsp; TV gecis: <b>${data.tv_rotate_seconds || 20} sn</b> &nbsp;|&nbsp; Durma: <b>${data.idle_stopped_seconds || 180} sn</b>`;
       }
 
       async function refreshProductionSettings(){
@@ -816,6 +879,7 @@
       async function saveProductionSettings(){
         const body = {
           tv_rotate_seconds: Number(q('tvRotateSec').value || 20),
+          idle_stopped_seconds: Number(q('idleStoppedSec').value || 180),
           shifts: collectShiftsFromForm(),
         };
         const data = await jpatchLocal('/api/settings/production', body);
@@ -1686,27 +1750,53 @@
       function renderTelegramOperators(ops){
         const body = q('tgOpBody');
         if(!ops.length){
-          body.innerHTML = '<tr><td colspan="5" class="muted">Henuz operatör yok.</td></tr>';
+          body.innerHTML = '<tr><td colspan="6" class="muted">Henuz kullanici yok.</td></tr>';
           return;
         }
-        body.innerHTML = ops.map(op => `
+        body.innerHTML = ops.map(op => {
+          const tg = op.telegram_user_id || '';
+          const pwLabel = op.has_password ? 'Tanimli' : 'Yok';
+          return `
           <tr>
             <td>${escapeHtml(op.name || '—')}</td>
-            <td><code>${escapeHtml(op.id)}</code></td>
+            <td>${tg ? '<code>' + escapeHtml(tg) + '</code>' : '<span class="muted">—</span>'}</td>
+            <td>
+              <span class="muted">${pwLabel}</span>
+              <div style="display:flex;gap:6px;margin-top:6px;align-items:center;">
+                <input type="password" class="tg-op-pw" data-id="${escapeHtml(op.id)}" placeholder="Yeni sifre" maxlength="64" autocomplete="new-password" style="width:130px;" />
+                <button type="button" class="btn-gray tg-op-pw-save" data-id="${escapeHtml(op.id)}">Kaydet</button>
+              </div>
+            </td>
             <td>${op.role === 'admin' ? 'Yönetici' : 'Kullanıcı'}</td>
             <td>${escapeHtml(permsLabel(op))}</td>
             <td><button type="button" class="btn-gray tg-op-del" data-id="${escapeHtml(op.id)}" data-name="${escapeHtml(op.name || '')}">Sil</button></td>
-          </tr>
-        `).join('');
+          </tr>`;
+        }).join('');
         body.querySelectorAll('.tg-op-del').forEach(btn=>{
           btn.onclick = async ()=>{
             const id = btn.getAttribute('data-id');
             const nm = btn.getAttribute('data-name') || id;
-            if(!confirm('Operatör silinsin mi?\\n' + nm + ' (' + id + ')')) return;
+            if(!confirm('Kullanici silinsin mi?\\n' + nm)) return;
             try{
               const t = await jdeleteLocal('/api/settings/telegram/operators/' + encodeURIComponent(id));
               applyTelegramForm(t);
               setMsg('tgOpMsg', nm + ' silindi.', 'good');
+            }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
+          };
+        });
+        body.querySelectorAll('.tg-op-pw-save').forEach(btn=>{
+          btn.onclick = async ()=>{
+            const id = btn.getAttribute('data-id');
+            const inp = body.querySelector('.tg-op-pw[data-id="' + id + '"]');
+            const password = (inp && inp.value || '').trim();
+            if(!password){
+              setMsg('tgOpMsg', 'Yeni sabit sifre yazin.', 'bad');
+              return;
+            }
+            try{
+              const t = await jpatchLocal('/api/settings/telegram/operators/' + encodeURIComponent(id), { password });
+              applyTelegramForm(t);
+              setMsg('tgOpMsg', 'Sabit sifre kaydedildi.', 'good');
             }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
           };
         });
@@ -1737,12 +1827,19 @@
         try{
           const name = q('tgOpName').value.trim();
           const telegram_user_id = q('tgOpId').value.trim();
-          if(!name || !telegram_user_id){
-            setMsg('tgOpMsg', 'Operatör adi ve Telegram ID gerekli.', 'bad');
+          const password = q('tgOpPassword').value.trim();
+          if(!name){
+            setMsg('tgOpMsg', 'Kullanici adi gerekli.', 'bad');
+            return;
+          }
+          if(!telegram_user_id && !password){
+            setMsg('tgOpMsg', 'Telegram ID veya sabit sifre gerekli.', 'bad');
             return;
           }
           const role = q('tgOpRole').value;
-          const payload = { name, telegram_user_id, role };
+          const payload = { name, role };
+          if(telegram_user_id) payload.telegram_user_id = telegram_user_id;
+          if(password) payload.password = password;
           if(role === 'user'){
             payload.permissions = {
               panel_8000: q('tgPermPanel8000').checked,
@@ -1754,6 +1851,7 @@
           const t = await jpostLocalOp('/api/settings/telegram/operators', payload);
           q('tgOpName').value = '';
           q('tgOpId').value = '';
+          q('tgOpPassword').value = '';
           ['tgPermPanel8000','tgPermPanel8080','tgPermMoldCreate','tgPermMoldAssign'].forEach(id=>{ q(id).checked = false; });
           applyTelegramForm(t);
           setMsg('tgOpMsg', name + ' eklendi.', 'good');
@@ -1868,12 +1966,13 @@
       }
 
       async function doLogin(){
+        const username = (q('loginUser').value || '').trim();
         const pw = q('loginPw').value;
-        if(!pw){ setMsg('loginMsg','Sifre girin','bad'); return; }
+        if(!username || !pw){ setMsg('loginMsg','Kullanici adi ve sifre girin','bad'); return; }
         try{
           const r = await fetch(location.origin + '/api/auth/login', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({password: pw}),
+            method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({username, password: pw}),
           });
           if(!r.ok){ throw new Error(await r.text()); }
           const me = await r.json();
@@ -1885,7 +1984,7 @@
       }
 
       async function doLogout(){
-        try{ await fetch(location.origin + '/api/auth/logout', {method:'POST'}); }catch(_){}
+        try{ await fetch(location.origin + '/api/auth/logout', {method:'POST', credentials:'include'}); }catch(_){}
         location.reload();
       }
 
@@ -1895,7 +1994,14 @@
 
       (async function bootstrap(){
         try{
-          const r = await fetch(location.origin + '/api/auth/me');
+          const mode = await fetch(location.origin + '/api/auth/login-mode');
+          if(mode.ok){
+            const info = await mode.json();
+            if(info && info.hint) q('loginHint').textContent = info.hint;
+          }
+        }catch(_){}
+        try{
+          const r = await fetch(location.origin + '/api/auth/me', { credentials:'include' });
           if(r.ok){
             const me = await r.json();
             q('whoami').textContent = me.display_name + (me.is_super ? ' (Super)' : '');

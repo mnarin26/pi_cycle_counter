@@ -6,32 +6,54 @@ import {
   CartesianGrid,
   Cell,
   LabelList,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { apiGet } from "../api/client";
+import { apiGet, apiPost } from "../api/client";
 import { useAuth } from "../hooks/useAuth";
 import { useLiveSnapshot, type MachineSnap } from "../hooks/useLiveSnapshot";
+import { buildMoldColorMap, moldColorFromMap } from "../lib/chartTheme";
 
 const STORAGE_KEY = "tv_selected_machine_ids";
 const REFRESH_MS = 30_000;
 const DEFAULT_ROTATE_MS = 20_000;
+const DEFAULT_IDLE_STOPPED_S = 180;
 const DISPLAY_TZ = "Europe/Istanbul";
+const UNDEFINED_MOLD = "Kalıp tanımlı değil";
+const UNDEFINED_MOLD_COLOR = "#64748b";
 
 type MachineRow = { id: number; name: string; enabled: boolean };
 
-type EfficiencyBlock = {
+// Target-vs-actual efficiency (sliced by mold changes). efficiency_pct is null
+// and available=false when the running mold has no defined target cycle.
+type SlicedEfficiency = {
   actual_count: number;
   target_count: number;
-  realization_pct: number;
-  performance_pct: number;
-  efficiency_pct: number;
+  efficiency_pct: number | null;
   avg_cycle_s: number;
   target_cycle_s: number | null;
+  available: boolean;
+};
+
+type ShiftHourPoint = {
+  hour: number;
+  label: string;
+  count: number;
+  by_mold: Record<string, number>;
+};
+
+type ShiftChart = {
+  id: string;
+  name: string;
+  date: string;
+  title: string;
+  start: string;
+  end: string;
+  is_current: boolean;
+  mold_names: string[];
+  hourly: ShiftHourPoint[];
 };
 
 type TvMachineData = {
@@ -43,27 +65,21 @@ type TvMachineData = {
     mold_id: number;
     mold_name: string | null;
     target_cycle_s: number | null;
-    daily_target_count: number;
   } | null;
-  daily: EfficiencyBlock;
-  shift: EfficiencyBlock & { id: string; name: string };
+  shift: { id: string; name: string };
+  mold_output: { actual_count: number; mold_name: string | null; available: boolean };
+  shift_output: { actual_count: number };
+  shift_target_plan: { target_count: number; available: boolean };
+  mold_efficiency: SlicedEfficiency;
+  shift_efficiency: SlicedEfficiency;
   summary: {
     cycle_count: number;
     avg_cycle_s: number;
     min_cycle_s: number;
     max_cycle_s: number;
   };
-  hourly: Array<{ hour: number; count: number }>;
+  shift_charts?: ShiftChart[];
 };
-
-function istanbulHourNow(): number {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: DISPLAY_TZ,
-    hour: "numeric",
-    hour12: false,
-  }).formatToParts(new Date());
-  return Number(parts.find((p) => p.type === "hour")?.value ?? 0);
-}
 
 function loadSelectedIds(): number[] | null {
   try {
@@ -81,35 +97,38 @@ function saveSelectedIds(ids: number[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
 }
 
-function stateInfo(state: string): { label: string; color: string; bg: string } {
-  switch (state) {
-    case "OPEN":
-      return { label: "ÇALIŞIYOR", color: "text-emerald-300", bg: "bg-emerald-500" };
-    case "CLOSED":
-      return { label: "KAPALI", color: "text-sky-300", bg: "bg-sky-500" };
-    case "MOVING":
-      return { label: "HAREKET", color: "text-amber-300", bg: "bg-amber-400" };
-    default:
-      return { label: state || "—", color: "text-slate-300", bg: "bg-slate-500" };
+function runStatus(
+  live: MachineSnap | undefined,
+  idleStoppedSeconds: number,
+): { running: boolean; label: string; color: string; bg: string } {
+  const running = live?.idle_s != null && live.idle_s < idleStoppedSeconds;
+  if (running) {
+    return { running: true, label: "ÇALIŞIYOR", color: "text-emerald-300", bg: "bg-emerald-500" };
   }
+  return { running: false, label: "DURUYOR", color: "text-red-300", bg: "bg-red-500" };
 }
 
-function fillHours(hourly: Array<{ hour: number; count: number }>): Array<{ hour: number; count: number }> {
-  const map = new Map(hourly.map((h) => [h.hour, h.count]));
-  const nowHour = istanbulHourNow();
-  return Array.from({ length: 24 }, (_, h) => ({ hour: h, count: map.get(h) ?? 0 })).filter(
-    (h) => h.hour <= nowHour,
-  );
-}
-
-function hourLabel(h: number): string {
-  return `${String(h).padStart(2, "0")}:00`;
-}
-
-function pctColor(pct: number): string {
+function pctColor(pct: number | null | undefined): string {
+  if (pct == null) return "text-slate-400";
   if (pct >= 90) return "text-emerald-400";
   if (pct >= 70) return "text-amber-300";
   return "text-red-400";
+}
+
+function effValue(block: SlicedEfficiency): string {
+  if (!block.available || block.efficiency_pct == null) return "—";
+  return `%${block.efficiency_pct.toFixed(0)}`;
+}
+
+function effSubtitle(block: SlicedEfficiency, avgOverride?: number): string {
+  if (!block.available) return UNDEFINED_MOLD;
+  const parts = [`${block.actual_count} / ${block.target_count || "—"} (şimdiye)`];
+  if (block.target_cycle_s) {
+    parts.push(`Hedef ${block.target_cycle_s.toFixed(2)}s`);
+  }
+  const avg = avgOverride != null && avgOverride > 0 ? avgOverride : block.avg_cycle_s;
+  parts.push(avg > 0 ? `Ort ${avg.toFixed(2)}s` : "Ort —");
+  return parts.join(" · ");
 }
 
 function KpiCard({
@@ -132,35 +151,143 @@ function KpiCard({
   );
 }
 
-function statusFill(state: string): string {
-  switch (state) {
-    case "OPEN":
-      return "#34d399";
-    case "CLOSED":
-      return "#38bdf8";
-    case "MOVING":
-      return "#fbbf24";
-    default:
-      return "#64748b";
-  }
-}
-
-function MachineStatusDonut({ state }: { state: string }) {
-  const st = stateInfo(state);
-  const data = [{ name: st.label, value: 1, fill: statusFill(state) }];
+function MachineRunStatus({
+  live,
+  idleStoppedSeconds,
+}: {
+  live: MachineSnap | undefined;
+  idleStoppedSeconds: number;
+}) {
+  const st = runStatus(live, idleStoppedSeconds);
   return (
-    <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/80 p-4">
-      <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Makine Durumu</div>
-      <div className="h-36 w-36">
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie data={data} dataKey="value" innerRadius={48} outerRadius={68} stroke="none" />
-          </PieChart>
-        </ResponsiveContainer>
-      </div>
-      <div className={`text-xl font-bold ${st.color}`}>{st.label}</div>
+    <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/80 p-6">
+      <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Makine Durumu</div>
+      <div className={`mt-4 text-5xl font-black tracking-tight ${st.color}`}>{st.label}</div>
     </div>
   );
+}
+
+function moldBarColor(colorMap: Map<string, string>, name: string): string {
+  return name === UNDEFINED_MOLD ? UNDEFINED_MOLD_COLOR : moldColorFromMap(colorMap, name);
+}
+
+function ShiftProductionChart({ chart }: { chart: ShiftChart }) {
+  const moldNames = chart.mold_names ?? [];
+  const colorMap = useMemo(() => buildMoldColorMap(moldNames), [moldNames]);
+  const data = useMemo(
+    () =>
+      chart.hourly.map((h) => ({
+        hour: h.hour,
+        label: h.label,
+        count: h.count,
+        ...h.by_mold,
+      })),
+    [chart.hourly],
+  );
+  const maxCount = Math.max(1, ...chart.hourly.map((h) => h.count));
+  const accent = chart.is_current ? "border-emerald-800" : "border-slate-700";
+  return (
+    <div className={`flex min-h-0 flex-1 flex-col rounded-2xl border bg-slate-900/80 px-3 py-2 ${accent}`}>
+      <div className="mb-1 flex items-baseline justify-between gap-2">
+        <div className="text-sm font-semibold text-slate-200">{chart.title}</div>
+        <div className="text-xs text-slate-500">
+          {chart.start}–{chart.end}
+          {chart.is_current ? " · şimdi" : ""}
+        </div>
+      </div>
+      <div className="min-h-0 flex-1">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} margin={{ top: 10, right: 8, bottom: 0, left: 4 }} barCategoryGap="12%">
+            <CartesianGrid strokeDasharray="2 4" stroke="#1e293b" vertical={false} />
+            <XAxis dataKey="label" tick={{ fill: "#64748b", fontSize: 10 }} interval={0} />
+            <YAxis hide domain={[0, maxCount * 1.15]} />
+            <Tooltip
+              cursor={{ fill: "#1e293b" }}
+              content={({ payload }) => {
+                const d = payload?.[0]?.payload as ShiftHourPoint | undefined;
+                if (!d) return null;
+                const parts = Object.entries(d.by_mold ?? {}).filter(([, v]) => v > 0);
+                return (
+                  <div className="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-xs text-slate-200">
+                    <div className="font-semibold">{d.label}</div>
+                    <div>{d.count} döngü</div>
+                    {parts.length > 1 &&
+                      parts.map(([name, v]) => (
+                        <div key={name} className="flex items-center gap-1 text-slate-400">
+                          <span
+                            className="inline-block h-2 w-2 rounded-sm"
+                            style={{ background: moldBarColor(colorMap, name) }}
+                          />
+                          {name}: {v}
+                        </div>
+                      ))}
+                  </div>
+                );
+              }}
+            />
+            {moldNames.length > 0 ? (
+              moldNames.map((name, idx) => (
+                <Bar
+                  key={name}
+                  dataKey={name}
+                  stackId="h"
+                  fill={moldBarColor(colorMap, name)}
+                  isAnimationActive={false}
+                  radius={idx === moldNames.length - 1 ? [3, 3, 0, 0] : undefined}
+                >
+                  {idx === moldNames.length - 1 && (
+                    <LabelList
+                      dataKey="count"
+                      position="top"
+                      formatter={(value: number) => (value > 0 ? String(value) : "")}
+                      style={{ fill: "#e2e8f0", fontSize: 10, fontWeight: 600 }}
+                    />
+                  )}
+                </Bar>
+              ))
+            ) : (
+              <Bar dataKey="count" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+                {chart.hourly.map((entry) => (
+                  <Cell
+                    key={`${chart.date}-${chart.id}-${entry.label}`}
+                    fill="#1e293b"
+                    opacity={0.35}
+                  />
+                ))}
+              </Bar>
+            )}
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      {moldNames.length > 1 && (
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
+          {moldNames.map((name) => (
+            <span key={name} className="inline-flex items-center gap-1">
+              <span
+                className="inline-block h-2 w-2 rounded-sm"
+                style={{ background: moldBarColor(colorMap, name) }}
+              />
+              {name}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function fallbackShiftChart(): ShiftChart {
+  return {
+    id: "daily",
+    name: "Gün",
+    date: "",
+    title: "Üretim Grafiği",
+    start: "00:00",
+    end: "24:00",
+    is_current: true,
+    mold_names: [],
+    hourly: [],
+  };
 }
 
 function TvMachineScreen({
@@ -168,16 +295,21 @@ function TvMachineScreen({
   live,
   index,
   total,
+  idleStoppedSeconds,
 }: {
   data: TvMachineData;
   live: MachineSnap | undefined;
   index: number;
   total: number;
+  idleStoppedSeconds: number;
 }) {
-  const st = stateInfo(live?.state ?? "—");
-  const chartData = fillHours(data.hourly);
-  const maxCount = Math.max(1, ...chartData.map((h) => h.count));
-  const moldName = data.active_mold_name || live?.mold_name || "—";
+  const st = runStatus(live, idleStoppedSeconds);
+  const shiftCharts =
+    data.shift_charts && data.shift_charts.length > 0
+      ? data.shift_charts
+      : [fallbackShiftChart()];
+  const moldDefined = data.active_mold != null;
+  const moldName = data.active_mold_name || live?.mold_name || UNDEFINED_MOLD;
 
   return (
     <div className="flex h-full flex-col gap-4 p-6">
@@ -191,7 +323,7 @@ function TvMachineScreen({
             </span>
           </div>
           <p className="mt-1 text-sm text-slate-500">
-            {data.window_label} · Aktif kalıp: <span className="text-amber-300">{moldName}</span>
+            Aktif kalıp: <span className="text-amber-300">{moldName}</span>
           </p>
         </div>
         <div className="ml-auto text-right text-sm text-slate-500">
@@ -202,50 +334,54 @@ function TvMachineScreen({
       <div className="grid flex-1 gap-4 lg:grid-cols-12">
         <div className="grid gap-4 sm:grid-cols-2 lg:col-span-8 lg:grid-cols-3">
           <KpiCard
-            title="Günlük Üretim"
-            value={data.daily.actual_count.toLocaleString("tr-TR")}
-            subtitle="Gerçekleşen baskı"
+            title="Vardiya Üretim Sayısı"
+            value={data.shift_output.actual_count.toLocaleString("tr-TR")}
+            subtitle={`${data.shift.name} vardiyası`}
           />
           <KpiCard
-            title="Hedef Üretim"
-            value={data.daily.target_count.toLocaleString("tr-TR")}
-            subtitle="Günlük hedef"
+            title="Kalıp Üretim Sayısı"
+            value={data.mold_output.actual_count.toLocaleString("tr-TR")}
+            subtitle={data.mold_output.available ? (data.mold_output.mold_name ?? "—") : UNDEFINED_MOLD}
             accent="text-sky-300"
           />
           <KpiCard
-            title="Gerçekleşme Oranı"
-            value={`%${data.daily.realization_pct.toFixed(0)}`}
-            subtitle={`${data.daily.actual_count} / ${data.daily.target_count || "—"}`}
-            accent={pctColor(data.daily.realization_pct)}
-          />
-          <KpiCard
-            title={`${data.shift.name} Vardiyası`}
-            value={data.shift.actual_count.toLocaleString("tr-TR")}
-            subtitle={`Hedef: ${data.shift.target_count.toLocaleString("tr-TR")}`}
-          />
-          <KpiCard
-            title="Vardiya Gerçekleşme"
-            value={`%${data.shift.realization_pct.toFixed(0)}`}
-            subtitle="Vardiya bazlı"
-            accent={pctColor(data.shift.realization_pct)}
-          />
-          <KpiCard
-            title="Verimlilik"
-            value={`%${data.daily.efficiency_pct.toFixed(0)}`}
-            subtitle={
-              data.daily.target_cycle_s
-                ? `Hedef ${data.daily.target_cycle_s.toFixed(2)}s · Ort ${data.daily.avg_cycle_s.toFixed(2)}s`
-                : "Kalıp hedef süresi tanımlı değil"
+            title="Vardiya Hedef Sayısı"
+            value={
+              data.shift_target_plan.available
+                ? data.shift_target_plan.target_count.toLocaleString("tr-TR")
+                : "—"
             }
-            accent={pctColor(data.daily.efficiency_pct)}
+            subtitle={data.shift_target_plan.available ? undefined : UNDEFINED_MOLD}
+            accent="text-sky-300"
+          />
+          <KpiCard
+            title="Kalıp Bazlı Verimlilik"
+            value={effValue(data.mold_efficiency)}
+            subtitle={effSubtitle(
+              data.mold_efficiency,
+              data.summary.cycle_count > 0 ? data.summary.avg_cycle_s : undefined,
+            )}
+            accent={pctColor(data.mold_efficiency.available ? data.mold_efficiency.efficiency_pct : null)}
+          />
+          <KpiCard
+            title="Vardiya Gerçekleşen Verimlilik"
+            value={effValue(data.shift_efficiency)}
+            subtitle={effSubtitle(data.shift_efficiency)}
+            accent={pctColor(data.shift_efficiency.available ? data.shift_efficiency.efficiency_pct : null)}
           />
         </div>
 
         <div className="grid gap-4 lg:col-span-4">
-          <MachineStatusDonut state={live?.state ?? "—"} />
+          <MachineRunStatus live={live} idleStoppedSeconds={idleStoppedSeconds} />
           <div className="rounded-2xl border border-slate-700 bg-slate-900/80 p-4">
             <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Kalıp Özeti</div>
             <div className="mt-3 space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Kalıp</span>
+                <span className={`font-semibold ${moldDefined ? "text-amber-300" : "text-slate-500"}`}>
+                  {moldDefined ? moldName : UNDEFINED_MOLD}
+                </span>
+              </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Kalıp döngüsü</span>
                 <span className="font-semibold tabular-nums">{data.summary.cycle_count}</span>
@@ -270,54 +406,18 @@ function TvMachineScreen({
                     : "—"}
                 </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-slate-400">Performans</span>
-                <span className={`font-semibold tabular-nums ${pctColor(data.daily.performance_pct)}`}>
-                  %{data.daily.performance_pct.toFixed(0)}
-                </span>
-              </div>
             </div>
           </div>
         </div>
       </div>
 
-      <div className="h-40 rounded-2xl border border-slate-700 bg-slate-900/80 p-3">
-        <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Üretim Grafiği</div>
-        <ResponsiveContainer width="100%" height="90%">
-          <BarChart data={chartData} margin={{ top: 12, right: 8, bottom: 0, left: 4 }} barCategoryGap="12%">
-            <CartesianGrid strokeDasharray="2 4" stroke="#1e293b" vertical={false} />
-            <XAxis dataKey="hour" tickFormatter={hourLabel} tick={{ fill: "#64748b", fontSize: 11 }} interval={2} />
-            <YAxis hide domain={[0, maxCount * 1.15]} />
-            <Tooltip
-              cursor={{ fill: "#1e293b" }}
-              content={({ payload, label }) => {
-                const d = payload?.[0]?.payload as { hour: number; count: number } | undefined;
-                if (!d) return null;
-                return (
-                  <div className="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-xs text-slate-200">
-                    <div className="font-semibold">{hourLabel(Number(label))}</div>
-                    <div>{d.count} döngü</div>
-                  </div>
-                );
-              }}
-            />
-            <Bar dataKey="count" radius={[3, 3, 0, 0]} isAnimationActive={false}>
-              {chartData.map((entry) => (
-                <Cell
-                  key={entry.hour}
-                  fill={entry.count > 0 ? "#22c55e" : "#1e293b"}
-                  opacity={entry.count > 0 ? 0.9 : 0.35}
-                />
-              ))}
-              <LabelList
-                dataKey="count"
-                position="top"
-                formatter={(value: number) => (value > 0 ? String(value) : "")}
-                style={{ fill: "#e2e8f0", fontSize: 10, fontWeight: 600 }}
-              />
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
+      <div
+        className="flex min-h-0 flex-col gap-2"
+        style={{ height: `${Math.min(10 + shiftCharts.length * 5.5, 30)}rem` }}
+      >
+        {shiftCharts.map((chart, i) => (
+          <ShiftProductionChart key={`${chart.date}-${chart.id}-${i}`} chart={chart} />
+        ))}
       </div>
     </div>
   );
@@ -336,14 +436,20 @@ export function TvWallPage() {
   const [clock, setClock] = useState(() => new Date());
   const [activeIndex, setActiveIndex] = useState(0);
   const [rotateMs, setRotateMs] = useState(DEFAULT_ROTATE_MS);
+  const [idleStoppedSeconds, setIdleStoppedSeconds] = useState(DEFAULT_IDLE_STOPPED_S);
 
   useEffect(() => {
-    apiGet<{ tv_rotate_seconds: number }>("/api/settings/production")
+    apiGet<{ tv_rotate_seconds: number; idle_stopped_seconds?: number }>("/api/settings/production")
       .then((cfg) => {
         const sec = Number(cfg.tv_rotate_seconds);
         if (Number.isFinite(sec) && sec >= 5) setRotateMs(sec * 1000);
+        const idle = Number(cfg.idle_stopped_seconds);
+        if (Number.isFinite(idle) && idle >= 30) setIdleStoppedSeconds(idle);
       })
-      .catch(() => setRotateMs(DEFAULT_ROTATE_MS));
+      .catch(() => {
+        setRotateMs(DEFAULT_ROTATE_MS);
+        setIdleStoppedSeconds(DEFAULT_IDLE_STOPPED_S);
+      });
   }, []);
 
   useEffect(() => {
@@ -430,6 +536,7 @@ export function TvWallPage() {
   function saveSetup() {
     saveSelectedIds(selectedIds);
     setSetupOpen(false);
+    void apiPost("/api/activity", { action: "tv.machines.select" }).catch(() => {});
     void loadBoard();
   }
 
@@ -445,8 +552,7 @@ export function TvWallPage() {
     <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100">
       <header className="flex flex-wrap items-center gap-4 border-b border-slate-800 px-6 py-3">
         <div>
-          <h1 className="text-xl font-bold text-emerald-400">Üretim TV</h1>
-          <p className="text-xs text-slate-500">Tam ekran makine özeti · {displayIds.length} makine</p>
+          <h1 className="text-xl font-bold text-emerald-400">Bilgi Ekranı</h1>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-4 text-sm">
           <span className="tabular-nums text-base text-slate-300">{clockStr}</span>
@@ -503,9 +609,9 @@ export function TvWallPage() {
       <main className="flex-1 overflow-hidden">
         {displayIds.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-xl text-slate-500">
-            <span>TV için makine seçilmedi</span>
+            <span>Bilgi ekranı için makine seçilmedi</span>
             <span className="text-sm text-slate-600">
-              Giriş yapıp &quot;Makineleri seç&quot; ile bu cihazda kaydedin; TV şifresiz açık kalır
+              Giriş yapıp &quot;Makineleri seç&quot; ile bu cihazda kaydedin; bilgi ekranı şifresiz açık kalır
             </span>
           </div>
         ) : currentData ? (
@@ -514,6 +620,7 @@ export function TvWallPage() {
             live={liveById.get(currentData.machine_id)}
             index={activeIndex}
             total={displayIds.length}
+            idleStoppedSeconds={idleStoppedSeconds}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-slate-500">Yükleniyor…</div>
@@ -523,7 +630,7 @@ export function TvWallPage() {
       {setupOpen && user && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
           <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-2xl border border-slate-600 bg-slate-900 p-6 shadow-2xl">
-            <h2 className="mb-2 text-xl font-semibold">TV&apos;de gösterilecek makineler</h2>
+            <h2 className="mb-2 text-xl font-semibold">Bilgi ekranında gösterilecek makineler</h2>
             <p className="mb-4 text-sm text-slate-400">
               Her makine tam ekran gösterilir ve ayarlardaki sürede otomatik döner. Seçim bu tarayıcıda saklanır.
             </p>

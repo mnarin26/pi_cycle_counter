@@ -49,15 +49,22 @@ class SettingKV(BaseModel):
     value: dict
 
 
+class ProductionBreak(BaseModel):
+    start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    end: str = Field(..., pattern=r"^(\d{2}:\d{2}|24:00)$")
+
+
 class ProductionShift(BaseModel):
     id: str = Field(..., min_length=1, max_length=32)
     name: str = Field(..., min_length=1, max_length=64)
     start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
     end: str = Field(..., pattern=r"^(\d{2}:\d{2}|24:00)$")
+    breaks: list[ProductionBreak] | None = None
 
 
 class ProductionSettingsPatch(BaseModel):
     tv_rotate_seconds: int | None = Field(default=None, ge=5, le=300)
+    idle_stopped_seconds: int | None = Field(default=None, ge=30, le=3600)
     shifts: list[ProductionShift] | None = None
 
 

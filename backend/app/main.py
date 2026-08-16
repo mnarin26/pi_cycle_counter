@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 import app.db.session as db_session
 from app.services.auth_service import get_session_user
-from app.api.routers import analytics, auth, calibration, cameras, events, machines, molds, settings as settings_router
+from app.api.routers import activity, analytics, auth, calibration, cameras, events, machines, molds, settings as settings_router
 from app.vision.orchestrator import VisionOrchestrator, drain_cycle_queue_item
 from app.ws.hub import Hub
 
@@ -141,6 +141,7 @@ app.add_middleware(
 _AUTH_ALLOWLIST = {
     "/api/auth/login",
     "/api/auth/logout",
+    "/api/auth/login-mode",
     "/api/health",
     "/api/live/snapshot",
 }
@@ -193,6 +194,7 @@ app.include_router(cameras.router, prefix="/api/cameras", tags=["cameras"])
 app.include_router(machines.router, prefix="/api/machines", tags=["machines"])
 app.include_router(molds.router, prefix="/api/molds", tags=["molds"])
 app.include_router(events.router, prefix="/api/events", tags=["events"])
+app.include_router(activity.router, prefix="/api/activity", tags=["activity"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
 app.include_router(settings_router.router, prefix="/api/settings", tags=["settings"])
 app.include_router(calibration.router, prefix="/api/calibration", tags=["calibration"])

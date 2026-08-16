@@ -39,3 +39,13 @@ def theoretical_target_from_cycle(shift_hours: float, target_cycle_s: float | No
     if not target_cycle_s or target_cycle_s <= 0 or shift_hours <= 0:
         return 0
     return max(0, int((shift_hours * 3600.0) / target_cycle_s))
+
+
+def expected_count(elapsed_s: float, target_cycle_s: float | None) -> int:
+    """How many parts *should* have been produced in `elapsed_s` at target cycle.
+
+    Returns 0 when the mold has no defined target cycle (efficiency unavailable).
+    """
+    if not target_cycle_s or target_cycle_s <= 0 or elapsed_s <= 0:
+        return 0
+    return max(0, int(elapsed_s / target_cycle_s))

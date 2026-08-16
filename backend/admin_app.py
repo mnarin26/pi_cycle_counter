@@ -46,7 +46,7 @@ STATIC_DIR = BASE_DIR / "admin_static"
 app = FastAPI(title="Injection Monitor Admin")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-_AUTH_ALLOWLIST = {"/api/auth/login", "/api/auth/logout"}
+_AUTH_ALLOWLIST = {"/api/auth/login", "/api/auth/logout", "/api/auth/login-mode"}
 
 
 @app.middleware("http")
@@ -139,15 +139,18 @@ class OperatorPermissions(BaseModel):
 
 class TelegramOperatorAdd(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
-    telegram_user_id: str = Field(..., min_length=1, max_length=32)
+    telegram_user_id: str | None = Field(default="", max_length=32)
     role: str = Field(default="user")
     permissions: OperatorPermissions | None = None
+    password: str | None = Field(default=None, max_length=64)
 
 
 class TelegramOperatorUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=128)
     role: str | None = None
     permissions: OperatorPermissions | None = None
+    password: str | None = Field(default=None, max_length=64)
+    telegram_user_id: str | None = Field(default=None, max_length=32)
 
 
 class SshSettingsPatch(BaseModel):
@@ -159,15 +162,22 @@ class SshSettingsPatch(BaseModel):
     alias: str | None = None
 
 
+class ProductionBreak(BaseModel):
+    start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    end: str = Field(..., pattern=r"^(\d{2}:\d{2}|24:00)$")
+
+
 class ProductionShift(BaseModel):
     id: str = Field(..., min_length=1, max_length=32)
     name: str = Field(..., min_length=1, max_length=64)
     start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
     end: str = Field(..., pattern=r"^(\d{2}:\d{2}|24:00)$")
+    breaks: list[ProductionBreak] | None = None
 
 
 class ProductionSettingsPatch(BaseModel):
     tv_rotate_seconds: int | None = Field(default=None, ge=5, le=300)
+    idle_stopped_seconds: int | None = Field(default=None, ge=30, le=3600)
     shifts: list[ProductionShift] | None = None
 
 
@@ -350,6 +360,7 @@ def add_telegram_operator_admin(
                 telegram_user_id=body.telegram_user_id,
                 role=role,
                 permissions=perms,
+                password=body.password,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
@@ -359,7 +370,7 @@ def add_telegram_operator_admin(
             action="operator.create",
             actor_name=user.display_name,
             telegram_user_id=user.telegram_user_id,
-            resource=f"operator/{body.telegram_user_id}",
+            resource=f"operator/{body.telegram_user_id or body.name}",
             detail={"name": body.name, "role": role},
             ip=client_ip(request),
         )
@@ -388,6 +399,8 @@ def update_telegram_operator_admin(
                 name=body.name,
                 role=role,
                 permissions=perms,
+                password=body.password,
+                new_telegram_user_id=body.telegram_user_id,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e

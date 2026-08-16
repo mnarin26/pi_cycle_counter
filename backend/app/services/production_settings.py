@@ -17,6 +17,9 @@ DEFAULT_SHIFTS: list[dict[str, str]] = [
 DEFAULT_TV_ROTATE_SECONDS = 20
 MIN_TV_ROTATE_SECONDS = 5
 MAX_TV_ROTATE_SECONDS = 300
+DEFAULT_IDLE_STOPPED_SECONDS = 180
+MIN_IDLE_STOPPED_SECONDS = 30
+MAX_IDLE_STOPPED_SECONDS = 3600
 MAX_SHIFTS = 4
 MIN_SHIFTS = 1
 
@@ -34,7 +37,27 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
     return hour, minute
 
 
-def _normalize_shift(raw: dict[str, Any], index: int) -> dict[str, str]:
+def _normalize_breaks(raw: Any, shift_index: int) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for j, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        start = str(item.get("start") or "").strip()
+        end = str(item.get("end") or "").strip()
+        if not start or not end:
+            continue
+        try:
+            _parse_hhmm(start)
+            _parse_hhmm(end)
+        except ValueError as e:
+            raise ValueError(f"Vardiya {shift_index + 1} mola {j + 1}: {e}") from e
+        out.append({"start": start, "end": end})
+    return out
+
+
+def _normalize_shift(raw: dict[str, Any], index: int) -> dict[str, Any]:
     sid = str(raw.get("id") or f"shift_{index + 1}").strip()
     name = str(raw.get("name") or f"Vardiya {index + 1}").strip()
     start = str(raw.get("start") or "").strip()
@@ -43,15 +66,16 @@ def _normalize_shift(raw: dict[str, Any], index: int) -> dict[str, str]:
         raise ValueError(f"Vardiya {index + 1}: ad boş olamaz")
     _parse_hhmm(start)
     _parse_hhmm(end)
-    return {"id": sid, "name": name, "start": start, "end": end}
+    breaks = _normalize_breaks(raw.get("breaks"), index)
+    return {"id": sid, "name": name, "start": start, "end": end, "breaks": breaks}
 
 
-def validate_shifts(shifts: list[dict[str, Any]]) -> list[dict[str, str]]:
+def validate_shifts(shifts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(shifts) < MIN_SHIFTS:
         raise ValueError(f"En az {MIN_SHIFTS} vardiya tanımlanmalı")
     if len(shifts) > MAX_SHIFTS:
         raise ValueError(f"En fazla {MAX_SHIFTS} vardiya tanımlanabilir")
-    out: list[dict[str, str]] = []
+    out: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for i, item in enumerate(shifts):
         if not isinstance(item, dict):
@@ -72,6 +96,13 @@ def production_public_view(raw: dict[str, Any]) -> dict[str, Any]:
         rotate_i = DEFAULT_TV_ROTATE_SECONDS
     rotate_i = max(MIN_TV_ROTATE_SECONDS, min(MAX_TV_ROTATE_SECONDS, rotate_i))
 
+    idle = raw.get("idle_stopped_seconds", DEFAULT_IDLE_STOPPED_SECONDS)
+    try:
+        idle_i = int(idle)
+    except (TypeError, ValueError):
+        idle_i = DEFAULT_IDLE_STOPPED_SECONDS
+    idle_i = max(MIN_IDLE_STOPPED_SECONDS, min(MAX_IDLE_STOPPED_SECONDS, idle_i))
+
     shifts_raw = raw.get("shifts")
     if isinstance(shifts_raw, list) and shifts_raw:
         try:
@@ -83,6 +114,7 @@ def production_public_view(raw: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "tv_rotate_seconds": rotate_i,
+        "idle_stopped_seconds": idle_i,
         "shift_count": len(shifts),
         "shifts": shifts,
     }
@@ -103,6 +135,14 @@ def patch_production_settings(db: Session, patch: dict[str, Any]) -> dict[str, A
                 f"TV geçiş süresi {MIN_TV_ROTATE_SECONDS}–{MAX_TV_ROTATE_SECONDS} saniye arasında olmalı"
             )
         updated["tv_rotate_seconds"] = rotate
+
+    if "idle_stopped_seconds" in patch and patch["idle_stopped_seconds"] is not None:
+        idle = int(patch["idle_stopped_seconds"])
+        if idle < MIN_IDLE_STOPPED_SECONDS or idle > MAX_IDLE_STOPPED_SECONDS:
+            raise ValueError(
+                f"Durma suresi {MIN_IDLE_STOPPED_SECONDS}–{MAX_IDLE_STOPPED_SECONDS} saniye arasinda olmali"
+            )
+        updated["idle_stopped_seconds"] = idle
 
     if "shifts" in patch and patch["shifts"] is not None:
         updated["shifts"] = validate_shifts(patch["shifts"])

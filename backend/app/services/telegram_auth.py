@@ -14,6 +14,7 @@ class TelegramOperator:
     id: str
     name: str
     role: str  # admin, user
+    telegram_user_id: str = ""
     permissions: dict[str, bool] = field(default_factory=dict)
 
     def has(self, perm: str) -> bool:
@@ -26,6 +27,7 @@ def _to_operator(item: dict) -> TelegramOperator:
         id=item["id"],
         name=item.get("name") or item["id"],
         role=item.get("role") or "user",
+        telegram_user_id=str(item.get("telegram_user_id") or ""),
         permissions={k: bool(perms.get(k, False)) for k in PERMISSION_KEYS},
     )
 
@@ -37,9 +39,12 @@ def list_operators(db: Session) -> list[TelegramOperator]:
 
 def get_operator(db: Session, telegram_user_id: str) -> TelegramOperator | None:
     uid = str(telegram_user_id).strip()
+    if not uid:
+        return None
     for op in list_operators(db):
-        if op.id == uid:
-            return op
+        tg = (op.telegram_user_id or "").strip()
+        if tg == uid or op.id == uid:
+            return op if tg else None
     return None
 
 

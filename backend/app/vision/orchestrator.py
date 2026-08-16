@@ -56,6 +56,7 @@ class MachineRuntime:
     no_move_warned: bool = False
     perf: PerformanceMonitor = field(default_factory=PerformanceMonitor)
     last_cycle_s: float | None = None
+    last_motion_mono: float = 0.0
     last_found_mono: float = 0.0
     hold_pos_01: float | None = None
     hold_centroid_xy: tuple[float, float] | None = None
@@ -77,6 +78,7 @@ class VisionOrchestrator(threading.Thread):
             "cameras": [],
             "cpu_proxy": 0.0,
         }
+        self._loop_ms_ema = 0.0
         self._reload_at = 0.0
         self._cameras_cache: list[Camera] = []
         self._machines_cache: list[Machine] = []
@@ -163,6 +165,15 @@ class VisionOrchestrator(threading.Thread):
             for mid in list(cache.keys()):
                 if mid not in enabled_ids:
                     del cache[mid]
+            for m in machines:
+                if not m.enabled:
+                    continue
+                if m.id not in cache:
+                    cache[m.id] = self._stub_machine_snap(m)
+                else:
+                    cache[m.id]["mold_name"] = (
+                        self._mold_names.get(m.current_mold_id) if m.current_mold_id else None
+                    )
             self._machine_snapshot_cache = cache
         finally:
             db.close()
@@ -170,8 +181,9 @@ class VisionOrchestrator(threading.Thread):
     def run(self) -> None:
         db_session.get_engine()
         while not self._stop.is_set():
+            t_iter = time.monotonic()
             try:
-                now = time.monotonic()
+                now = t_iter
                 if now >= self._reload_at or not self._machines_cache:
                     self._reload_at = now + 2.0
                     self._reload_config_from_db()
@@ -197,8 +209,29 @@ class VisionOrchestrator(threading.Thread):
                 logger.exception("vision loop failed: %s", e)
                 time.sleep(0.25)
 
+            self._loop_ms_ema = self._loop_ms_ema * 0.85 + (time.monotonic() - t_iter) * 1000.0 * 0.15
             self._publish_snapshot()
             time.sleep(0.02)
+
+    def _stub_machine_snap(self, m: Machine) -> dict[str, Any]:
+        rt = self.machine_rt.get(m.id)
+        mold_name = self._mold_names.get(m.current_mold_id) if m.current_mold_id else None
+        w = self.workers.get(m.camera_id)
+        return {
+            "id": m.id,
+            "name": m.name,
+            "camera_id": m.camera_id,
+            "state": "UNKNOWN",
+            "position_01": None,
+            "centroid": None,
+            "roi_bbox": None,
+            "cycle_time_last": rt.last_cycle_s if rt else None,
+            "mold_name": mold_name,
+            "confidence": 0.0,
+            "fps": float(w.fps) if w else 0.0,
+            "process_ms": float(rt.perf.process_ms_ema) if rt else 0.0,
+            "idle_s": None,
+        }
 
     def _sync_machine_config(self, m: Machine, rt: MachineRuntime) -> None:
         rt.sm.cfg = StateMachineConfig(
@@ -288,7 +321,16 @@ class VisionOrchestrator(threading.Thread):
             centroid_xy = None
 
         now_ms = time.monotonic() * 1000.0
+        prev_pos = rt.last_pos
         confirmed = rt.sm.step(pos, now_ms)
+        if confirmed.value == "MOVING":
+            rt.last_motion_mono = now_mono
+        elif (
+            pos is not None
+            and prev_pos is not None
+            and abs(pos - prev_pos) > 0.02
+        ):
+            rt.last_motion_mono = now_mono
         rt.last_pos = pos
         # #region agent log
         if m.id == 3 and confirmed.value != rt.dbg_last_confirmed:
@@ -312,6 +354,7 @@ class VisionOrchestrator(threading.Thread):
         cycle_s = rt.ct.on_confirmed(confirmed, track_pos)
         if cycle_s is not None and cycle_s > 0.05:
             rt.last_cycle_s = cycle_s
+            rt.last_motion_mono = now_mono
             rt.dbg_cycle_emit_count += 1
             # #region agent log
             if m.id == 3:
@@ -395,12 +438,29 @@ class VisionOrchestrator(threading.Thread):
             if 0 <= age_ms < 10_000:
                 status = "ok"
             cams.append({"id": cid, "status": status, "fps": w.fps})
+        now_mono = time.monotonic()
         with self._lock:
+            for m in self._machines_cache:
+                if m.enabled and m.id not in cache:
+                    cache[m.id] = self._stub_machine_snap(m)
             machines = sorted(cache.values(), key=lambda x: x["id"])
+            db_by_id = {m.id: m for m in self._machines_cache}
+            for row in machines:
+                dbm = db_by_id.get(int(row["id"]))
+                if dbm is not None:
+                    row["mold_name"] = (
+                        self._mold_names.get(dbm.current_mold_id) if dbm.current_mold_id else None
+                    )
+                rt = self.machine_rt.get(int(row["id"]))
+                if not rt or rt.last_motion_mono <= 0:
+                    row["idle_s"] = None
+                else:
+                    row["idle_s"] = round(now_mono - rt.last_motion_mono, 1)
             self.snapshot = {
                 "machines": machines,
                 "cameras": cams,
-                "cpu_proxy": sum(m.get("process_ms", 0) for m in machines) if machines else 0.0,
+                # Vision-loop wall time (always updates, even with no camera frames).
+                "cpu_proxy": round(self._loop_ms_ema, 1),
             }
 
 

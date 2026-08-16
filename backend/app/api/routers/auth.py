@@ -9,12 +9,19 @@ from app.config import settings
 from app.db.session import get_db
 from app.services import auth_service, audit_log
 from app.services.auth_service import CurrentUser
+from app.services.network_scope import direct_client_ip
 
 router = APIRouter()
 
 
 class LoginBody(BaseModel):
+    username: str = ""
     password: str
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str
+    new_password: str
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -28,13 +35,19 @@ def _set_session_cookie(response: Response, token: str) -> None:
     )
 
 
+@router.get("/login-mode")
+def login_mode(request: Request):
+    return auth_service.login_hint(direct_client_ip(request))
+
+
 @router.post("/login")
 def login(body: LoginBody, request: Request, response: Response, db: Session = Depends(get_db)):
     ip = client_ip(request)
+    scope_ip = direct_client_ip(request)
     if auth_service.is_locked_out(ip):
         raise HTTPException(status_code=429, detail="Cok fazla hatali deneme. 15 dakika sonra tekrar deneyin.")
 
-    result = auth_service.login(db, body.password)
+    result = auth_service.login(db, body.password, client_ip=scope_ip, username=body.username)
     if result is None:
         auth_service.register_failure(ip)
         raise HTTPException(status_code=401, detail="Sifre hatali")
@@ -74,6 +87,19 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
             telegram_user_id=user.telegram_user_id,
             ip=client_ip(request),
         )
+    return {"ok": True}
+
+
+@router.post("/change-password")
+def change_password(
+    body: ChangePasswordBody,
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        auth_service.change_own_password(db, user, body.current_password, body.new_password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"ok": True}
 
 

@@ -4,6 +4,7 @@ import { apiPost } from "../api/client";
 
 export function LoginPage() {
   const location = useLocation();
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -15,18 +16,17 @@ export function LoginPage() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!password) {
-      setError("Şifre girin");
+    if (!username.trim() || !password) {
+      setError("Kullanıcı adı ve şifre girin");
       return;
     }
     setBusy(true);
     setError("");
     try {
-      await apiPost("/api/auth/login", { password });
-      // Full reload so AuthProvider re-reads the freshly set session cookie.
+      await apiPost("/api/auth/login", { username: username.trim(), password });
       window.location.href = redirectTo;
     } catch (err) {
-      setError("Şifre hatalı veya yetkiniz yok");
+      setError("Kullanıcı adı veya şifre hatalı");
       setBusy(false);
     }
   }
@@ -39,8 +39,17 @@ export function LoginPage() {
       >
         <h1 className="text-lg font-semibold text-accent">Enjeksiyon İzleme — Giriş</h1>
         <p className="text-sm text-slate-400">
-          Telegram botundan aldığınız günlük şifreyi veya yönetici şifresini girin.
+          Kayıtlı adınız ve şifreniz (sabit veya Telegram günlük). Yönetici: kullanıcı adı{" "}
+          <code className="text-slate-300">super</code>.
         </p>
+        <input
+          type="text"
+          autoComplete="username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Kullanıcı adı"
+          className="px-3 py-2 rounded-md bg-slate-800 border border-slate-600 text-white"
+        />
         <input
           type="password"
           autoComplete="current-password"

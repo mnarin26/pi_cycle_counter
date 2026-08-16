@@ -80,6 +80,9 @@ class Mold(Base):
     avg_cycle_s: Mapped[float] = mapped_column(Float, default=0.0)
     target_cycle_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     daily_target_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    work_mode: Mapped[str] = mapped_column(String(16), default="auto")  # auto | manual
+    mount_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    removal_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tolerance_s: Mapped[float] = mapped_column(Float, default=0.35)
     stdev_limit_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     sample_count: Mapped[int] = mapped_column(Integer, default=0)

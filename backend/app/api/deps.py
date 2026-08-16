@@ -13,6 +13,7 @@ __all__ = [
     "require_panel_8000",
     "require_panel_8080",
     "require_super_or_admin",
+    "require_mold_assign",
     "client_ip",
 ]
 
@@ -49,3 +50,9 @@ def require_super_or_admin(user: CurrentUser = Depends(get_current_user)) -> Cur
     if user.is_super or (user.has("panel_8080") and user.has("bot_mold_create")):
         return user
     raise HTTPException(status_code=403, detail="Bu islem icin yonetici yetkisi gerekli")
+
+
+def require_mold_assign(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    if not (user.is_super or user.has("bot_mold_assign")):
+        raise HTTPException(status_code=403, detail="Kalip atama yetkiniz yok")
+    return user
