@@ -1,6 +1,6 @@
 # Injection Monitor — Kullanım Kılavuzu
 
-Bu belge, repodaki **gerçek kod** (`frontend`, `backend`, `admin_static`) esas alınarak yazılmıştır. Amaç: her sayfa, buton ve temel API’nin ne işe yaradığını netleştirmek.
+Repodaki **canlı `main` kodu** (`frontend`, `backend`, `admin_static`) esas alınır. Son büyük güncelleme: Eyl 2026 zigzag sayım + oturum/yetki.
 
 ---
 
@@ -11,10 +11,18 @@ Bu belge, repodaki **gerçek kod** (`frontend`, `backend`, `admin_static`) esas 
 | **İzleme paneli** | `8000` | `backend/app/main.py` + `frontend/dist` |
 | **Admin / kalibrasyon** | `8080` | `backend/admin_app.py` + `backend/admin_static/index.html` |
 
-- Vision (kamera okuma, reflektör tespiti, döngü sayımı) yalnızca **8000** sürecinde çalışır.
-- Admin paneli çoğu ayarı **8000 API** üzerinden okur/yazar; Pi saati, Wi‑Fi AP ve üretim sıfırlama gibi bazı işlemler **8080** üzerinden yapılır (CORS ve ayrı servis için).
+- Vision (kamera, çizgi profili, **zigzag** sayım) yalnız **8000** sürecinde çalışır.
+- Admin çoğu API’yi **8000’e proxy** eder; Pi saati, Wi‑Fi AP, bazı bakım uçları **8080** yerelde kalır.
+- **Oturum:** 8000/8080 API’leri cookie oturumu ister (süper şifre veya Telegram günlük şifre). **`/tv`** ve TV analytics uçları public kalabilir.
 
-Canlı veri: WebSocket `ws://<host>:8000/ws` — mesaj tipi `snapshot`, gövde `data.machines` / `data.cameras`.
+Canlı veri: WebSocket `ws://<host>:8000/ws` — `snapshot` → `data.machines` / `data.cameras`.
+
+### 1.1 Giriş / yetki
+
+- Login ekranı (8000 ve 8080): süper şifre veya Telegram’dan alınan **günlük şifre**.
+- Yetkiler: örn. `panel_8000`, admin işlemleri; süper kullanıcı hepsi.
+- Audit log: kim ne yaptı (8080 bakım / bot atamaları).
+- TV (`/tv`) fabrika duvarı için oturumsuz bırakılabilir.
 
 ---
 
@@ -200,10 +208,13 @@ Tek sayfa: `backend/admin_static/index.html`. API: çoğu istek `http://<host>:8
 | Sütun | Açıklama |
 |-------|----------|
 | ID / Ad / Kamera | Makine ve bağlı kamera |
-| Eşik | `fixed` → `prom≥{threshold_min}`; `adaptive` → canlı `threshold_active_min` |
-| Sinyal (peak/bg) | Canlı peak, background, Δprominence, segment uzunluğu |
+| **Durum** | Canlı `OPEN` / `CLOSED` / `MOVING` / `UNKNOWN` |
+| **Pos** | `position_01` (0..1) |
+| **Son cevrim** | Son tamamlanan tur süresi (sn) |
+| Eşik | `fixed` / `adaptive` prominence |
+| Sinyal (peak/bg) | peak, background, Δprominence, segment uzunluğu |
 
-WS + her 1 sn HTTP yedek: `GET /api/live/snapshot`.
+WS + HTTP yedek: `GET /api/live/snapshot`.
 
 ---
 
@@ -250,8 +261,9 @@ Döngü kayıtları Pi UTC saatini kullanır. Kamera OSD saati ayrı — **Kamer
 | Prominence / offset | Reflektör parlaklık eşiği |
 | Çizgi kalınlığı | 1D profil örnekleme bandı (px) |
 | Reflektör uzunluk min/max | Segment uzunluğu filtresi |
-| Open/Closed 1D | Eski kalibrasyon alanları (durum makinesi hareket yönüne göre OPEN/CLOSED atar) |
-| Debounce / Sabit onay / Görünmezlik | Hareket ve bekleme zamanlaması |
+| Open/Closed 1D | Eski alanlar; **canlı zigzag sayımı mutlak eşik kullanmaz** (UI uyumu) |
+| Debounce / Sabit onay | Eski dwell SM kalıntısı; zigzag sayımında asıl eşik **prominence / jump** |
+| min_prominence / jump (varsa) | Salınım yüksekliği / teleport kapısı (global varsayılanlar kodda) |
 | **Makine Parametre Kaydet** | `PATCH /api/machines/{id}` |
 | **Uzunluk Kalibrasyon Başlat** | `POST /api/calibration/machines/{id}/learn_reflector_length` — süre boyunca reflektörü çizgi üzerinde gezdirin |
 | **Sayım ve Kalıp Verisini Sıfırla** | `POST /api/settings/maintenance/reset-production-data` (8080) — tüm cycles, events, molds siler; makine/kamera ayarı kalır |
@@ -277,14 +289,17 @@ Görüntü kamerası değişince otomatik `PATCH` ile kaydedilir.
 
 ---
 
-## 4. Döngü sayımı nasıl çalışır? (kısa, kod tabanlı)
+## 4. Döngü sayımı nasıl çalışır? (canlı zigzag)
 
-1. **Vision** (`orchestrator.py`): RTSP kareden 1D çizgi profili → reflektör bulunursa `position_01`.
-2. **Durum makinesi** (`state_machine.py`): Hareket yönüne göre `OPEN` / `CLOSED` / `MOVING`; sabit kalma `stability_confirm_ms` (varsayılan ~500 ms).
-3. **Döngü sayacı** (`cycle_tracker.py`): Tam tur = örn. OPEN → CLOSED → OPEN (veya tersi); süre döner.
-4. **DB** (`mold_matcher.py`): Döngü kaydı + kalıp eşleştirme; `is_counted` false olabilir (`post_stop_pending`, `unknown_or_mold_change`, vb.).
+1. **Vision** (`orchestrator.py` + `line_pipeline.py`): RTSP → 1D çizgi profili → `position_01` (bulunursa).
+2. **Zigzag SM** (`state_machine.py`): peak=OPEN, trough=CLOSED; küçük titreme `min_prominence` ile yok; dik sıçrama `jump_abs` ile hold.
+3. **Döngü sayacı** (`cycle_tracker.py`): Onaylı uçlar **A → B → A** = 1 çevrim (yarım strok değil).
+4. **DB** (`mold_matcher.py`): Kayıt + kalıp; `is_counted` false olabilir (`post_stop_pending`, vb.).
 
-**Panelde görünen sayılar** çoğunlukla `is_counted = true` filtreli kayıtlardır.
+Canlı varsayılanlar: `jump_abs≈0.30`, `min_prominence≈0.12`.  
+**Panel sayıları** çoğunlukla `is_counted = true` filtreli.
+
+Ayrıntı: `SON_DENEME_NOTU.md`.
 
 ---
 
@@ -345,70 +360,24 @@ Görüntü kamerası değişince otomatik `PATCH` ile kaydedilir.
 
 ---
 
-## 9. Gelecek özellikler ve planlanan güncellemeler
+## 9. Yol haritası (kısa)
 
-> **Bu bölüm yol haritasıdır.** Henüz kodda yoktur; öncelik ve tarih kesin değildir. Hayal gücü + sahadaki geri bildirimlerle birlikte düşünülmüştür.
+### Tamamlanan (artık bölüm 2–8’de)
 
-### 9.1 Yakın vade (teknik borç ve net iyileştirmeler)
+- Web oturum + yetki, Telegram QR bot, audit log, TV verimlilik/vardiya alanları
+- Admin tabloda Durum / Pos / Son cevrim
+- Zigzag peak/trough sayım + jump hold
 
-| Özellik | Amaç |
-|---------|------|
-| Pano kartı etiket düzeltmesi | “Döngü” yerine **Son tur süresi** + ayrı satırda **Bugünkü adet** — karışıklığı bitirmek |
-| TV kalıp metrikleri fallback | Aktif kalıp yokken bugünkü toplam döngü / son bilinen kalıp özeti göstermek |
-| `Settings.tsx` entegrasyonu veya kaldırma | 8000’de basit ayar sayfası ya da dosyayı temizlemek; admin ile çift ekranı azaltmak |
-| `POST /api/debug/fake_cycle` kapatma | Üretimde env ile devre dışı; yalnız geliştirme modunda |
-| Sentetik veri temizlik aracı | `tools/cleanup_synthetic_cycles.py` repoda; makine bazlı “gelecek tarihli / sıfır süreli” kayıt silme (admin butonu opsiyonel) |
-| Admin canlı tablo genişletmesi | Son döngü süresi, bugünkü sayım, `state`, kalıp adı — tek bakışta teşhis |
-| Otomatik eşik önerisi | `prominence < threshold` uyarısı + “eşiği X’e indir” tek tık önerisi |
+### Açık / isteğe bağlı
 
-### 9.2 Orta vade (operasyon ve raporlama)
-
-| Özellik | Amaç |
-|---------|------|
-| Vardiya / plan tanımı | Sabah–öğle–gece vardiyası; TV ve raporlarda vardiya bazlı döngü |
-| E-posta / Telegram / Teams bildirimi | `no_movement`, `abnormal_cycle`, kamera kopması, günlük özet |
-| PDF / Excel rapor | Günlük fabrika özeti; müdür masasına otomatik gönderim |
-| Çoklu fabrika / site | Tek panele birden fazla Pi veya merkezi sunucu; site seçici |
-| Kullanıcı rolleri | Operatör (salt okunur), kalıp sorumlusu, admin; basit PIN veya LDAP |
-| Kalıp QR / barkod | Kalıp değişiminde telefonla okut → `mold_id` anında bağlama |
-| Döngü anında kısa video klibi | Şüpheli döngüde RTSP’ten 5 sn kesit; olay kaydına link |
-| Gelişmiş replay UI | Makine detayda “bu döngüyü videoda göster” zaman çizelgesi |
-| OEE benzeri KPI | Kullanılabilirlik × performans × kalite (basitleştirilmiş, döngü süresi sapmasına dayalı) |
-| Hedef çevrim süresi | Kalıba hedef süre; TV’de yeşil/sarı/kırmızı bant |
-| Toplu makine kalibrasyonu | Aynı kamera modeli için parametre şablonu kopyala |
-
-### 9.3 Uzun vade (vizyon)
-
-| Özellik | Amaç |
-|---------|------|
-| Edge AI kalıp tanıma | Reflektör + isteğe bağlı görüntü ile kalıp sınıflandırma; manuel adlandırmayı azaltmak |
-| Tahminsel bakım | Döngü süresi trendi ve titreşim benzeri sinyallerle “servis öner” |
-| ERP / MES entegrasyonu | SAP, Logo, Netsis vb. için iş emri ↔ kalıp ↔ üretim adedi senkronu |
-| Mobil PWA | Telefonda pano, push bildirim, vardiya özeti |
-| Sesli TV modu | Kritik olayda Türkçe sesli uyarı (büyük ekran atölye) |
-| Çok dilli arayüz | TR / EN / DE fabrika personeli |
-| Bulut yedekleme | SQLite → günlük şifreli yedek S3 / Nextcloud; felaket kurtarma sihirbazı |
-| Karanlık / yüksek kontrast TV teması | Gece vardiyası için göz yormayan tam ekran |
-| Federasyon paneli | 10+ makine, 3+ hat; harita ve ısı haritası (duruş yoğunluğu) |
-| API anahtarı ve webhook | Dış sistemlerin döngü bitişinde anlık POST alması |
-| Simülasyon modu | Eğitim için sanal makine (mevcut seed script’lerin güvenli UI sürümü) |
-| Donanım genişlemesi | GPIO ile pres sinyali, ikinci reflektör, aydınlatma kontrolü |
-
-### 9.4 Kalite ve güvenlik
-
-| Özellik | Amaç |
-|---------|------|
-| Denetim günlüğü (audit log) | Kim hangi kalıbı sildi, eşiği değiştirdi, veriyi sıfırladı |
-| Yedekleme öncesi onay | “Sayım sıfırla” için iki adımlı doğrulama + otomatik DB dump |
-| TLS / ters vekil | Fabrika ağında HTTPS; Let’s Encrypt veya kurumsal sertifika |
-| Veri saklama politikası UI | Admin’den “90 günden eski döngüleri arşivle/sil” (arka planda `data_retention` ile uyumlu) |
-
-### 9.5 Nasıl takip edilir?
-
-- Bu liste **öncelik sırası değildir**; ihtiyaç ve sahadaki aciliyet belirler.
-- Bir madde hayata geçince **Bölüm 2–8** güncellenir; buradan ilgili satır silinir veya “✓ Tamamlandı” notu düşülür.
-- Öneri / acil ihtiyaç: GitHub Issues veya fabrika sorumlusu ile netleştirilir.
+| Madde | Not |
+|-------|-----|
+| 8000+8080 tek process (yetkiye göre) | RAM kazanır; zorunlu değil |
+| systemd enable (rsp3b) | Boot sonrası otomatik kalkış |
+| AF-8 zayıf kontrast | Donanım/reflektör; yazılım sınırlı |
+| Seed → otomatik DB import | Şimdilik JSON referans |
+| Pano “Döngü” etiketi | Hâlâ süre; adet ayrı netleştirilebilir |
 
 ---
 
-*Son güncelleme: repodaki `main` dalı koduna göre (admin SessionLocal düzeltmesi, TV/pano ayrımları, mold export `mold_id` zorunlu). Bölüm 9 yol haritasıdır — henüz uygulanmamış özellikler içerir.*
+*Son güncelleme: `main` = canlı rsp3b zigzag stack (Eyl 2026). Deploy: `deploy/README-DEPLOY.md`.*

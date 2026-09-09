@@ -1,16 +1,21 @@
 # Seed / canlı ayar exportu
 
-`pi_live_machines_cameras.json` — rsp3b canlı DB'den (çevrim geçmişi yok).
+`pi_live_machines_cameras.json` — **rsp3b** canlı SQLite’tan alınmış anlık görüntü (çevrim geçmişi **yok**).
 
-- RTSP içindeki kullanıcı/şifre `USER:PASS` olarak maskeli.
-- Telegram token maskeli.
-- Etkin makineler: AF-1..9, etkin kameralar: 1–2.
+## İçerik
 
-Yeni Pi'de:
+- Etkin kameralar: genelde **1–2** (`target_width` vb.)
+- Etkin makineler: **AF-1 … AF-9** (çizgi uçları, kalınlık, threshold alanları)
+- RTSP kullanıcı/şifre → `USER:PASS` maskeli
+- Telegram token → maskeli
+- DB’de pasif şablon kamera/makine satırları da olabilir; kurulurken yalnız etkin olanlara bak
 
-1. Kod + venv + frontend build (veya hazır `frontend/dist`)
-2. İlk çalıştırmada boş `injection.db` oluşur
-3. 8080'den kameraları / çizgileri yeniden kalibre et **veya** bu JSON'u referans alıp elle/import script ile yükle
-4. `.env`, Telegram token, Wi‑Fi AP, Tailscale fabrika ağına göre ayrı kurulur
+## Yeni Pi’de kullanım
 
-Bu dosya tek başına "tak-çalıştır fabrika kopyası" değildir; kalibrasyon ve sırlar Pi'ye özeldir.
+1. Repoyu kur, venv + frontend build, 8000/8080 başlat.
+2. Boş `injection.db` oluşur.
+3. **8080**’den kameraları ekle (gerçek RTSP + şifre).
+4. Çizgi/kalınlık için bu JSON’u **referans** al; gerekirse aynı normalize `axis_p0/p1` değerlerini panelden gir.
+5. Otomatik import scripti zorunlu değildir — amaç dokümantasyon + hızlı kopyalama.
+
+Bu dosya **tak-çalıştır fabrika klonu değildir**. Aynı fiziksel kameralar/aynı ağ olmadan sayım tutmayabilir.
