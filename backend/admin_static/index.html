@@ -143,7 +143,17 @@
       <div class="card">
         <h3>Makineler</h3>
         <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Canli durum</h4>
-        <p class="muted">Canli sinyal ve esik durumu.</p>
+        <p class="muted">Canli sinyal ve esik durumu. Dongu sayimi degil; sadece «reflektor cizgide gorunuyor mu?» teshisi.</p>
+        <div class="muted" style="margin:0 0 10px;padding:8px 10px;border:1px solid #334155;border-radius:8px;background:#0f172a;line-height:1.45;">
+          <b>Tespit esigi</b> (prom≥…): reflektör icin gereken minimum Δ. Canli <b>Δ</b> bu esikten <b>buyuk veya esit</b> olmali;
+          yani esik, olculen Δ'dan <b>kucuk</b> olmali — yoksa reflektör «bulunamadi» kalir.<br>
+          <b>Offset</b> (off ±…): tespit esigine eklenir/cikarilir. Aktif esik ≈ <code>prominens esigi + offset</code>.
+          Negatif offset = daha hassas bulma; pozitif = daha sert.<br>
+          <b>peak/bg</b>: takip cizgisi + kalinlik bandinda olculur.
+          <code>peak</code> = en parlak nokta (0–255), <code>bg</code> = arka plan parlakligi.
+          <code>Δ = peak − bg</code>. Reflektör parlakligi / zemin farki degistikce (isik, kir, aci) peak/bg degisir;
+          esikle karsilastirilip nokta kabul edilir. <code>len</code> = parlak segment uzunlugu.
+        </div>
         <div id="machineLiveWs" class="muted" style="margin-bottom:8px;">WS baglaniyor…</div>
         <div style="overflow-x:auto;">
           <table class="live">
@@ -621,8 +631,9 @@
               <option value="">Tumu</option>
             </select>
           </div>
-          <div class="col-3" style="padding-top:22px;">
+          <div class="col-3" style="padding-top:22px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
             <button id="diagFaultRefreshBtn" class="btn-gray" style="width:auto;padding:8px 14px;">Yenile</button>
+            <button id="diagFaultDeleteAllBtn" class="btn-orange" style="width:auto;padding:8px 14px;" title="Listedeki filtreye uyan tum alarmlari siler">Tumunu sil</button>
           </div>
         </div>
         <div id="diagFaultMsg" class="muted" style="margin-top:6px;"></div>
@@ -720,6 +731,8 @@
       }
       // #endregion
       let roiPoly = null; // [{x,y},...4]
+      // true = yellow line follows local ROI poly (after drag/redraw); false = show saved axis_p0/p1
+      let axisPreferPoly = false;
       let interaction = { mode: null, start: null, basePoly: null, cornerIdx: -1, rotateBaseAngle: 0, rotateStart: 0 };
       let viewZoom = 1.0;
 
@@ -1509,10 +1522,13 @@
       }
 
       function axisForDraw(poly){
-        if(!interaction.mode){
-          const saved = axisFromSavedMachine();
-          if(saved) return saved;
+        // While editing, or after edit until Kaydet, keep the poly-derived line.
+        // Otherwise show the last saved axis (what the detector actually uses).
+        if(axisPreferPoly || interaction.mode){
+          return axisFromPoly(poly);
         }
+        const saved = axisFromSavedMachine();
+        if(saved) return saved;
         return axisFromPoly(poly);
       }
 
@@ -1826,6 +1842,7 @@
       function applyMachineRoiToOverlay(){
         if(overlay.width <= 0 || overlay.height <= 0) return;
         const m = machineById(machineSelect.value);
+        axisPreferPoly = false;
         if(!m){ roiPoly = null; return; }
         try{
           const roi = JSON.parse(m.roi_polygon || '[]');
@@ -1868,11 +1885,21 @@
       async function refreshSnapshot(){
         const camId = machineSnapshotCameraId();
         const c = camById(camId); if(!c){ setMsg('roiMsg','Goruntu kamerasi secilmedi','warn'); return; }
+        const keepDirtyPoly = axisPreferPoly && roiPoly && roiPoly.length === 4
+          ? clonePoly(roiPoly)
+          : null;
         snap.src = `${location.origin}/api/cameras/${c.id}/snapshot.jpg?t=${Date.now()}`;
         await new Promise(res=>{ snap.onload=res; snap.onerror=res; });
         overlay.width = snap.clientWidth;
         overlay.height = snap.clientHeight;
         applyMachineRoiToOverlay();
+        if(keepDirtyPoly){
+          // Overlay boyutu degismisse dirty poly'yi yeni boyuta olceklemek gerekmez:
+          // applyMachineRoi once genisligi set eder; keepDirtyPoly eski px'de kaldi.
+          // Boyut ayni kalir (clientWidth); yine de tercih edilen dirty poly'yi geri koy.
+          roiPoly = keepDirtyPoly;
+          axisPreferPoly = true;
+        }
         drawRoi();
       }
 
@@ -1899,6 +1926,7 @@
         if(roiPoly){
           if(hitRotateHandle(pt)){
             interaction.mode = 'rotate';
+            axisPreferPoly = true;
             const c = polyCenter(roiPoly);
             interaction.rotateBaseAngle = angleOfPoly(roiPoly);
             interaction.rotateStart = Math.atan2(pt.y-c.y, pt.x-c.x) * 180 / Math.PI;
@@ -1907,15 +1935,18 @@
           const ci = nearestCornerIdx(pt);
           if(ci >= 0){
             interaction.mode = 'corner';
+            axisPreferPoly = true;
             interaction.cornerIdx = ci;
             return;
           }
           if(pointInPoly(pt, roiPoly)){
             interaction.mode = 'drag';
+            axisPreferPoly = true;
             return;
           }
         }
         interaction.mode = 'draw';
+        axisPreferPoly = true;
         roiPoly = newRectPoly(pt, pt);
         drawRoi();
       });
@@ -1990,7 +2021,10 @@
 
       window.addEventListener('mouseup', ()=>{ interaction.mode = null; interaction.start = null; interaction.basePoly = null; interaction.cornerIdx = -1; });
       window.addEventListener('mouseup', drawRoi);
-      q('roiAngle').addEventListener('input', ()=>{ setAngleAbsolute(Number(q('roiAngle').value || 0)); });
+      q('roiAngle').addEventListener('input', ()=>{
+        axisPreferPoly = true;
+        setAngleAbsolute(Number(q('roiAngle').value || 0));
+      });
       q('zoomOutBtn').addEventListener('click', ()=>{ viewZoom = Math.max(0.5, viewZoom - 0.1); applyZoom(); });
       q('zoomInBtn').addEventListener('click', ()=>{ viewZoom = Math.min(4.0, viewZoom + 0.1); applyZoom(); });
       q('zoomResetBtn').addEventListener('click', ()=>{ viewZoom = 1.0; applyZoom(); });
@@ -2511,15 +2545,69 @@
             <td><code>${escapeHtml(a.code || '')}</code></td>
             <td>${escapeHtml(a.title_tr || a.name || '')}</td>
             <td>${st}</td>
-            <td><button type="button" class="btn-gray diag-alarm-detail-btn" data-alarm-id="${a.id}" style="width:auto;padding:4px 10px;">Detay</button></td>
+            <td style="white-space:nowrap;">
+              <button type="button" class="btn-gray diag-alarm-detail-btn" data-alarm-id="${a.id}" style="width:auto;padding:4px 10px;">Detay</button>
+              <button type="button" class="btn-orange diag-alarm-del-btn" data-alarm-id="${a.id}" style="width:auto;padding:4px 10px;margin-left:4px;">Sil</button>
+            </td>
           </tr>`;
         }).join('');
         body.querySelectorAll('.diag-alarm-detail-btn').forEach(btn => {
           btn.onclick = () => openDiagAlarmDetail(Number(btn.getAttribute('data-alarm-id')));
         });
+        body.querySelectorAll('.diag-alarm-del-btn').forEach(btn => {
+          btn.onclick = () => deleteDiagAlarm(Number(btn.getAttribute('data-alarm-id')));
+        });
         setMsg('diagFaultMsg', `${alarms.length} alarm`, 'good');
       }
+
+      async function deleteDiagAlarm(alarmId){
+        if(!confirm(`Alarm #${alarmId} silinsin mi?`)) return;
+        try{
+          await jdeleteLocal(`/api/diagnosis/alarms/${alarmId}`);
+          const box = q('diagAlarmDetail');
+          if(box && box.style.display !== 'none'){
+            const title = q('diagDetailTitle')?.textContent || '';
+            if(title.includes(`#${alarmId}`) || title.startsWith('Alarm #'+alarmId)){
+              box.style.display = 'none';
+            }
+          }
+          setMsg('diagFaultMsg', `Alarm #${alarmId} silindi`, 'good');
+          await refreshDiagnosisPanel();
+        }catch(e){
+          setMsg('diagFaultMsg', String(e), 'bad');
+        }
+      }
+
+      async function deleteDiagAlarmsFiltered(){
+        const mid = q('diagFaultMachine')?.value || '';
+        const code = q('diagFaultCode')?.value || '';
+        const status = q('diagFaultStatus')?.value || '';
+        const scope = [
+          mid ? `makine #${mid}` : null,
+          code ? `kod ${code}` : null,
+          status === 'active' ? 'aktif' : (status === 'past' ? 'gecmis' : null),
+        ].filter(Boolean).join(', ') || 'TUM alarmlar';
+        if(!confirm(`${scope} silinsin mi? Bu islem geri alinmaz.`)) return;
+        try{
+          let url = `/api/diagnosis/alarms`;
+          const qs = [];
+          if(mid) qs.push(`machine_id=${encodeURIComponent(mid)}`);
+          if(code) qs.push(`code=${encodeURIComponent(code)}`);
+          if(status) qs.push(`status=${encodeURIComponent(status)}`);
+          if(qs.length) url += '?' + qs.join('&');
+          const r = await jdeleteLocal(url);
+          const box = q('diagAlarmDetail');
+          if(box) box.style.display = 'none';
+          setMsg('diagFaultMsg', `${r.deleted || 0} alarm silindi`, 'good');
+          await refreshDiagnosisPanel();
+        }catch(e){
+          setMsg('diagFaultMsg', String(e), 'bad');
+        }
+      }
       q('diagFaultRefreshBtn').onclick = ()=> refreshDiagnosisPanel().catch(e=>setMsg('diagFaultMsg', String(e), 'bad'));
+      if(q('diagFaultDeleteAllBtn')){
+        q('diagFaultDeleteAllBtn').onclick = ()=> deleteDiagAlarmsFiltered().catch(e=>setMsg('diagFaultMsg', String(e), 'bad'));
+      }
       if(q('diagDetailCloseBtn')){
         q('diagDetailCloseBtn').onclick = ()=>{
           const box = q('diagAlarmDetail');
@@ -2545,7 +2633,7 @@
           setMsg('machineMsg', String(e), 'bad');
         }
       };
-      q('clearRoiBtn').onclick = ()=>{ roiPoly = null; drawRoi(); };
+      q('clearRoiBtn').onclick = ()=>{ roiPoly = null; axisPreferPoly = false; drawRoi(); };
       q('swapAxisBtn').onclick = async ()=>{
         try{
           const id = Number(machineSelect.value);
@@ -2569,6 +2657,7 @@
           const updated = await jpatch(`/api/machines/${id}`, payload);
           const idx = machines.findIndex(x=>x.id===id);
           if(idx >= 0) machines[idx] = updated;
+          axisPreferPoly = false;
           drawRoi();
           updateProminenceHint();
           setMsg('roiMsg','Cizgi yonu cevrildi (KAPALI/ACIK uc yer degisti)','good');
@@ -2589,7 +2678,21 @@
           const p1 = axis.b;
           const n0 = [clamp(p0.x/overlay.width,0,1), clamp(p0.y/overlay.height,0,1)];
           const n1 = [clamp(p1.x/overlay.width,0,1), clamp(p1.y/overlay.height,0,1)];
-          await jpatch(`/api/machines/${id}`, { axis_p0: JSON.stringify(n0), axis_p1: JSON.stringify(n1) });
+          const updated = await jpatch(`/api/machines/${id}`, {
+            axis_p0: JSON.stringify(n0),
+            axis_p1: JSON.stringify(n1),
+          });
+          const idx = machines.findIndex(x=>x.id===id);
+          if(idx >= 0){
+            machines[idx] = updated;
+            // ROI endpoint may not be in patch response — keep local poly as source of truth
+            if(roi) machines[idx].roi_polygon = JSON.stringify(roi);
+            machines[idx].axis_p0 = JSON.stringify(n0);
+            machines[idx].axis_p1 = JSON.stringify(n1);
+          }
+          axisPreferPoly = false;
+          drawRoi();
+          updateProminenceHint();
           setMsg('roiMsg','Takip cizgisi kaydedildi','good');
         }catch(e){ setMsg('roiMsg',String(e),'bad'); }
       };

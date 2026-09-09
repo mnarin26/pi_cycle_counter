@@ -171,6 +171,17 @@ def note_active(
                     _reload_active_cache_locked(conn)
 
                 alarm_id = _active_alarm_id.get(key)
+                if alarm_id is not None:
+                    # Admin may have deleted the row from another process.
+                    alive = conn.execute(
+                        "SELECT id FROM fault_alarms WHERE id=? AND resolved_at IS NULL",
+                        (int(alarm_id),),
+                    ).fetchone()
+                    if not alive:
+                        _active_alarm_id.pop(key, None)
+                        _last_sample_mono.pop(key, None)
+                        alarm_id = None
+
                 if alarm_id is None:
                     created = _utc_now_iso()
                     cur = conn.execute(
@@ -395,6 +406,89 @@ def get_alarm(alarm_id: int) -> dict[str, Any] | None:
         "samples": samples,
         "suggestions": suggestions,
     }
+
+
+def delete_alarm(alarm_id: int) -> bool:
+    """Delete one alarm + its samples. Clears in-memory active cache if needed."""
+    aid = int(alarm_id)
+    try:
+        with _lock:
+            conn = _connect()
+            try:
+                _ensure_schema(conn)
+                row = conn.execute(
+                    "SELECT machine_id, code FROM fault_alarms WHERE id=?",
+                    (aid,),
+                ).fetchone()
+                if not row:
+                    return False
+                conn.execute(
+                    "DELETE FROM fault_alarm_samples WHERE alarm_id=?", (aid,)
+                )
+                conn.execute("DELETE FROM fault_alarms WHERE id=?", (aid,))
+                conn.commit()
+                key = (int(row[0]), str(row[1]))
+                if _active_alarm_id.get(key) == aid:
+                    _active_alarm_id.pop(key, None)
+                    _last_sample_mono.pop(key, None)
+                return True
+            finally:
+                conn.close()
+    except Exception:
+        logger.exception("fault_log.delete_alarm failed id=%s", alarm_id)
+        return False
+
+
+def delete_alarms(
+    *,
+    machine_id: int | None = None,
+    code: str | None = None,
+    status: str | None = None,
+) -> int:
+    """Delete alarms matching filters (same as list). Empty filters = all. Returns count."""
+    try:
+        with _lock:
+            conn = _connect()
+            try:
+                _ensure_schema(conn)
+                sql = "SELECT id, machine_id, code FROM fault_alarms WHERE 1=1"
+                args: list[Any] = []
+                if machine_id is not None:
+                    sql += " AND machine_id = ?"
+                    args.append(int(machine_id))
+                if code:
+                    sql += " AND code = ?"
+                    args.append(str(code))
+                st = (status or "").strip().lower()
+                if st == "active":
+                    sql += " AND resolved_at IS NULL"
+                elif st in ("past", "resolved", "passive"):
+                    sql += " AND resolved_at IS NOT NULL"
+                rows = conn.execute(sql, args).fetchall()
+                if not rows:
+                    return 0
+                ids = [int(r[0]) for r in rows]
+                placeholders = ",".join("?" * len(ids))
+                conn.execute(
+                    f"DELETE FROM fault_alarm_samples WHERE alarm_id IN ({placeholders})",
+                    ids,
+                )
+                conn.execute(
+                    f"DELETE FROM fault_alarms WHERE id IN ({placeholders})",
+                    ids,
+                )
+                conn.commit()
+                id_set = set(ids)
+                for key, aid in list(_active_alarm_id.items()):
+                    if aid in id_set:
+                        _active_alarm_id.pop(key, None)
+                        _last_sample_mono.pop(key, None)
+                return len(ids)
+            finally:
+                conn.close()
+    except Exception:
+        logger.exception("fault_log.delete_alarms failed")
+        return 0
 
 
 # --- Backward-compatible thin wrappers (old event API) ---

@@ -710,6 +710,25 @@ def diagnosis_alarm_detail_admin(alarm_id: int, user=Depends(require_super_or_ad
     return row
 
 
+@app.delete("/api/diagnosis/alarms/{alarm_id}")
+def diagnosis_alarm_delete_admin(alarm_id: int, user=Depends(require_super_or_admin)):
+    if not fault_log.delete_alarm(alarm_id):
+        raise HTTPException(404, detail="Alarm bulunamadı")
+    return {"ok": True, "deleted_id": alarm_id}
+
+
+@app.delete("/api/diagnosis/alarms")
+def diagnosis_alarms_delete_all_admin(
+    machine_id: int | None = None,
+    code: str | None = None,
+    status: str | None = None,
+    user=Depends(require_super_or_admin),
+):
+    """Delete alarms matching optional filters. No filters = delete all."""
+    n = fault_log.delete_alarms(machine_id=machine_id, code=code, status=status)
+    return {"ok": True, "deleted": n}
+
+
 @app.get("/api/diagnosis/events")
 def diagnosis_events_admin(
     machine_id: int | None = None,
