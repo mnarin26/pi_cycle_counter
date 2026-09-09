@@ -100,6 +100,15 @@ class RtspWorker(threading.Thread):
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         return gray, mono, age_ms
 
+    def latest_mono(self) -> float:
+        """Monotonic timestamp of the newest frame (0.0 when none yet).
+
+        Cheap (lock + float read): lets the process worker detect "new frame?"
+        without paying for a BGR→GRAY conversion.
+        """
+        with self._lock:
+            return float(self._latest_mono)
+
     def latest_age_ms(self) -> float:
         with self._lock:
             if self._latest_mono <= 0:

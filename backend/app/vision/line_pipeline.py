@@ -31,7 +31,9 @@ Detection is done in two stages:
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
+from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -49,9 +51,120 @@ class LineProbeResult:
     active_threshold: int  # threshold used this frame (for UI)
 
 
+@lru_cache(maxsize=256)
 def _parse_xy(s: str) -> tuple[float, float]:
+    """Parse a normalized "[x, y]" JSON string. Cached: the same axis strings are
+    re-sent every frame for every machine, so parsing them once is enough."""
     arr = json.loads(s)
     return float(arr[0]), float(arr[1])
+
+
+# ---------------------------------------------------------------------------
+# Probe geometry cache
+#
+# For a fixed (p0, p1, thickness, num_samples, frame size) the sampling grid
+# (linspace / perpendicular offsets / clip / float32 cast) is identical every
+# frame. We compute it once and keep the resulting `map_x`, `map_y` (for
+# cv2.remap) and `cx`, `cy` (sample centers, returned to the caller) in a small
+# LRU dict so the per-frame hot path is just remap + max-pool.
+#
+# Cached arrays are marked non-writeable and must never be mutated by callers.
+# ---------------------------------------------------------------------------
+_PROBE_GEOM_CACHE_MAX = 64
+_probe_geom_cache: dict = {}
+_probe_geom_lock = threading.Lock()
+
+
+def _probe_geometry_key(
+    p0_xy: tuple[float, float],
+    p1_xy: tuple[float, float],
+    thickness_px: int,
+    num_samples: int | None,
+    w: int,
+    h: int,
+) -> tuple:
+    # Round to 1e-4 px: sub-pixel jitter below that is irrelevant for sampling
+    # but would otherwise defeat the cache when coordinates come from float math.
+    return (
+        round(float(p0_xy[0]), 4),
+        round(float(p0_xy[1]), 4),
+        round(float(p1_xy[0]), 4),
+        round(float(p1_xy[1]), 4),
+        int(thickness_px),
+        int(num_samples) if num_samples else 0,
+        int(w),
+        int(h),
+    )
+
+
+def _build_probe_geometry(
+    p0_xy: tuple[float, float],
+    p1_xy: tuple[float, float],
+    thickness_px: int,
+    num_samples: int | None,
+    w: int,
+    h: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute (map_x, map_y, cx, cy) for a line probe. All float32, read-only."""
+    ax, ay = p0_xy
+    bx, by = p1_xy
+    dx, dy = bx - ax, by - ay
+    length = float(np.hypot(dx, dy))
+
+    n = int(num_samples) if num_samples else max(8, int(round(length)))
+    # unit direction
+    ux, uy = dx / length, dy / length
+    # perpendicular
+    vx, vy = -uy, ux
+
+    ts = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    cx = ax + ts * dx
+    cy = ay + ts * dy
+
+    half = max(0, int(thickness_px) // 2)
+    # Sample along perpendicular: indices -half..+half (inclusive)
+    offsets = np.arange(-half, half + 1, dtype=np.float32) if half > 0 else np.array([0.0], dtype=np.float32)
+
+    # Build sample grid: shape (len(offsets), n)
+    xs = cx[None, :] + offsets[:, None] * vx
+    ys = cy[None, :] + offsets[:, None] * vy
+
+    # Clamp to frame
+    xs_c = np.clip(xs, 0, w - 1)
+    ys_c = np.clip(ys, 0, h - 1)
+
+    # cv2.remap requires float32 maps and is the fastest bilinear sampler.
+    map_x = xs_c.astype(np.float32)
+    map_y = ys_c.astype(np.float32)
+    cx32 = cx.astype(np.float32)
+    cy32 = cy.astype(np.float32)
+    for arr in (map_x, map_y, cx32, cy32):
+        arr.flags.writeable = False
+    return map_x, map_y, cx32, cy32
+
+
+def _get_probe_geometry(
+    p0_xy: tuple[float, float],
+    p1_xy: tuple[float, float],
+    thickness_px: int,
+    num_samples: int | None,
+    w: int,
+    h: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    key = _probe_geometry_key(p0_xy, p1_xy, thickness_px, num_samples, w, h)
+    with _probe_geom_lock:
+        geom = _probe_geom_cache.pop(key, None)
+        if geom is not None:
+            # Re-insert to mark as most recently used (dict keeps insertion order).
+            _probe_geom_cache[key] = geom
+            return geom
+    geom = _build_probe_geometry(p0_xy, p1_xy, thickness_px, num_samples, w, h)
+    with _probe_geom_lock:
+        if key not in _probe_geom_cache:
+            while len(_probe_geom_cache) >= _PROBE_GEOM_CACHE_MAX:
+                _probe_geom_cache.pop(next(iter(_probe_geom_cache)))
+            _probe_geom_cache[key] = geom
+    return geom
 
 
 def sample_line_profile_gray(
@@ -80,35 +193,15 @@ def sample_line_profile_gray(
     if length < 2.0:
         return np.zeros(2, dtype=np.uint8), np.array([ax, bx], dtype=np.float32), np.array([ay, by], dtype=np.float32)
 
-    n = int(num_samples) if num_samples else max(8, int(round(length)))
-    # unit direction
-    ux, uy = dx / length, dy / length
-    # perpendicular
-    vx, vy = -uy, ux
+    # Geometry (sampling grid + sample centers) is identical every frame for a
+    # given line/thickness/frame size -> served from a small LRU cache.
+    map_x, map_y, cx, cy = _get_probe_geometry(p0_xy, p1_xy, thickness_px, num_samples, w, h)
 
-    ts = np.linspace(0.0, 1.0, n, dtype=np.float32)
-    cx = ax + ts * dx
-    cy = ay + ts * dy
-
-    half = max(0, int(thickness_px) // 2)
-    # Sample along perpendicular: indices -half..+half (inclusive)
-    offsets = np.arange(-half, half + 1, dtype=np.float32) if half > 0 else np.array([0.0], dtype=np.float32)
-
-    # Build sample grid: shape (len(offsets), n)
-    xs = cx[None, :] + offsets[:, None] * vx
-    ys = cy[None, :] + offsets[:, None] * vy
-
-    # Clamp to frame
-    xs_c = np.clip(xs, 0, w - 1)
-    ys_c = np.clip(ys, 0, h - 1)
-
-    # cv2.remap requires float32 maps and is the fastest bilinear sampler.
-    map_x = xs_c.astype(np.float32)
-    map_y = ys_c.astype(np.float32)
     sampled = cv2.remap(gray, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
     # sampled shape == (len(offsets), n); collapse perpendicular axis via max-pool.
     profile = sampled.max(axis=0).astype(np.uint8)
-    return profile, cx.astype(np.float32), cy.astype(np.float32)
+    # cx / cy are shared read-only cache entries (writeable=False); callers only read them.
+    return profile, cx, cy
 
 
 def sample_line_profile(

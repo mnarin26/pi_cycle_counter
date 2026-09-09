@@ -65,34 +65,54 @@ class MachineRuntime:
     dbg_cycle_emit_count: int = 0
     dbg_last_confirmed: str = "UNKNOWN"
     last_frame_mono: float = 0.0
+    # E001 bookkeeping: True while the reflector is lost so resolve() is only
+    # called once on the lost -> found transition (never on every found frame).
+    # Starts True so an alarm left open by a previous process run is closed on
+    # the first found frame after startup (one cheap resolve() per machine).
+    reflector_was_lost: bool = True
+
+# Idle poll when no new frame is available yet (camera ~7-10 FPS => 100-130 ms/frame).
+_IDLE_POLL_S = 0.012
+
 
 class CameraProcessWorker(threading.Thread):
-    """Per-camera process thread: 1x gray, then N line probes for that camera's machines."""
+    """Per-camera process thread: 1x gray, then N line probes for that camera's machines.
+
+    Frame-driven: a tick only does work when the RTSP worker has published a frame
+    newer than the last one processed. Idle ticks just check `latest_mono()` (lock +
+    float read) and sleep ~12 ms; no BGR->GRAY conversion happens for them.
+    `orch._sample_interval_ms` is a *minimum* spacing between processed frames.
+    """
 
     def __init__(self, orch: "VisionOrchestrator", camera_id: int):
         super().__init__(daemon=True, name=f"cam-proc-{camera_id}")
         self.orch = orch
         self.camera_id = int(camera_id)
         self._stop = threading.Event()
+        # Work per processed frame (gray + all probes for this camera), EMA ms.
+        # Only updated on ticks that actually processed a frame, so idle ticks
+        # never dilute the number. loop_ms_ema is kept as an alias for the
+        # supervisor / snapshot (cpu_proxy).
         self.loop_ms_ema = 0.0
+        self.gray_ms_ema = 0.0
+        self.probe_ms_ema = 0.0
+        self.total_ms_ema = 0.0
+        self.last_frame_age_ms = -1.0
+        # Frame mono of the last frame we processed and wall mono when we started it.
+        self._last_proc_frame_mono = 0.0
+        self._last_proc_start = 0.0
 
     def stop(self) -> None:
         self._stop.set()
 
     def run(self) -> None:
+        # No fixed pacing here: _tick() sleeps briefly itself when there is nothing to do.
         while not self._stop.is_set() and not self.orch._stop.is_set():
-            t0 = time.monotonic()
             try:
                 self._tick()
             except Exception:
                 logger.exception("camera process worker failed cam=%s", self.camera_id)
                 time.sleep(0.1)
-            elapsed = time.monotonic() - t0
-            self.loop_ms_ema = self.loop_ms_ema * 0.85 + elapsed * 1000.0 * 0.15
-            # Keep pace near grab FPS without spinning; floor 10ms.
-            sleep_s = max(0.01, 0.02 - elapsed)
-            if sleep_s > 0.001:
-                time.sleep(sleep_s)
 
     def _tick(self) -> None:
         orch = self.orch
@@ -108,10 +128,33 @@ class CameraProcessWorker(threading.Thread):
         if not machines:
             time.sleep(0.05)
             return
-        gray, frame_mono, age_ms = w.read_latest_gray()
-        if gray is None:
-            time.sleep(0.02)
+
+        # New frame? (cheap check, no conversion)
+        newest_mono = w.latest_mono()
+        if newest_mono <= 0.0 or newest_mono <= self._last_proc_frame_mono:
+            time.sleep(_IDLE_POLL_S)
             return
+
+        # Minimum spacing between processed frames (sample_interval_ms, default 100).
+        now = time.monotonic()
+        min_dt = max(0.0, float(getattr(orch, "_sample_interval_ms", 100) or 100) / 1000.0)
+        wait = (self._last_proc_start + min_dt) - now
+        if wait > 0.001:
+            time.sleep(min(wait, _IDLE_POLL_S))
+            return
+
+        t0 = now
+        gray, frame_mono, age_ms = w.read_latest_gray()
+        gray_ms = (time.monotonic() - t0) * 1000.0
+        if gray is None:
+            time.sleep(_IDLE_POLL_S)
+            return
+        self.gray_ms_ema = self.gray_ms_ema * 0.85 + gray_ms * 0.15
+        self.last_frame_age_ms = float(age_ms)
+        self._last_proc_frame_mono = float(frame_mono)
+        self._last_proc_start = t0
+
+        probe_ms = 0.0
         for m in machines:
             rt = orch.machine_rt.get(m.id)
             if rt is None:
@@ -120,8 +163,16 @@ class CameraProcessWorker(threading.Thread):
                 continue
             t_m = time.monotonic()
             orch._process_machine_gray(m, gray, w, frame_mono=frame_mono, frame_age_ms=age_ms)
+            dt = (time.monotonic() - t_m) * 1000.0
+            probe_ms += dt
             if m.id in orch.machine_rt:
-                orch.machine_rt[m.id].perf.tick_process(time.monotonic() - t_m)
+                orch.machine_rt[m.id].perf.tick_process(dt / 1000.0)
+        self.probe_ms_ema = self.probe_ms_ema * 0.85 + probe_ms * 0.15
+
+        # Work per frame: only measured on ticks that processed a frame.
+        total_ms = (time.monotonic() - t0) * 1000.0
+        self.total_ms_ema = self.total_ms_ema * 0.85 + total_ms * 0.15
+        self.loop_ms_ema = self.total_ms_ema
 
 
 class VisionOrchestrator(threading.Thread):
@@ -149,6 +200,7 @@ class VisionOrchestrator(threading.Thread):
             "cpu_proxy": 0.0,
         }
         self._loop_ms_ema = 0.0
+        self._sample_interval_ms = 100
         self._reload_at = 0.0
         self._cameras_cache: list[Camera] = []
         self._machines_cache: list[Machine] = []
@@ -297,6 +349,13 @@ class VisionOrchestrator(threading.Thread):
                         self._mold_names.get(m.current_mold_id) if m.current_mold_id else None
                     )
             self._machine_snapshot_cache = cache
+            try:
+                from app.services.vision_settings import get_vision_settings
+
+                vs = get_vision_settings(db)
+                self._sample_interval_ms = int(vs.get("sample_interval_ms") or 100)
+            except Exception:
+                logger.exception("vision settings reload failed")
         finally:
             db.close()
 
@@ -309,7 +368,8 @@ class VisionOrchestrator(threading.Thread):
                 if now >= self._reload_at or not self._machines_cache:
                     self._reload_at = now + 5.0
                     self._reload_config_from_db()
-                # cpu_proxy = max per-camera process-worker loop EMA (parallel paths).
+                # cpu_proxy = max per-camera work-per-frame EMA (parallel paths);
+                # workers only update loop_ms_ema on ticks that processed a frame.
                 proc_emas = [pw.loop_ms_ema for pw in self.process_workers.values() if pw.is_alive()]
                 if proc_emas:
                     self._loop_ms_ema = self._loop_ms_ema * 0.7 + max(proc_emas) * 0.3
@@ -444,8 +504,11 @@ class VisionOrchestrator(threading.Thread):
         # E001: true reflector loss (not occlusion hold, not "UNKNOWN with pos").
         # Resolve is code-specific: E001 closes as soon as reflector is found again.
         # Other fault codes will use their own resolve conditions later.
+        # Transition-only: note_active() is memory-throttled (60 s) so it is cheap
+        # per frame; resolve() hits SQLite, so call it once on lost -> found only.
         reflector_lost = bool(not effective_found and not occlusion_hold)
         if reflector_lost:
+            rt.reflector_was_lost = True
             fault_log.note_active(
                 machine_id=m.id,
                 machine_name=m.name,
@@ -464,7 +527,8 @@ class VisionOrchestrator(threading.Thread):
                     "line_thickness": int(m.line_thickness or 7),
                 },
             )
-        elif effective_found:
+        elif effective_found and rt.reflector_was_lost:
+            rt.reflector_was_lost = False
             fault_log.resolve(machine_id=m.id, code="E001")
 
         now_ms = time.monotonic() * 1000.0
@@ -650,13 +714,37 @@ class VisionOrchestrator(threading.Thread):
 
     def _publish_snapshot(self) -> None:
         cache = getattr(self, "_machine_snapshot_cache", {})
+        interval = int(getattr(self, "_sample_interval_ms", 100) or 100)
         cams = []
         for cid, w in self.workers.items():
             age_ms = w.latest_age_ms()
             status = w.status
             if 0 <= age_ms < 10_000:
                 status = "ok"
-            cams.append({"id": cid, "status": status, "fps": w.fps})
+            pw = self.process_workers.get(cid)
+            gray_ms = float(pw.gray_ms_ema) if pw else 0.0
+            probe_ms = float(pw.probe_ms_ema) if pw else 0.0
+            # total_ms = work per processed frame (gray + all probes); idle ticks excluded.
+            total_ms = float(pw.total_ms_ema) if pw else 0.0
+            # keeping_up: per-frame work fits inside one camera frame period.
+            # Fall back to the sample interval while fps is still unknown (0).
+            fps = float(w.fps)
+            frame_period_ms = (1000.0 / max(fps, 1.0)) if fps > 0 else float(interval)
+            keeping = bool(total_ms > 0 and total_ms <= frame_period_ms)
+            cams.append(
+                {
+                    "id": cid,
+                    "status": status,
+                    "fps": w.fps,
+                    "frame_age_ms": round(age_ms, 1) if age_ms >= 0 else None,
+                    "stale": bool(age_ms > 2000) if age_ms >= 0 else True,
+                    "gray_ms": round(gray_ms, 2),
+                    "probe_ms": round(probe_ms, 2),
+                    "total_ms": round(total_ms, 2),
+                    "sample_interval_ms": interval,
+                    "keeping_up": keeping,
+                }
+            )
         now_mono = time.monotonic()
         with self._lock:
             for m in self._machines_cache:
@@ -676,12 +764,18 @@ class VisionOrchestrator(threading.Thread):
                     row["idle_s"] = None
                 else:
                     row["idle_s"] = round(now_mono - rt.last_motion_mono, 1)
+            loop_ms = round(self._loop_ms_ema, 1)
             self.snapshot = {
                 "machines": machines,
                 "cameras": cams,
-                # Max per-camera process-worker loop time (parallel Cam1/Cam2).
-                "cpu_proxy": round(self._loop_ms_ema, 1),
+                # Max per-camera work-per-frame time (parallel Cam1/Cam2); idle ticks excluded.
+                "cpu_proxy": loop_ms,
                 "stage_ms": {k: round(v, 2) for k, v in self._stage_ms.items()},
+                "vision": {
+                    "loop_ms": loop_ms,
+                    "sample_interval_ms": interval,
+                    "stage_ms": {k: round(v, 2) for k, v in self._stage_ms.items()},
+                },
             }
 
 

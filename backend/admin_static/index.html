@@ -1253,7 +1253,10 @@
         q('liveViewBar').className = 'live-view-bar' + (stale || status === 'error' || status === 'disconnected' || keeping === false ? ' bad' : '');
         const perfEl = q('visionPerfBar');
         if(perfEl){
-          const loopMs = liveSnapshot.vision && liveSnapshot.vision.loop_ms != null ? Number(liveSnapshot.vision.loop_ms).toFixed(0) : '—';
+          const loopRaw = (liveSnapshot.vision && liveSnapshot.vision.loop_ms != null)
+            ? Number(liveSnapshot.vision.loop_ms)
+            : (liveSnapshot.cpu_proxy != null ? Number(liveSnapshot.cpu_proxy) : null);
+          const loopMs = loopRaw != null && Number.isFinite(loopRaw) ? loopRaw.toFixed(0) : '—';
           const parts = [];
           if(readMs != null) parts.push(`okuma ${readMs.toFixed(1)}ms`);
           if(grayMs != null) parts.push(`gri ${grayMs.toFixed(1)}ms`);
