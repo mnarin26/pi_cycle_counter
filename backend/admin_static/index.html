@@ -151,8 +151,8 @@
                 <th>Durum</th>
                 <th>Pos</th>
                 <th>Son cevrim</th>
-                <th>Esik</th>
-                <th>Sinyal (peak/bg)</th>
+                <th title="Reflektoru bulma esigi (peak-bg). Dongu sayimi degil; sadece cizgide parlak nokta aranirken.">Tespit esigi</th>
+                <th title="peak/bg = cizgi uzerinde en parlak nokta / arka plan (0-255). Δ = fark. len = parlak segment uzunlugu. Sayim zigzag pos ile yapilir; bu sutun 'reflektor gorunuyor mu?' teshisidir.">Tespit sinyali (peak/bg)</th>
               </tr>
             </thead>
             <tbody id="machineLiveBody">
@@ -217,7 +217,7 @@
             <input id="thMax" type="number" min="0" max="255" />
           </div>
           <div class="col-3">
-            <label>Strok algilama esigi</label>
+            <label>Strok algilama esigi (UI; canlida global 0.12)</label>
             <input id="minProminence" type="number" step="0.005" min="0.02" max="0.5" />
             <p class="muted" id="minProminenceHint" style="margin-top:4px;">Cizgi boyunun kesri (0-1).</p>
           </div>
@@ -229,8 +229,17 @@
             <label>Makine Aktif</label>
             <select id="machineEnabled"><option value="true">true</option><option value="false">false</option></select>
           </div>
+          <div class="col-12">
+            <p class="muted" style="margin:8px 0 4px;padding:8px;border:1px solid #334155;border-radius:8px;background:#0f172a;">
+              <b>Canli sayim:</b> zigzag peak/trough (global <code>min_prominence=0.12</code>, <code>jump_abs=0.30</code>).
+              Asagidaki «Sayim modu / Schmitt» alanlari kaydedilebilir ama <b>canli sayimda kullanilmaz</b>.
+              Ustteki threshold / peak-bg / uzunluk alanlari <b>reflektor tespit</b> icindir (parlak nokta bulma); dongu sayaci degildir.
+            </p>
+          </div>
+          <div class="col-12"><details style="margin:4px 0 8px;"><summary style="cursor:pointer;color:#94a3b8;">Eski Schmitt ayarlari (canlida kullanilmiyor)</summary>
+          <div class="row" style="margin-top:8px;">
           <div class="col-3">
-            <label>Sayim modu</label>
+            <label>Sayim modu (kullanilmiyor)</label>
             <select id="countingMode"><option value="peak_trough">peak_trough (klasik)</option><option value="schmitt">schmitt (esik)</option></select>
             <p class="muted" style="margin-top:4px;">schmitt: tek kapali-esik + otomatik ogrenme (AF-4/5/6).</p>
           </div>
@@ -255,6 +264,7 @@
             <label>Otomatik ogrenme</label>
             <select id="learnEnabled"><option value="true">Acik</option><option value="false">Kapali</option></select>
           </div>
+          </div></details>
           <div class="col-3"><button id="saveMachineBtn">Makine Parametre Kaydet</button></div>
           <div class="col-3"><button id="learnLenBtn" class="btn-orange">Uzunluk Kalibrasyon Baslat</button></div>
           <div class="col-3"><button id="resetProdBtn" class="btn-gray">Sayim ve Kalip Verisini Sifirla</button></div>
@@ -288,7 +298,8 @@
           <div class="col-3"><button id="diagRefreshBtn" class="btn-gray">Durumu yenile</button></div>
           <div class="col-12">
             <label>Pi host (anlik)</label>
-            <div id="diagHostHint" class="muted" style="padding-top:4px;">CPU / sicaklik / load / RAM — durum yenile</div>
+            <div id="diagHostHint" class="muted" style="padding-top:4px;">CPU / sicaklik / load / RAM / disk — «Durumu yenile» ile guncellenir (otomatik akmaz)</div>
+            <p class="muted" style="margin:4px 0 0;">Bu satirlar canli degismez; teshis durumunu yenilemeden eski kalir.</p>
           </div>
           <div class="col-12"><div id="diagMsg" class="muted"></div></div>
         </div>
@@ -694,16 +705,23 @@
         machineCameraSelect: 'Secili makine hangi kameranin goruntusunden takip edilecek. Degisince otomatik kaydedilir.',
         machineName: 'Izleme panelinde (8000) gorunen makine adi.',
         roiAngle: 'ROI dortgeninin donus acisi (derece). Cizgiyi hizalamak icin kullanilir.',
-        thresholdMode: 'fixed: sabit prominence esigi. adaptive: sahneye gore otomatik esik (parlak zeminlerde genelde daha iyi).',
-        thMin: 'Fixed modda reflektor kabul esigi: peak - arka plan en az bu kadar olmali (0-255). Dusuk = zayif reflektor de kabul.',
-        thOffset: 'Esige eklenen +/- deger. Negatif yaparsaniz daha zayif reflektorler de kabul edilir.',
-        lineThickness: 'Sari takip cizgisi etrafindaki piksel bandi (max-pool). Kalin = titreme/blur toleransi; ince = daha hassas.',
-        lenMin: 'Reflektor parlak segment minimum uzunlugu (ornek sayisi). Cok kisa parlamalari reddeder.',
-        lenMax: 'Reflektor parlak segment maksimum uzunlugu. Cok genis parlak bolgeleri reddeder.',
-        lenCalibSec: 'Otomatik uzunluk kalibrasyonu suresi (sn). Bu surede reflektoru cizgi boyunca bir kez gezdirin.',
-        minProminence: 'Bir acilip-kapanmanin (strok) sayilmasi icin pozisyonun bir uctan en az ne kadar (cizgi boyunun 0-1 kesri) geri donmesi gerektigi. Bu degerin altindaki kucuk ileri-geri oynamalar titresim sayilip yok sayilir. Cok dusuk olursa makine dururken isik titremesi dongu sayilir; cok yuksek olursa kisa stroklu kaliplar kacar. Varsayilan 0.1 (park titremesi ~0.04, gercek stroklar 0.3+ oldugundan guvenli). Makine bazli ayarlanir.',
-        occlusionGraceMs: 'Reflektor kisa sure kaybolunca son bilinen pozisyonu tutma suresi (ms). Kaporta alti / anlik kayiplarda sinyal kopmasini geciktirir.',
-        machineEnabled: 'false: makine sayimi durur, canli durum DISABLED olur.',
+        thresholdMode: 'REFLEKTOR TESPITI (sayim degil). fixed: sabit (peak-bg) esigi. adaptive: sahneye gore esik. Parlak zeminde reflektor kayboluyorsa once bunu / thMin deneyin.',
+        thMin: 'REFLEKTOR TESPITI. Fixed: peak - arka plan en az bu kadar (0-255) olmali. Dusuk = daha zayif parlamayi da nokta kabul eder. Dongu sayacini degistirmez.',
+        thOffset: 'Tespit esigine +/- ek. Negatif = daha hassas bulma. Sayim zigzag esigi degildir.',
+        lineThickness: 'Sari cizgi etrafindaki ornek bandi (px). Tespit dayanikliligi; zigzag sayim kurali degil.',
+        lenMin: 'Parlak segment min uzunlugu. Cok kisa isik noktalarini reddeder (tespit).',
+        lenMax: 'Parlak segment max uzunlugu. Cok genis parlak alanlari reddeder (tespit).',
+        lenCalibSec: 'Uzunluk kalibrasyon suresi (sn). Reflektoru cizgi boyunca gezdirin.',
+        minProminence: 'UI alani: kaydedilir ama CANLI kod su an global 0.12 sabit kullanir (makine satiri yok sayilir). Zigzag min salinim esigi.',
+        countingMode: 'KULLANILMIYOR. Canli her zaman zigzag peak/trough. Schmitt secimi sayimi degistirmez.',
+        closedPolarity: 'KULLANILMIYOR (eski Schmitt).',
+        closedRef: 'KULLANILMIYOR (eski Schmitt ogrenilen kapali uc).',
+        closedHyst: 'KULLANILMIYOR (eski Schmitt histerezis).',
+        smoothWin: 'KULLANILMIYOR (eski Schmitt yumusatma).',
+        learnEnabled: 'KULLANILMIYOR (eski Schmitt otomatik ogrenme).',
+        occlusionGraceMs: 'Reflektor kisa sure kaybolunca son pozisyonu tutma (ms). Tespit surekliligi.',
+        machineEnabled: 'false: makine sayimi durur, durum DISABLED.',
+        roiAngle: 'ROI dortgen donusu; sadece cizgi hizalama yardimi. Detector ROI maskesi kullanmaz.',
         diagUntil: 'Bu tarihe/saate (Turkiye saati) kadar bu makinenin pos/state CSV kaydini alir (goruntu yok). Sure dolunca otomatik durur. Bos birakip "Logu durdur" ile hemen kapatabilirsiniz.',
         zoomSlider: 'Takip cizgisi hizalama zoom seviyesi (%50-%400). Ctrl+tekerlek ile de degistirilebilir.',
       };
@@ -711,7 +729,10 @@
       function applyFieldTips(){
         for(const [id, text] of Object.entries(FIELD_TIPS)){
           const el = q(id);
-          if(el) el.title = text;
+          if(!el) continue;
+          el.title = text;
+          const lab = el.closest('.col-3, .col-6, .col-12')?.querySelector('label');
+          if(lab) lab.title = text;
         }
       }
 
@@ -1502,9 +1523,12 @@
           if(hostEl){
             const h = st.host || {};
             const f = (v, u, nd=1) => (v == null || Number.isNaN(Number(v))) ? '—' : `${Number(v).toFixed(nd)}${u}`;
+            const disk = (h.disk_free_gb == null)
+              ? 'Disk —'
+              : `Disk bos ${Number(h.disk_free_gb).toFixed(1)}G / ${Number(h.disk_total_gb||0).toFixed(1)}G (dolu ${f(h.disk_used_pct,'%')})`;
             hostEl.textContent =
-              `CPU ${f(h.cpu_pct,'%')} · Sicaklik ${f(h.temp_c,'°C')} · Load1 ${f(h.load1,'',2)} · RAM ${f(h.mem_pct,'%')}` +
-              ` (tick satirlarina da yazilir)`;
+              `CPU ${f(h.cpu_pct,'%')} · Sicaklik ${f(h.temp_c,'°C')} · Load1 ${f(h.load1,'',2)} · RAM ${f(h.mem_pct,'%')} · ${disk}` +
+              ` — sadece «Durumu yenile» ile guncellenir`;
           }
           if(st.diag_until && !q('diagUntil').value) fillDiagUntilInput(st.diag_until);
           if(st.diag_from && !q('diagFrom').value) fillDiagFromInput(st.diag_from);

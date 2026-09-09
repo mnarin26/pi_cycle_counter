@@ -74,8 +74,10 @@ Not: Canlı rsp3b’de bir süre systemd unit’ler disable iken elle uvicorn ku
 2. Kamera: RTSP, `target_width` (canlıda sıkça **480**), FPS, aktif.
 3. Makine: kameraya bağla → sarı **takip çizgisini** çiz → **Çizgi Kaydet**.
 4. Gerekirse reflektör uzunluk kalibrasyonu.
-5. **8000** Canlı / Pano: `pos` ve OPEN/CLOSED akıyor mu bak.
-6. Seed referansı: [seed/README.md](seed/README.md) — aynı fabrika kameraları için yol gösterir; şifreleri yeniden gir.
+5. **8080 canlı görüntü:** reflektör noktası görünüyor mu bak. **8000** Pano/TV ile sayımı izle (8000’de ayrı “Canlı” sayfası yok).
+6. Seed referansı: [seed/README.md](seed/README.md).
+
+**Kapalı:** otomatik kalıp matcher / öneri; analitik sayfası.
 
 ## Sayım motoru (canlı)
 

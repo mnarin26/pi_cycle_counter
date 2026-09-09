@@ -1,11 +1,12 @@
 """Lightweight host metrics for diag / process log (no psutil).
 
-Reads /proc and thermal sysfs — cheap enough for ~1 Hz cache.
+Reads /proc, thermal sysfs, and root disk usage — cheap enough for ~1 Hz cache.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,17 +25,23 @@ class HostMetrics:
     temp_c: float | None = None
     load1: float | None = None
     mem_pct: float | None = None
+    disk_free_gb: float | None = None
+    disk_total_gb: float | None = None
+    disk_used_pct: float | None = None
     mono: float = 0.0
 
     def as_csv_fields(self) -> str:
-        """Semicolon fields: cpu_pct;temp_c;load1;mem_pct (empty if unknown)."""
+        """Semicolon fields: cpu_pct;temp_c;load1;mem_pct;disk_used_pct (empty if unknown)."""
 
         def f(v: float | None, nd: int = 1) -> str:
             if v is None:
                 return ""
             return f"{v:.{nd}f}"
 
-        return f"{f(self.cpu_pct)};{f(self.temp_c)};{f(self.load1, 2)};{f(self.mem_pct)}"
+        return (
+            f"{f(self.cpu_pct)};{f(self.temp_c)};{f(self.load1, 2)};"
+            f"{f(self.mem_pct)};{f(self.disk_used_pct)}"
+        )
 
     def as_dict(self) -> dict:
         return {
@@ -42,6 +49,9 @@ class HostMetrics:
             "temp_c": self.temp_c,
             "load1": self.load1,
             "mem_pct": self.mem_pct,
+            "disk_free_gb": self.disk_free_gb,
+            "disk_total_gb": self.disk_total_gb,
+            "disk_used_pct": self.disk_used_pct,
         }
 
 
@@ -72,13 +82,30 @@ class HostSampler:
         load1 = self._read_load1()
         mem_pct = self._read_mem_pct()
         cpu_pct = self._read_cpu_pct()
+        disk_free_gb, disk_total_gb, disk_used_pct = self._read_disk()
         return HostMetrics(
             cpu_pct=cpu_pct,
             temp_c=temp_c,
             load1=load1,
             mem_pct=mem_pct,
+            disk_free_gb=disk_free_gb,
+            disk_total_gb=disk_total_gb,
+            disk_used_pct=disk_used_pct,
             mono=mono,
         )
+
+    @staticmethod
+    def _read_disk() -> tuple[float | None, float | None, float | None]:
+        try:
+            u = shutil.disk_usage("/")
+            total = float(u.total)
+            free = float(u.free)
+            if total <= 0:
+                return None, None, None
+            used_pct = 100.0 * (total - free) / total
+            return free / (1024**3), total / (1024**3), used_pct
+        except Exception:
+            return None, None, None
 
     @staticmethod
     def _read_temp_c() -> float | None:

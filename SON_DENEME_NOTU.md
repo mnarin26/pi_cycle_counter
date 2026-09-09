@@ -26,5 +26,9 @@ Eski Mayıs 2026 “çizgi tabanlı takip” deneme notlarının yerini alır. T
 ## Kalibrasyon hatırlatması
 
 - Çizgiyi 8080’de kaydet (`axis_p0` / `axis_p1` + `line_thickness`).
-- İsteğe bağlı: `POST /api/calibration/machines/{id}/learn_reflector_length` ile segment uzunluk bandı.
-- Beyaz zemin + zayıf reflektör (ör. AF-8) kontrast sorunudur; yazılım sihir yapmaz.
+- İsteğe bağlı uzunluk kalibrasyonu.
+- Tespit (peak/bg) ile sayım (zigzag pos) ayrıdır; aydınlık zeminde önce tespit ayarlarına bak.
+
+## Matcher
+
+`AUTO_MOLD_MATCHING=false` (varsayılan canlı): çevrim yazılır, otomatik kalıp önerisi/eşleşme yok.

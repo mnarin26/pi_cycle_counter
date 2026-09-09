@@ -18,10 +18,10 @@ Varsayılan global eşikler (canlı): `jump_abs=0.30`, `min_prominence=0.12`.
 
 | Port | Süreç | Rol |
 |------|--------|-----|
-| **8000** | `app.main` | Vision + sayım + izleme paneli + API + WS |
-| **8080** | `admin_app` | Kalibrasyon / kamera / çizgi / sistem (çoğu işi 8000’e proxy eder) |
+| **8000** | `app.main` | Vision + sayım + izleme paneli (pano/TV/detay) + API + WS |
+| **8080** | `admin_app` | Kalibrasyon, **canlı kamera görüntüsü**, çizgi, teshis (çoğu API 8000’e proxy) |
 
-`/tv` (TV duvarı) oturumsuz kalabilir; diğer API’ler oturum + yetki ister.
+`/tv` oturumsuz kalabilir. **Otomatik kalıp matcher kapalı** (`AUTO_MOLD_MATCHING=false`); kalıp Telegram/manuel. Analitik sayfası yok.
 
 ## Hızlı başlangıç (PC)
 
