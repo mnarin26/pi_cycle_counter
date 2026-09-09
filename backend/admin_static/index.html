@@ -58,6 +58,9 @@
       .live-view-bar { position:absolute; left:0; right:0; bottom:0; background:rgba(0,0,0,0.65); padding:8px 10px; font-size:12px; }
       .live-view-machines { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; margin-top:10px; }
       .live-view-mach { border:1px solid #334155; border-radius:8px; padding:8px 10px; background:#0f172a; font-size:13px; }
+
+      .full-stack { display: block !important; width: 100% !important; max-width: 100% !important; clear: both !important; float: none !important; }
+      .full-stack .row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 10px; width: 100%; }
     </style>
   </head>
   <body>
@@ -264,7 +267,7 @@
             <label>Otomatik ogrenme</label>
             <select id="learnEnabled"><option value="true">Acik</option><option value="false">Kapali</option></select>
           </div>
-          </div></details>
+          </div></details></div>
           <div class="col-3"><button id="saveMachineBtn">Makine Parametre Kaydet</button></div>
           <div class="col-3"><button id="learnLenBtn" class="btn-orange">Uzunluk Kalibrasyon Baslat</button></div>
           <div class="col-3"><button id="resetProdBtn" class="btn-gray">Sayim ve Kalip Verisini Sifirla</button></div>
@@ -273,62 +276,65 @@
         </div>
 
         <hr class="section-divider" />
-        <div class="stack-section" style="display:block;width:100%;clear:both;margin-bottom:16px;">
-        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Takip cizgisi</h4>
-        <p class="muted">Sistem sadece sari takip cizgisi + kalinlik bandini kullanir. ROI sekli sadece cizgiyi hizalamak icin yardimcidir.</p>
-        <div class="row" style="margin-bottom:8px;">
-          <div class="col-3"><button id="zoomOutBtn" class="btn-gray">- Zoom</button></div>
-          <div class="col-3"><button id="zoomInBtn" class="btn-gray">+ Zoom</button></div>
-          <div class="col-3"><button id="zoomResetBtn" class="btn-gray">Zoom Sifirla</button></div>
-          <div class="col-3"><label>Zoom <span id="zoomLabel">100%</span></label><input id="zoomSlider" type="range" min="50" max="400" step="10" value="100" /></div>
-        </div>
-        <div class="canvas-viewport" id="canvasViewport" style="width:100%;max-width:100%;">
-          <div class="canvas-wrap canvas-inner" id="canvasInner">
-            <img id="snap" />
-            <canvas id="overlay"></canvas>
+        <section class="full-stack" style="display:block;width:100%;max-width:100%;clear:both;box-sizing:border-box;">
+          <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Takip cizgisi</h4>
+          <p class="muted">Sistem sadece sari takip cizgisi + kalinlik bandini kullanir. ROI sekli sadece cizgiyi hizalamak icin yardimcidir.</p>
+          <div class="row" style="margin-bottom:8px;">
+            <div class="col-3"><button id="zoomOutBtn" class="btn-gray">- Zoom</button></div>
+            <div class="col-3"><button id="zoomInBtn" class="btn-gray">+ Zoom</button></div>
+            <div class="col-3"><button id="zoomResetBtn" class="btn-gray">Zoom Sifirla</button></div>
+            <div class="col-3"><label>Zoom <span id="zoomLabel">100%</span></label><input id="zoomSlider" type="range" min="50" max="400" step="10" value="100" /></div>
           </div>
-        </div>
-        <div class="row" style="margin-top: 8px;">
-          <div class="col-3"><button id="clearRoiBtn" class="btn-gray">Cizimi Temizle</button></div>
-          <div class="col-3"><button id="saveRoiBtn" class="btn-green">Cizgi Kaydet</button></div>
-          <div class="col-3"><button id="swapAxisBtn" class="btn-orange">Cizgi yonunu cevir</button></div>
-          <div class="col-3"><div id="roiMsg" class="muted"></div></div>
-        </div>
-        </div>
+          <div class="canvas-viewport" id="canvasViewport" style="display:block;width:100%;max-width:100%;clear:both;">
+            <div class="canvas-wrap canvas-inner" id="canvasInner">
+              <img id="snap" />
+              <canvas id="overlay"></canvas>
+            </div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <div class="col-3"><button id="clearRoiBtn" class="btn-gray">Cizimi Temizle</button></div>
+            <div class="col-3"><button id="saveRoiBtn" class="btn-green">Cizgi Kaydet</button></div>
+            <div class="col-3"><button id="swapAxisBtn" class="btn-orange">Cizgi yonunu cevir</button></div>
+            <div class="col-3"><div id="roiMsg" class="muted"></div></div>
+          </div>
+        </section>
+
         <hr class="section-divider" />
-        <div class="stack-section" style="display:block;width:100%;clear:both;">
-        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Teshis logu (makine)</h4>
-        <p class="muted">Secilen makine icin islem logu (CSV, goruntu yok). Baslangic–bitis araliginda yazar; bitis gelince otomatik durur. Baslangic bos = hemen baslar.</p>
-        <div class="row" style="margin-bottom:8px;">
-          <div class="col-3">
-            <label>Log baslangic (TR saati)</label>
-            <input id="diagFrom" type="datetime-local" step="60" />
+        <section class="full-stack" style="display:block;width:100%;max-width:100%;clear:both;box-sizing:border-box;">
+          <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Teshis logu (makine)</h4>
+          <p class="muted">Secilen makine icin islem logu (CSV, goruntu yok). Baslangic–bitis araliginda yazar; bitis gelince otomatik durur. Baslangic bos = hemen baslar.</p>
+          <div class="row" style="margin-bottom:8px;">
+            <div class="col-3">
+              <label>Log baslangic (TR saati)</label>
+              <input id="diagFrom" type="datetime-local" step="60" />
+            </div>
+            <div class="col-3">
+              <label>Log bitis (TR saati)</label>
+              <input id="diagUntil" type="datetime-local" step="60" />
+            </div>
+            <div class="col-3">
+              <label>Durum</label>
+              <div id="diagStatus" class="muted" style="padding-top:8px;">Kapali</div>
+            </div>
+            <div class="col-3">
+              <label>Boyut</label>
+              <div id="diagSizeHint" class="muted" style="padding-top:8px;">—</div>
+            </div>
           </div>
-          <div class="col-3">
-            <label>Log bitis (TR saati)</label>
-            <input id="diagUntil" type="datetime-local" step="60" />
+          <div class="row" style="margin-bottom:8px;">
+            <div class="col-3"><button id="diagSaveBtn" class="btn-orange">Logu baslat / guncelle</button></div>
+            <div class="col-3"><button id="diagStopBtn" class="btn-gray">Logu durdur</button></div>
+            <div class="col-3"><button id="diagDownloadBtn">Logu indir (ZIP)</button></div>
+            <div class="col-3"><button id="diagRefreshBtn" class="btn-gray">Durumu yenile</button></div>
           </div>
-          <div class="col-3">
-            <label>Durum</label>
-            <div id="diagStatus" class="muted" style="padding-top:8px;">Kapali</div>
-          </div>
-          <div class="col-3">
-            <label>Boyut</label>
-            <div id="diagSizeHint" class="muted" style="padding-top:8px;">—</div>
-          </div>
-          <div class="col-3"><button id="diagSaveBtn" class="btn-orange">Logu baslat / guncelle</button></div>
-          <div class="col-3"><button id="diagStopBtn" class="btn-gray">Logu durdur</button></div>
-          <div class="col-3"><button id="diagDownloadBtn">Logu indir (ZIP)</button></div>
-          <div class="col-3"><button id="diagRefreshBtn" class="btn-gray">Durumu yenile</button></div>
-          <div class="col-12">
+          <div style="display:block;width:100%;margin-top:8px;">
             <label>Pi host (anlik)</label>
             <div id="diagHostHint" class="muted" style="padding-top:4px;">CPU / sicaklik / load / RAM / disk — «Durumu yenile» ile guncellenir (otomatik akmaz)</div>
             <p class="muted" style="margin:4px 0 0;">Bu satirlar canli degismez; teshis durumunu yenilemeden eski kalir.</p>
           </div>
-          <div class="col-12"><div id="diagMsg" class="muted"></div></div>
-        </div>
+          <div id="diagMsg" class="muted" style="margin-top:8px;"></div>
+        </section>
 
-        </div>
       </div>
       </section>
 
