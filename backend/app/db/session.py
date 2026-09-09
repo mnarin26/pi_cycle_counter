@@ -110,6 +110,21 @@ def _dedupe_mold_machine_links(conn) -> int:
     return removed
 
 
+def _add_column_if_missing(conn, table: str, existing: set[str], name: str, ddl: str) -> None:
+    if name in existing:
+        return
+    try:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+        existing.add(name)
+    except Exception as e:
+        # Two processes (8000 + 8080) can race the same ALTER on SQLite.
+        msg = str(e).lower()
+        if "duplicate column" in msg or "already exists" in msg:
+            existing.add(name)
+            return
+        raise
+
+
 def init_db() -> None:
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
@@ -117,28 +132,25 @@ def init_db() -> None:
     # Adds new columns without requiring Alembic.
     with engine.begin() as conn:
         machine_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(machines)")).fetchall()}
-        if "threshold_offset" not in machine_cols:
-            conn.execute(text("ALTER TABLE machines ADD COLUMN threshold_offset INTEGER NOT NULL DEFAULT 0"))
-        if "line_thickness" not in machine_cols:
-            conn.execute(text("ALTER TABLE machines ADD COLUMN line_thickness INTEGER NOT NULL DEFAULT 7"))
-        if "reflector_len_min" not in machine_cols:
-            conn.execute(text("ALTER TABLE machines ADD COLUMN reflector_len_min INTEGER"))
-        if "reflector_len_max" not in machine_cols:
-            conn.execute(text("ALTER TABLE machines ADD COLUMN reflector_len_max INTEGER"))
-        if "occlusion_grace_ms" not in machine_cols:
-            conn.execute(text("ALTER TABLE machines ADD COLUMN occlusion_grace_ms INTEGER NOT NULL DEFAULT 300"))
+        _add_column_if_missing(conn, "machines", machine_cols, "threshold_offset", "threshold_offset INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "machines", machine_cols, "line_thickness", "line_thickness INTEGER NOT NULL DEFAULT 7")
+        _add_column_if_missing(conn, "machines", machine_cols, "reflector_len_min", "reflector_len_min INTEGER")
+        _add_column_if_missing(conn, "machines", machine_cols, "reflector_len_max", "reflector_len_max INTEGER")
+        _add_column_if_missing(conn, "machines", machine_cols, "occlusion_grace_ms", "occlusion_grace_ms INTEGER NOT NULL DEFAULT 300")
+        _add_column_if_missing(conn, "machines", machine_cols, "qr_code", "qr_code VARCHAR(64)")
+        _add_column_if_missing(conn, "machines", machine_cols, "diag_from", "diag_from TEXT")
+        _add_column_if_missing(conn, "machines", machine_cols, "diag_until", "diag_until TEXT")
         cycle_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(cycles)")).fetchall()}
-        if "is_counted" not in cycle_cols:
-            conn.execute(text("ALTER TABLE cycles ADD COLUMN is_counted INTEGER NOT NULL DEFAULT 1"))
-        if "exclude_reason" not in cycle_cols:
-            conn.execute(text("ALTER TABLE cycles ADD COLUMN exclude_reason VARCHAR(64)"))
+        _add_column_if_missing(conn, "cycles", cycle_cols, "is_counted", "is_counted INTEGER NOT NULL DEFAULT 1")
+        _add_column_if_missing(conn, "cycles", cycle_cols, "exclude_reason", "exclude_reason VARCHAR(64)")
         mold_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(molds)")).fetchall()}
-        if "stdev_limit_s" not in mold_cols:
-            conn.execute(text("ALTER TABLE molds ADD COLUMN stdev_limit_s REAL"))
-        if "qr_code" not in mold_cols:
-            conn.execute(text("ALTER TABLE molds ADD COLUMN qr_code VARCHAR(64)"))
-        if "qr_code" not in machine_cols:
-            conn.execute(text("ALTER TABLE machines ADD COLUMN qr_code VARCHAR(64)"))
+        _add_column_if_missing(conn, "molds", mold_cols, "stdev_limit_s", "stdev_limit_s REAL")
+        _add_column_if_missing(conn, "molds", mold_cols, "qr_code", "qr_code VARCHAR(64)")
+        _add_column_if_missing(conn, "molds", mold_cols, "target_cycle_s", "target_cycle_s REAL")
+        _add_column_if_missing(conn, "molds", mold_cols, "daily_target_count", "daily_target_count INTEGER")
+        _add_column_if_missing(conn, "molds", mold_cols, "work_mode", "work_mode VARCHAR(16) NOT NULL DEFAULT 'auto'")
+        _add_column_if_missing(conn, "molds", mold_cols, "mount_minutes", "mount_minutes INTEGER")
+        _add_column_if_missing(conn, "molds", mold_cols, "removal_minutes", "removal_minutes INTEGER")
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_molds_qr_code ON molds (qr_code) WHERE qr_code IS NOT NULL"))
         conn.execute(
             text("CREATE UNIQUE INDEX IF NOT EXISTS uq_machines_qr_code ON machines (qr_code) WHERE qr_code IS NOT NULL")
@@ -168,6 +180,21 @@ def init_db() -> None:
             text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_mold_machines_mold_machine "
                 "ON mold_machines (mold_id, machine_id)"
+            )
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_web_sessions_token ON web_sessions (session_token)")
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_daily_passwords_date ON daily_passwords (valid_date)")
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_audit_logs_created ON audit_logs (created_at)")
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_machine_downtimes_machine_span "
+                "ON machine_downtimes (machine_id, start_at, end_at)"
             )
         )
     db = SessionLocal()

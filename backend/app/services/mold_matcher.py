@@ -1080,22 +1080,33 @@ def _save_cycle_without_mold_matching(
     confidence: float,
     mold_name_snapshot: str | None,
 ) -> None:
-    """Persist a counted cycle without auto mold assignment or abnormal filtering."""
+    """Persist a counted cycle without auto mold match / post-stop / abnormal filter.
+
+    Operator-assigned ``current_mold_id`` is still stamped so TV/kalıp özeti
+    can show this machine's cycles under the active mold.
+    """
     is_counted = True
     exclude_reason: str | None = None
     if cycle_s >= max(1.0, float(machine.no_movement_timeout_s or 120.0)):
         is_counted = False
         exclude_reason = "long_stop_or_no_movement"
 
+    mold_id = machine.current_mold_id
+    name = mold_name_snapshot
+    if mold_id:
+        mold = db.get(Mold, mold_id)
+        if mold and mold.name:
+            name = mold.name
+
     db.add(
         Cycle(
             machine_id=machine.id,
-            mold_id=None,
+            mold_id=mold_id,
             cycle_time_s=cycle_s,
             t_start=t_start,
             t_end=t_end,
             confidence=confidence,
-            mold_name_snapshot=mold_name_snapshot,
+            mold_name_snapshot=name,
             is_counted=is_counted,
             exclude_reason=exclude_reason,
         )

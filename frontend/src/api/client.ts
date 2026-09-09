@@ -1,8 +1,17 @@
 const base = "";
 
+function handleUnauthorized(status: number) {
+  if (status === 401 && !location.pathname.startsWith("/tv") && location.pathname !== "/login") {
+    location.href = "/login";
+  }
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
-  const r = await fetch(`${base}${path}`);
-  if (!r.ok) throw new Error(await r.text());
+  const r = await fetch(`${base}${path}`, { credentials: "include" });
+  if (!r.ok) {
+    handleUnauthorized(r.status);
+    throw new Error(await r.text());
+  }
   return r.json() as Promise<T>;
 }
 
@@ -10,35 +19,45 @@ export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
   const r = await fetch(`${base}${path}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) {
+    handleUnauthorized(r.status);
+    throw new Error(await r.text());
+  }
   return r.json() as Promise<T>;
 }
 
 export async function apiDelete<T = { ok: boolean }>(path: string): Promise<T> {
-  const r = await fetch(`${base}${path}`, { method: "DELETE" });
-  if (!r.ok) throw new Error(await r.text());
+  const r = await fetch(`${base}${path}`, { method: "DELETE", credentials: "include" });
+  if (!r.ok) {
+    handleUnauthorized(r.status);
+    throw new Error(await r.text());
+  }
   if (r.status === 204 || r.headers.get("content-length") === "0") return {} as T;
   const text = await r.text();
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
 
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method: "POST" };
+  const init: RequestInit = { method: "POST", credentials: "include" };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
   }
   const r = await fetch(`${base}${path}`, init);
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) {
+    handleUnauthorized(r.status);
+    throw new Error(await r.text());
+  }
   if (r.status === 204 || r.headers.get("content-length") === "0") return {} as T;
   const text = await r.text();
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
 
 export async function apiDownloadCsv(path: string, fallbackFilename: string): Promise<void> {
-  const r = await fetch(`${base}${path}`);
+  const r = await fetch(`${base}${path}`, { credentials: "include" });
   if (!r.ok) throw new Error(await r.text());
   const blob = await r.blob();
   const cd = r.headers.get("Content-Disposition") || "";

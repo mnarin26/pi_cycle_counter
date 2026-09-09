@@ -6,8 +6,18 @@
     <title>Injection Admin 8080</title>
     <style>
       body { margin: 0; font-family: Arial, sans-serif; background: #0b1220; color: #e2e8f0; }
-      .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
-      .card { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+      .wrap { max-width: none; margin: 0; padding: 0; }
+      .admin-top { padding: 16px 16px 0; }
+      .admin-shell { display: flex; min-height: calc(100vh - 72px); }
+      .admin-nav { width: 240px; flex-shrink: 0; background: #0f172a; border-right: 1px solid #334155; padding: 12px 10px; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
+      .nav-item { display: block; width: 100%; text-align: left; margin-bottom: 6px; padding: 10px 12px; background: transparent; border: 1px solid transparent; border-radius: 8px; color: #cbd5e1; font-weight: normal; font-size: 13px; cursor: pointer; }
+      .nav-item:hover { background: #1e293b; }
+      .nav-item.active { background: #172554; border-color: #334155; color: #93c5fd; font-weight: bold; }
+      .admin-main { flex: 1; padding: 16px; overflow: auto; }
+      .admin-panel { display: none; }
+      .admin-panel.active { display: block; }
+      .section-divider { border: 0; border-top: 1px solid #334155; margin: 20px 0 16px; }
+      .card { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 12px; margin-bottom: 0; }
       label { display: block; font-size: 12px; margin-bottom: 4px; color: #93c5fd; }
       input, select, button { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; }
       button { cursor: pointer; background: #0ea5e9; color: #0b1220; font-weight: bold; }
@@ -34,16 +44,102 @@
       .guide code { background: #0f172a; padding: 1px 6px; border-radius: 4px; color: #93c5fd; }
       input[title], select[title], input[type="datetime-local"][title] { cursor: help; }
       input[title]:hover, select[title]:hover { border-color: #64748b; }
+      .chk { display:inline-flex; align-items:center; gap:6px; color:#cbd5e1; font-size:13px; }
+      .chk input { width:auto; }
+      .live-view-wrap { position:relative; border:1px solid #334155; border-radius:10px; overflow:hidden; background:#000; max-width:100%; }
+      .live-view-wrap img { display:block; width:100%; height:auto; opacity:0.92; }
+      .live-view-dots { position:absolute; inset:0; pointer-events:none; }
+      .live-view-dot { position:absolute; width:7px; height:7px; margin:-3.5px 0 0 -3.5px; border-radius:999px; background:#94a3b8; box-shadow:0 0 0 1px rgba(2,6,23,0.9); }
+      .live-view-dot.open { background:#22d3ee; box-shadow:0 0 0 1px rgba(2,6,23,0.9), 0 0 6px rgba(34,211,238,0.8); }
+      .live-view-dot.closed { background:#3b82f6; box-shadow:0 0 0 1px rgba(2,6,23,0.9), 0 0 6px rgba(59,130,246,0.8); }
+      .live-view-dot.moving { background:#fbbf24; box-shadow:0 0 0 1px rgba(2,6,23,0.9), 0 0 6px rgba(251,191,36,0.8); }
+      .live-view-legend { display:flex; gap:12px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:#94a3b8; }
+      .live-view-legend i { display:inline-block; width:8px; height:8px; border-radius:99px; margin-right:4px; vertical-align:middle; }
+      .live-view-bar { position:absolute; left:0; right:0; bottom:0; background:rgba(0,0,0,0.65); padding:8px 10px; font-size:12px; }
+      .live-view-machines { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; margin-top:10px; }
+      .live-view-mach { border:1px solid #334155; border-radius:8px; padding:8px 10px; background:#0f172a; font-size:13px; }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <h2>Admin Paneli (8080)</h2>
-      <p class="muted">Izleme paneli ayri (<a id="mainAppLink" href="#" style="color:#93c5fd">8000</a>). Burada makine canli durumu, RTSP, ROI, threshold ve kalibrasyon ayarlanir.</p>
+    <div id="loginOverlay" style="display:none;position:fixed;inset:0;background:#0b1220;z-index:1000;align-items:center;justify-content:center;">
+      <div class="card" style="width:360px;max-width:90%;">
+        <h3>Giriş</h3>
+        <p class="muted" id="loginHint">Kayıtlı adınız ve şifreniz (sabit veya Telegram günlük). Yönetici: super</p>
+        <label>Kullanıcı adı</label>
+        <input id="loginUser" type="text" autocomplete="username" placeholder="Adınız" />
+        <label>Şifre</label>
+        <input id="loginPw" type="password" autocomplete="current-password" placeholder="Şifre" />
+        <div style="margin-top:10px;"><button id="loginBtn" class="btn-green">Giriş Yap</button></div>
+        <div id="loginMsg" class="muted" style="margin-top:8px;"></div>
+      </div>
+    </div>
+    <div class="wrap" id="wrapRoot" style="display:none;">
+      <div class="admin-top">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <h2>Admin Paneli (8080)</h2>
+          <div style="display:flex;gap:10px;align-items:center;">
+            <span id="whoami" class="muted"></span>
+            <button id="logoutBtn" class="btn-gray" style="width:auto;padding:8px 14px;">Çıkış</button>
+          </div>
+        </div>
+        <p class="muted" style="margin:8px 0 0;">Ozet pano: <a id="mainAppLink" href="#" style="color:#93c5fd">8000</a> · TV: <a id="tvAppLink" href="#" style="color:#93c5fd">8000/tv</a></p>
+      </div>
+      <div class="admin-shell">
+        <nav class="admin-nav" aria-label="Bolumler">
+          <button type="button" class="nav-item active" data-panel="panel-live">1. Canli goruntu</button>
+          <button type="button" class="nav-item" data-panel="panel-machines">2. Makineler</button>
+          <button type="button" class="nav-item" data-panel="panel-camera">3. Kamera</button>
+          <button type="button" class="nav-item" data-panel="panel-telegram">4. Yetkilendirme</button>
+          <button type="button" class="nav-item" data-panel="panel-system">5. Pi saati ve Wi-Fi</button>
+          <button type="button" class="nav-item" data-panel="panel-tv">6. TV ve vardiya</button>
+          <button type="button" class="nav-item" data-panel="panel-audit">7. Islem kayitlari</button>
+        </nav>
+        <main class="admin-main">
 
+      <section id="panel-live" class="admin-panel active">
+      <div class="card" id="live">
+        <h3>Canli goruntu</h3>
+        <p class="muted">Secili kameradan canli kare. Nokta rengi: cyan acik, mavi kapali, amber hareket, gri bilinmiyor.</p>
+        <div class="row">
+          <div class="col-4">
+            <label>Kamera</label>
+            <select id="liveViewCam"></select>
+          </div>
+          <div class="col-3">
+            <label>Islem araligi (ms)</label>
+            <input id="visionSampleMs" type="number" min="50" max="500" step="10" value="100" />
+            <p class="muted" style="margin-top:4px;">Kamera + cizgi probu bu aralikla calisir (varsayilan 100).</p>
+          </div>
+          <div class="col-2">
+            <label>&nbsp;</label>
+            <button type="button" id="saveVisionSampleBtn">Kaydet</button>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <div id="liveViewWs" class="muted">WS baglaniyor…</div>
+          </div>
+        </div>
+        <div id="visionPerfBar" class="muted" style="margin-top:6px;font-size:12px;">Islem: —</div>
+        <div class="live-view-wrap" id="liveViewWrap" style="margin-top:10px;">
+          <img id="liveViewImg" alt="Canli kamera" />
+          <div class="live-view-dots" id="liveViewDots"></div>
+          <div class="live-view-bar" id="liveViewBar">Kamera —</div>
+        </div>
+        <div class="live-view-machines" id="liveViewMachines"></div>
+        <div class="live-view-legend">
+          <span><i style="background:#22d3ee"></i>OPEN</span>
+          <span><i style="background:#3b82f6"></i>CLOSED</span>
+          <span><i style="background:#fbbf24"></i>MOVING</span>
+          <span><i style="background:#94a3b8"></i>UNKNOWN</span>
+        </div>
+      </div>
+      </section>
+
+      <section id="panel-machines" class="admin-panel">
       <div class="card">
-        <h3>Makineler (canli)</h3>
-        <p class="muted">Canli sinyal ve esik durumu. Detay ayarlari asagidaki makine kartindan yapilir.</p>
+        <h3>Makineler</h3>
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Canli durum</h4>
+        <p class="muted">Canli sinyal ve esik durumu.</p>
         <div id="machineLiveWs" class="muted" style="margin-bottom:8px;">WS baglaniyor…</div>
         <div style="overflow-x:auto;">
           <table class="live">
@@ -52,6 +148,9 @@
                 <th>ID</th>
                 <th>Ad</th>
                 <th>Kamera</th>
+                <th>Durum</th>
+                <th>Pos</th>
+                <th>Son cevrim</th>
                 <th>Esik</th>
                 <th>Sinyal (peak/bg)</th>
               </tr>
@@ -61,229 +160,9 @@
             </tbody>
           </table>
         </div>
-      </div>
 
-      <div class="card">
-        <h3>Raspberry Pi saati</h3>
-        <p class="muted">Dongu kayitlari Pi saatini kullanir. Goruntudeki tarih yazisi (OSD) <b>kameranin kendi saatidir</b> — asagidan kamera senkronu gerekir.</p>
-        <div id="piTimeStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
-        <div class="row">
-          <div class="col-3">
-            <label>Saat dilimi</label>
-            <select id="piTimezone">
-              <option value="Europe/Istanbul">Europe/Istanbul (TR)</option>
-              <option value="UTC">UTC</option>
-              <option value="Europe/London">Europe/London</option>
-              <option value="Europe/Berlin">Europe/Berlin</option>
-              <option value="Asia/Dubai">Asia/Dubai</option>
-            </select>
-          </div>
-          <div class="col-4">
-            <label>Tarih ve saat (manuel)</label>
-            <input id="piDatetime" type="datetime-local" step="60" />
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="piSetTimeBtn" class="btn-orange">Saati Ayarla</button>
-          </div>
-          <div class="col-2">
-            <label>&nbsp;</label>
-            <button id="piNtpOnBtn" class="btn-gray">NTP Ac</button>
-          </div>
-        </div>
-        <div class="row" style="margin-top:8px;">
-          <div class="col-3"><button id="piRefreshTimeBtn" class="btn-gray">Saati Yenile</button></div>
-          <div class="col-9"><div id="piTimeMsg" class="muted"></div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>Fabrika Wi-Fi (Access Point)</h3>
-        <p class="muted">
-          Kameralar ve TV bu aga baglanir (<b>pi-wifi</b> / NetworkManager profili).
-          SSID veya sifre degisince bagli cihazlar kopar; degisiklikten sonra yeni aga tekrar baglanin.
-          Bu sayfaya <b>pi-wifi</b> uzerinden bagliysaniz islem sonrasi baglanti kesilebilir.
-        </p>
-        <div id="wifiApStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
-        <div class="row">
-          <div class="col-4">
-            <label>Ag adi (SSID)</label>
-            <input id="wifiApSsid" maxlength="32" placeholder="ornek: pi-wifi" />
-          </div>
-          <div class="col-4">
-            <label>Yeni Wi-Fi sifresi (WPA2)</label>
-            <input id="wifiApPassword" type="password" maxlength="63" placeholder="Bos = sifreyi degistirme" autocomplete="new-password" />
-            <p class="muted" style="margin-top:4px;">En az 8 karakter. Bos birakirsaniz sadece SSID guncellenir.</p>
-          </div>
-          <div class="col-4">
-            <label>&nbsp;</label>
-            <button id="wifiApSaveBtn" class="btn-orange">SSID / Sifreyi Kaydet</button>
-          </div>
-        </div>
-        <div class="row" style="margin-top:8px;">
-          <div class="col-3"><button id="wifiApRefreshBtn" class="btn-gray">Yenile</button></div>
-          <div class="col-9"><div id="wifiApMsg" class="muted"></div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>Telegram Kalip Botu</h3>
-        <div class="guide" style="margin-bottom:12px;">
-          <b>Kurulum adimlari</b>
-          <ol>
-            <li>Telegram'da <code>@BotFather</code> acin → <code>/newbot</code> yazin.</li>
-            <li>Bot adi verin (ornek: <code>Fabrika Kalip</code>).</li>
-            <li>Kullanici adi <code>xxxxxx_bot</code> formatinda olmali (ornek: <code>alfamold_bot</code>).</li>
-            <li>BotFather'in verdigi <b>token</b>'i asagiya yapistirin → <b>Bot Ayarlarini Kaydet</b>.</li>
-            <li>Telegram aramada bot kullanici adinizi yazin (ornek <code>@alfamold_bot</code>) veya <code>t.me/alfamold_bot</code> acin.</li>
-            <li>Bota <code>/start</code> basin (bir kez yeterli).</li>
-            <li>Operatör Telegram ID ogrenmek icin: <code>@userinfobot</code> acin → Start → <code>Id: 123456789</code> satirini okuyun.</li>
-            <li>Operatör eklerken <b>Seviye 1</b> (atama+üretim) veya <b>Seviye 2</b> (sadece atama) seçin.</li>
-            <li>QR formatlari: makine <code>MACHINE:3</code> · kalip <code>MOLD:042</code></li>
-          </ol>
-        </div>
-        <div class="row">
-          <div class="col-3">
-            <label>Bot etkin</label>
-            <select id="tgEnabled"><option value="false">false</option><option value="true">true</option></select>
-          </div>
-          <div class="col-3">
-            <label>Bot kullanici adi</label>
-            <input id="tgUsername" placeholder="xxxxxx_bot" />
-          </div>
-          <div class="col-6">
-            <label>Bot token</label>
-            <input id="tgToken" type="password" autocomplete="new-password" placeholder="BotFather token (bos = mevcut korunur)" />
-            <p id="tgTokenHint" class="muted" style="margin-top:4px;"></p>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="tgSaveBtn" class="btn-orange">Bot Ayarlarini Kaydet</button>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="tgRefreshBtn" class="btn-gray">Yenile</button>
-          </div>
-          <div class="col-12"><div id="tgMsg" class="muted"></div></div>
-        </div>
-
-        <h4 style="margin:16px 0 8px;">Izinli operatörler</h4>
-        <div class="row">
-          <div class="col-4">
-            <label>Operatör adi</label>
-            <input id="tgOpName" placeholder="Ahmet Yilmaz" maxlength="128" />
-          </div>
-          <div class="col-4">
-            <label>Telegram user ID</label>
-            <input id="tgOpId" placeholder="123456789" inputmode="numeric" maxlength="32" />
-          </div>
-          <div class="col-3">
-            <label>Seviye</label>
-            <select id="tgOpLevel">
-              <option value="2">2 — Sadece kalıp ata</option>
-              <option value="1">1 — Ata + kalıp üret</option>
-            </select>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="tgOpAddBtn" class="btn-green">Operatör Ekle</button>
-          </div>
-        </div>
-        <div style="overflow-x:auto;margin-top:10px;">
-          <table class="live">
-            <thead>
-              <tr><th>Ad</th><th>Telegram ID</th><th>Seviye</th><th></th></tr>
-            </thead>
-            <tbody id="tgOpBody">
-              <tr><td colspan="3" class="muted">Henuz operatör yok.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3>Pi SSH Baglantisi (referans)</h3>
-        <p class="muted">Uzak erisim bilgisi (Tailscale IP, kullanici). Sifre burada saklanmaz; SSH anahtari onerilir.</p>
-        <div class="row">
-          <div class="col-3">
-            <label>Host / IP</label>
-            <input id="sshHost" placeholder="100.92.41.26" />
-          </div>
-          <div class="col-3">
-            <label>Kullanici</label>
-            <input id="sshUser" placeholder="pi" />
-          </div>
-          <div class="col-2">
-            <label>Port</label>
-            <input id="sshPort" type="number" min="1" max="65535" value="22" />
-          </div>
-          <div class="col-4">
-            <label>SSH alias (opsiyonel)</label>
-            <input id="sshAlias" placeholder="rsp3b" />
-          </div>
-          <div class="col-3">
-            <label>Kimlik</label>
-            <select id="sshAuth"><option value="key">SSH anahtari</option><option value="password">Sifre (yerel config)</option></select>
-          </div>
-          <div class="col-5">
-            <label>Anahtar yolu</label>
-            <input id="sshKeyPath" placeholder="~/.ssh/id_ed25519" />
-          </div>
-          <div class="col-4">
-            <label>Baglanti</label>
-            <div id="sshConnStr" class="muted" style="padding:10px 0;font-family:monospace;font-size:12px;">-</div>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="sshSaveBtn" class="btn-orange">SSH Kaydet</button>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="sshRefreshBtn" class="btn-gray">Yenile</button>
-          </div>
-          <div class="col-12"><div id="sshMsg" class="muted"></div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="row">
-          <div class="col-3">
-            <label>Kamera</label>
-            <select id="cameraSelect"></select>
-          </div>
-          <div class="col-6">
-            <label>RTSP URL</label>
-            <input id="rtspUrl" placeholder="rtsp://user:pass@ip:554/stream2" />
-          </div>
-          <div class="col-3">
-            <label>Durum</label>
-            <div id="cameraStatus" class="muted">-</div>
-          </div>
-          <div class="col-3">
-            <label>Isleme genisligi (px)</label>
-            <input id="camWidth" type="number" min="160" max="1920" />
-            <p class="muted" style="margin-top:4px;">Ornek: 640. Kameranin kendi cozunurlugunu degistirmez.</p>
-          </div>
-          <div class="col-3">
-            <label>Isleme FPS ust siniri</label>
-            <input id="camFps" type="number" min="1" max="30" />
-            <p class="muted" style="margin-top:4px;">Ornek: 8. Dusuk = daha az CPU.</p>
-          </div>
-          <div class="col-3">
-            <label>Aktif</label>
-            <select id="camEnabled"><option value="true">true</option><option value="false">false</option></select>
-          </div>
-          <div class="col-3">
-            <label>&nbsp;</label>
-            <button id="saveCamBtn">Kamera Ayarini Kaydet</button>
-          </div>
-          <div class="col-3"><button id="testCamBtn" class="btn-orange">Kamera Test</button></div>
-          <div class="col-3"><button id="syncCamTimeBtn" class="btn-green">Kamera OSD Saatini Pi ile Esitle</button></div>
-          <div class="col-6"><div id="camMsg" class="muted"></div></div>
-        </div>
-      </div>
-
-      <div class="card">
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Makine parametreleri</h4>
         <div class="row">
           <div class="col-3">
             <label>Makine</label>
@@ -297,13 +176,6 @@
           <div class="col-3">
             <label>Makine Adi</label>
             <input id="machineName" type="text" maxlength="128" />
-          </div>
-          <div class="col-3">
-            <label>Yon (axis)</label>
-            <select id="axisDir">
-              <option value="lr">Sol -> Sag</option>
-              <option value="rl">Sag -> Sol</option>
-            </select>
           </div>
           <div class="col-3">
             <label>ROI Aci (derece)</label>
@@ -345,24 +217,9 @@
             <input id="thMax" type="number" min="0" max="255" />
           </div>
           <div class="col-3">
-            <label>Open 1D</label>
-            <input id="open1d" type="number" step="0.01" min="0" max="1" />
-          </div>
-          <div class="col-3">
-            <label>Closed 1D</label>
-            <input id="closed1d" type="number" step="0.01" min="0" max="1" />
-          </div>
-          <div class="col-3">
-            <label>Hysteresis</label>
-            <input id="hys" type="number" step="0.01" min="0" max="0.5" />
-          </div>
-          <div class="col-3">
-            <label>Hareket Debounce (ms)</label>
-            <input id="debounceMs" type="number" min="0" max="3000" step="1" />
-          </div>
-          <div class="col-3">
-            <label>Sabit Kalma Onay (ms)</label>
-            <input id="stabilityMs" type="number" min="0" max="10000" step="1" />
+            <label>Strok algilama esigi</label>
+            <input id="minProminence" type="number" step="0.005" min="0.02" max="0.5" />
+            <p class="muted" id="minProminenceHint" style="margin-top:4px;">Cizgi boyunun kesri (0-1).</p>
           </div>
           <div class="col-3">
             <label>Gorunmezlik Toleransi (ms)</label>
@@ -372,16 +229,72 @@
             <label>Makine Aktif</label>
             <select id="machineEnabled"><option value="true">true</option><option value="false">false</option></select>
           </div>
+          <div class="col-3">
+            <label>Sayim modu</label>
+            <select id="countingMode"><option value="peak_trough">peak_trough (klasik)</option><option value="schmitt">schmitt (esik)</option></select>
+            <p class="muted" style="margin-top:4px;">schmitt: tek kapali-esik + otomatik ogrenme (AF-4/5/6).</p>
+          </div>
+          <div class="col-3">
+            <label>Kapali polarite</label>
+            <select id="closedPolarity"><option value="low">Dusuk pozisyon = kapali</option><option value="high">Yuksek pozisyon = kapali</option></select>
+          </div>
+          <div class="col-3">
+            <label>Kapali referans (ogrenilen)</label>
+            <input id="closedRef" type="number" step="0.005" min="0" max="1" placeholder="otomatik" />
+            <p class="muted" id="closedRefHint" style="margin-top:4px;">Bos = otomatik ogren. Elle yazarsan override.</p>
+          </div>
+          <div class="col-3">
+            <label>Histerezis</label>
+            <input id="closedHyst" type="number" step="0.005" min="0.01" max="0.3" />
+          </div>
+          <div class="col-3">
+            <label>Yumusatma penceresi</label>
+            <input id="smoothWin" type="number" step="1" min="1" max="31" />
+          </div>
+          <div class="col-3">
+            <label>Otomatik ogrenme</label>
+            <select id="learnEnabled"><option value="true">Acik</option><option value="false">Kapali</option></select>
+          </div>
           <div class="col-3"><button id="saveMachineBtn">Makine Parametre Kaydet</button></div>
           <div class="col-3"><button id="learnLenBtn" class="btn-orange">Uzunluk Kalibrasyon Baslat</button></div>
           <div class="col-3"><button id="resetProdBtn" class="btn-gray">Sayim ve Kalip Verisini Sifirla</button></div>
           <div class="col-3"><button id="reloadSnapBtn" class="btn-gray">Snapshot Yenile</button></div>
           <div class="col-6"><div id="machineMsg" class="muted"></div></div>
         </div>
-      </div>
 
-      <div class="card">
-        <h3>Takip Cizgisi Ayari</h3>
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Teshis logu (makine)</h4>
+        <p class="muted">Secilen makine icin islem logu (CSV, goruntu yok). Baslangic–bitis araliginda yazar; bitis gelince otomatik durur. Baslangic bos = hemen baslar.</p>
+        <div class="row" style="margin-bottom:8px;">
+          <div class="col-3">
+            <label>Log baslangic (TR saati)</label>
+            <input id="diagFrom" type="datetime-local" step="60" />
+          </div>
+          <div class="col-3">
+            <label>Log bitis (TR saati)</label>
+            <input id="diagUntil" type="datetime-local" step="60" />
+          </div>
+          <div class="col-3">
+            <label>Durum</label>
+            <div id="diagStatus" class="muted" style="padding-top:8px;">Kapali</div>
+          </div>
+          <div class="col-3">
+            <label>Boyut</label>
+            <div id="diagSizeHint" class="muted" style="padding-top:8px;">—</div>
+          </div>
+          <div class="col-3"><button id="diagSaveBtn" class="btn-orange">Logu baslat / guncelle</button></div>
+          <div class="col-3"><button id="diagStopBtn" class="btn-gray">Logu durdur</button></div>
+          <div class="col-3"><button id="diagDownloadBtn">Logu indir (ZIP)</button></div>
+          <div class="col-3"><button id="diagRefreshBtn" class="btn-gray">Durumu yenile</button></div>
+          <div class="col-12">
+            <label>Pi host (anlik)</label>
+            <div id="diagHostHint" class="muted" style="padding-top:4px;">CPU / sicaklik / load / RAM — durum yenile</div>
+          </div>
+          <div class="col-12"><div id="diagMsg" class="muted"></div></div>
+        </div>
+
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Takip cizgisi</h4>
         <p class="muted">Sistem sadece sari takip cizgisi + kalinlik bandini kullanir. ROI sekli sadece cizgiyi hizalamak icin yardimcidir.</p>
         <div class="row" style="margin-bottom:8px;">
           <div class="col-3"><button id="zoomOutBtn" class="btn-gray">- Zoom</button></div>
@@ -398,20 +311,309 @@
         <div class="row" style="margin-top: 8px;">
           <div class="col-3"><button id="clearRoiBtn" class="btn-gray">Cizimi Temizle</button></div>
           <div class="col-3"><button id="saveRoiBtn" class="btn-green">Cizgi Kaydet</button></div>
-          <div class="col-6"><div id="roiMsg" class="muted"></div></div>
+          <div class="col-3"><button id="swapAxisBtn" class="btn-orange">Cizgi yonunu cevir</button></div>
+          <div class="col-3"><div id="roiMsg" class="muted"></div></div>
         </div>
+      </div>
+      </section>
+
+      <section id="panel-camera" class="admin-panel">
+      <div class="card">
+        <h3>Kamera</h3>
+        <div class="row">
+          <div class="col-3">
+            <label>Kamera</label>
+            <select id="cameraSelect"></select>
+          </div>
+          <div class="col-6">
+            <label>RTSP URL</label>
+            <input id="rtspUrl" placeholder="rtsp://user:pass@ip:554/stream2" />
+          </div>
+          <div class="col-3">
+            <label>Durum</label>
+            <div id="cameraStatus" class="muted">-</div>
+          </div>
+          <div class="col-3">
+            <label>Isleme genisligi (px)</label>
+            <input id="camWidth" type="number" min="160" max="1920" />
+            <p class="muted" style="margin-top:4px;">Ornek: 640. Kameranin kendi cozunurlugunu degistirmez.</p>
+          </div>
+          <div class="col-3">
+            <label>Isleme FPS ust siniri</label>
+            <input id="camFps" type="number" min="1" max="30" />
+            <p class="muted" style="margin-top:4px;">Ornek: 8. Dusuk = daha az CPU.</p>
+          </div>
+          <div class="col-3">
+            <label>Aktif</label>
+            <select id="camEnabled"><option value="true">true</option><option value="false">false</option></select>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="saveCamBtn">Kamera Ayarini Kaydet</button>
+          </div>
+          <div class="col-3"><button id="testCamBtn" class="btn-orange">Kamera Test</button></div>
+          <div class="col-3"><button id="syncCamTimeBtn" class="btn-green">Kamera OSD Saatini Pi ile Esitle</button></div>
+          <div class="col-6"><div id="camMsg" class="muted"></div></div>
+        </div>
+      </div>
+      </section>
+
+      <section id="panel-telegram" class="admin-panel">
+      <div class="card">
+        <h3>Yetkilendirme</h3>
+        <div class="guide" style="margin-bottom:12px;">
+          <b>Kurulum adimlari</b>
+          <ol>
+            <li>Telegram'da <code>@BotFather</code> acin → <code>/newbot</code> yazin.</li>
+            <li>Bot adi verin (ornek: <code>Fabrika Kalip</code>).</li>
+            <li>Kullanici adi <code>xxxxxx_bot</code> formatinda olmali (ornek: <code>alfamold_bot</code>).</li>
+            <li>BotFather'in verdigi <b>token</b>'i asagiya yapistirin → <b>Bot Ayarlarini Kaydet</b>.</li>
+            <li>Telegram aramada bot kullanici adinizi yazin (ornek <code>@alfamold_bot</code>) veya <code>t.me/alfamold_bot</code> acin.</li>
+            <li>Bota <code>/start</code> basin (bir kez yeterli).</li>
+            <li>Operatör Telegram ID ogrenmek icin: <code>@userinfobot</code> acin → Start → <code>Id: 123456789</code> satirini okuyun.</li>
+            <li>Operatör eklerken <b>Seviye 1</b> (atama+üretim) veya <b>Seviye 2</b> (sadece atama) seçin.</li>
+            <li>QR formatlari: makine <code>MACHINE:3</code> · kalip <code>MOLD:042</code></li>
+          </ol>
+        </div>
+        <div class="row">
+          <div class="col-3">
+            <label>Bot etkin</label>
+            <select id="tgEnabled"><option value="false">false</option><option value="true">true</option></select>
+          </div>
+          <div class="col-3">
+            <label>Bot kullanici adi</label>
+            <input id="tgUsername" placeholder="xxxxxx_bot" />
+          </div>
+          <div class="col-6">
+            <label>Bot token</label>
+            <input id="tgToken" type="password" autocomplete="new-password" placeholder="BotFather token (bos = mevcut korunur)" />
+            <p id="tgTokenHint" class="muted" style="margin-top:4px;"></p>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="tgSaveBtn" class="btn-orange">Bot Ayarlarini Kaydet</button>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="tgRefreshBtn" class="btn-gray">Yenile</button>
+          </div>
+          <div class="col-12"><div id="tgMsg" class="muted"></div></div>
+        </div>
+
+        <h4 style="margin:16px 0 8px;">Izinli kullanicilar</h4>
+        <p class="muted">Sirket ici (ethernet / AP) giris sabit sifre ile olur. Telegram ID varsa Tailscale uzerinden gunluk sifre de alinabilir. Sadece sabit sifre varsa yalnizca fabrika agindan girilir.</p>
+        <div class="row">
+          <div class="col-4">
+            <label>Kullanici adi</label>
+            <input id="tgOpName" placeholder="Ahmet Yilmaz" maxlength="128" />
+          </div>
+          <div class="col-4">
+            <label>Telegram user ID (opsiyonel)</label>
+            <input id="tgOpId" placeholder="Bos = sadece sirket ici" inputmode="numeric" maxlength="32" />
+          </div>
+          <div class="col-4">
+            <label>Sabit sifre (sirket ici)</label>
+            <input id="tgOpPassword" type="password" placeholder="En az 4 karakter" maxlength="64" autocomplete="new-password" />
+          </div>
+          <div class="col-4">
+            <label>Rol</label>
+            <select id="tgOpRole">
+              <option value="user">Kullanıcı (tiklerle yetki)</option>
+              <option value="admin">Yönetici (tüm yetkiler)</option>
+            </select>
+          </div>
+          <div class="col-12" id="tgOpPermsWrap">
+            <label>Yetkiler (kullanıcı için)</label>
+            <div style="display:flex;flex-wrap:wrap;gap:14px;padding:6px 0;">
+              <label class="chk"><input type="checkbox" id="tgPermPanel8000" /> 8000 paneli</label>
+              <label class="chk"><input type="checkbox" id="tgPermPanel8080" /> 8080 paneli</label>
+              <label class="chk"><input type="checkbox" id="tgPermMoldCreate" /> Kalıp üretme</label>
+              <label class="chk"><input type="checkbox" id="tgPermMoldAssign" /> Kalıp atama</label>
+            </div>
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="tgOpAddBtn" class="btn-green">Kullanici Ekle</button>
+          </div>
+          <div class="col-12"><div id="tgOpMsg" class="muted"></div></div>
+        </div>
+        <div style="overflow-x:auto;margin-top:10px;">
+          <table class="live">
+            <thead>
+              <tr><th>Ad</th><th>Telegram</th><th>Sabit sifre</th><th>Rol</th><th>Yetkiler</th><th></th></tr>
+            </thead>
+            <tbody id="tgOpBody">
+              <tr><td colspan="6" class="muted">Henuz kullanici yok.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </section>
+
+      <section id="panel-system" class="admin-panel">
+      <div class="card">
+        <h3>Raspberry Pi saati</h3>
+        <p class="muted">Dongu kayitlari Pi saatini kullanir. Goruntudeki tarih yazisi (OSD) <b>kameranin kendi saatidir</b> — Kamera bolumunden senkron yapilir.</p>
+        <div id="piTimeStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
+        <div class="row">
+          <div class="col-3">
+            <label>Saat dilimi</label>
+            <select id="piTimezone">
+              <option value="Europe/Istanbul">Europe/Istanbul (TR)</option>
+              <option value="UTC">UTC</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="Europe/Berlin">Europe/Berlin</option>
+              <option value="Asia/Dubai">Asia/Dubai</option>
+            </select>
+          </div>
+          <div class="col-4">
+            <label>Tarih ve saat (manuel)</label>
+            <input id="piDatetime" type="datetime-local" step="60" />
+          </div>
+          <div class="col-3">
+            <label>&nbsp;</label>
+            <button id="piSetTimeBtn" class="btn-orange">Saati Ayarla</button>
+          </div>
+          <div class="col-2">
+            <label>&nbsp;</label>
+            <button id="piNtpOnBtn" class="btn-gray">NTP Ac</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div class="col-3"><button id="piRefreshTimeBtn" class="btn-gray">Saati Yenile</button></div>
+          <div class="col-9"><div id="piTimeMsg" class="muted"></div></div>
+        </div>
+
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Fabrika Wi-Fi (Access Point)</h4>
+        <p class="muted">
+          Kameralar ve TV bu aga baglanir (<b>pi-wifi</b> / NetworkManager profili).
+          SSID veya sifre degisince bagli cihazlar kopar; degisiklikten sonra yeni aga tekrar baglanin.
+        </p>
+        <div id="wifiApStatus" class="muted" style="margin-bottom:10px;">Yukleniyor…</div>
+        <div class="row">
+          <div class="col-4">
+            <label>Ag adi (SSID)</label>
+            <input id="wifiApSsid" maxlength="32" placeholder="ornek: pi-wifi" />
+          </div>
+          <div class="col-4">
+            <label>Yeni Wi-Fi sifresi (WPA2)</label>
+            <input id="wifiApPassword" type="password" maxlength="63" placeholder="Bos = sifreyi degistirme" autocomplete="new-password" />
+            <p class="muted" style="margin-top:4px;">En az 8 karakter. Bos birakirsaniz sadece SSID guncellenir.</p>
+          </div>
+          <div class="col-4">
+            <label>&nbsp;</label>
+            <button id="wifiApSaveBtn" class="btn-orange">SSID / Sifreyi Kaydet</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div class="col-3"><button id="wifiApRefreshBtn" class="btn-gray">Yenile</button></div>
+          <div class="col-9"><div id="wifiApMsg" class="muted"></div></div>
+        </div>
+      </div>
+      </section>
+
+      <section id="panel-tv" class="admin-panel">
+      <div class="card">
+        <h3>TV ekrani ve vardiya ayarlari</h3>
+        <p class="muted">
+          <a id="tvPreviewLink" href="#" target="_blank" style="color:#93c5fd">8000/tv</a> tam ekran makine ozetini gosterir.
+          Birden fazla makine seciliyse asagidaki surede otomatik gecis yapilir.
+        </p>
+        <div class="row">
+          <div class="col-4">
+            <label>TV ekran gecis suresi (sn)</label>
+            <input id="tvRotateSec" type="number" min="5" max="300" step="1" value="20" />
+            <p class="muted" style="margin-top:4px;">Makineler arasi tam ekran gecis suresi (5–300 sn).</p>
+          </div>
+          <div class="col-4">
+            <label>Hareket yoksa DURUYOR (sn)</label>
+            <input id="idleStoppedSec" type="number" min="30" max="3600" step="10" value="180" />
+            <p class="muted" style="margin-top:4px;">Bu sure boyunca hareket yoksa TV'de DURUYOR yazilir (30–3600 sn). Varsayilan 180 sn (3 dk).</p>
+          </div>
+          <div class="col-4">
+            <label>&nbsp;</label>
+            <div id="tvProdStatus" class="muted">Yukleniyor…</div>
+          </div>
+        </div>
+
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Vardiyalar</h4>
+        <p class="muted">Gunluk ve vardiya verimlilik hesabi bu saat araliklarina gore yapilir. En az 1, en fazla 4 vardiya.</p>
+        <div id="shiftRows"></div>
+        <div class="row" style="margin-top:8px;">
+          <div class="col-3"><button id="shiftAddBtn" type="button" class="btn-gray">+ Vardiya ekle</button></div>
+          <div class="col-3"><button id="tvProdSaveBtn" type="button" class="btn-green">Kaydet</button></div>
+          <div class="col-6"><div id="tvProdMsg" class="muted"></div></div>
+        </div>
+      </div>
+      </section>
+
+      <section id="panel-audit" class="admin-panel">
+      <div class="card" id="auditCard">
+        <h3>Islem Kayitlari (Audit)</h3>
+        <p class="muted">Kim, ne zaman, hangi islemi yapti. Son 100 kayit.</p>
+        <button id="auditRefreshBtn" class="btn-gray" style="width:auto;padding:8px 14px;">Yenile</button>
+        <div style="overflow-x:auto;margin-top:10px;">
+          <table class="live">
+            <thead>
+              <tr><th>Zaman</th><th>Kisi</th><th>Islem</th><th>Kaynak</th><th>IP</th></tr>
+            </thead>
+            <tbody id="auditBody">
+              <tr><td colspan="5" class="muted">Kayit yok.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </section>
+
+        </main>
       </div>
     </div>
 
     <script>
       const API = `${location.protocol}//${location.hostname}:8000`;
-      const WS = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.hostname}:8000/ws`;
+      const WS = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
       const mainLink = document.getElementById('mainAppLink');
+      const tvLink = document.getElementById('tvAppLink');
       if(mainLink) mainLink.href = API + '/';
+      if(tvLink) tvLink.href = API + '/tv';
+      const tvPreviewLink = document.getElementById('tvPreviewLink');
+      if(tvPreviewLink) tvPreviewLink.href = API + '/tv';
       let cameras = [];
       let machines = [];
-      let liveSnapshot = { machines: [] };
+      let liveSnapshot = { machines: [], cameras: [] };
       let liveWs = null;
+      let liveViewCamId = null;
+      let liveViewImgMeta = null;
+      let liveViewTick = 0;
+      // #region agent log
+      let _dbgLiveN = 0;
+      let _dbgLastPos = null;
+      let _dbgLastCent = null;
+      let _dbgFrameSig = '';
+      function dbgLive(hypothesisId, location, message, data){
+        const body = {
+          sessionId: '3a2fad',
+          runId: 'm3-live-8080',
+          hypothesisId,
+          location,
+          message,
+          data,
+          timestamp: Date.now()
+        };
+        fetch('/api/debug/agent-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        }).catch(()=>{});
+        fetch('http://127.0.0.1:7662/ingest/cbe83440-6fdc-44a5-a3d6-275b7d410b22', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '3a2fad' },
+          body: JSON.stringify(body)
+        }).catch(()=>{});
+      }
+      // #endregion
       let roiPoly = null; // [{x,y},...4]
       let interaction = { mode: null, start: null, basePoly: null, cornerIdx: -1, rotateBaseAngle: 0, rotateStart: 0 };
       let viewZoom = 1.0;
@@ -432,24 +634,57 @@
       function q(id){ return document.getElementById(id); }
       function setMsg(id, text, cls='muted'){ const el=q(id); el.className=cls; el.textContent=text; }
 
+      const PANEL_BY_HASH = {
+        live: 'panel-live',
+        machines: 'panel-machines',
+        camera: 'panel-camera',
+        telegram: 'panel-telegram',
+        system: 'panel-system',
+        tv: 'panel-tv',
+        audit: 'panel-audit',
+      };
+
+      let activePanelId = 'panel-live';
+      function showPanel(panelId){
+        document.querySelectorAll('.admin-panel').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        const panel = q(panelId);
+        const nav = document.querySelector(`.nav-item[data-panel="${panelId}"]`);
+        if(panel) panel.classList.add('active');
+        if(nav) nav.classList.add('active');
+        activePanelId = panelId;
+        if(panelId === 'panel-live'){ refreshLiveViewImage(); updateLiveViewPanel(); }
+        // Makineler paneli gizliyken canvas boyutu 0 olur; acilinca snapshot'i yeniden boyutla.
+        if(panelId === 'panel-machines' && typeof refreshSnapshot === 'function'){
+          refreshSnapshot().catch(()=>{});
+        }
+        if(panelId === 'panel-tv') refreshProductionSettings().catch(e=>setMsg('tvProdMsg', String(e), 'bad'));
+      }
+
+      document.querySelectorAll('.nav-item').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const panelId = btn.getAttribute('data-panel');
+          if(panelId) showPanel(panelId);
+        });
+      });
+
+      const hashKey = (location.hash || '').replace(/^#/, '');
+      if(PANEL_BY_HASH[hashKey]) showPanel(PANEL_BY_HASH[hashKey]);
+
       /** Hover aciklamalari — degistirilebilir tum kutucuklar */
       const FIELD_TIPS = {
         piTimezone: 'Dongu kayitlari ve panel saati icin kullanilan saat dilimi. Europe/Istanbul onerilir.',
         piDatetime: 'Raspberry Pi sistem saatini elle ayarlar. Kaydedince NTP kapanir; ag saati yerine bu deger kullanilir.',
         wifiApSsid: 'Pi fabrika Wi-Fi erisim noktasi adi (SSID). Kameralar ve TV bu aga baglanir.',
         wifiApPassword: 'pi-wifi ag sifresi (WPA2). En az 8 karakter. Bos birakilirsa sadece SSID guncellenir.',
+        tvRotateSec: 'TV ekraninda birden fazla makine seciliyse tam ekran gecis suresi (saniye).',
+        idleStoppedSec: 'TV makine kartinda bu sure boyunca hareket yoksa DURUYOR yazilir. Varsayilan 180 sn (3 dk).',
         tgEnabled: 'Telegram bot servisi kurulunca kalip atama icin acilir.',
         tgUsername: 'BotFather kullanici adi, xxxxxx_bot formatinda (ornek alfamold_bot).',
         tgToken: 'BotFather HTTP API token. Bos birakilirsa kayitli token korunur.',
-        tgOpName: 'Listede gorunecek operatör adi (ornek: Ahmet).',
-        tgOpId: 'Operatörün Telegram user ID (sadece rakam). @userinfobot ile ogrenilir.',
+        tgOpName: 'Listede gorunecek kullanici adi (ornek: Ahmet).',
+        tgOpId: 'Opsiyonel Telegram user ID (sadece rakam). Bos birakilirsa yalnizca sirket icinden sabit sifreyle girer. @userinfobot ile ogrenilir.',
         tgOpLevel: '1 = kalip ata + uret · 2 = sadece kalip ata.',
-        sshHost: 'Pi Tailscale veya LAN IP adresi.',
-        sshUser: 'SSH kullanici adi (genelde pi).',
-        sshPort: 'SSH portu (varsayilan 22).',
-        sshAlias: 'Yerel ~/.ssh/config Host alias (ornek rsp3b).',
-        sshAuth: 'Onerilen: SSH anahtari. Sifre web arayuzunde saklanmaz.',
-        sshKeyPath: 'Ozel anahtar dosya yolu.',
         cameraSelect: 'RTSP ve isleme ayarlarini duzenlemek icin kamera secimi.',
         rtspUrl: 'IP kameradan canli goruntu akisi (RTSP adresi). Ornek: rtsp://kullanici:sifre@192.168.1.10:554/stream2',
         camWidth: 'Kare Pi uzerinde bu genislige kucultulur; islem hizi artar, CPU yuku azalir. Kameranin kendi cozunurlugunu degistirmez. Kayittan sonra ~2 sn icinde uygulanir.',
@@ -458,7 +693,6 @@
         machineSelect: 'Kalibrasyon ve parametreler icin makine secimi.',
         machineCameraSelect: 'Secili makine hangi kameranin goruntusunden takip edilecek. Degisince otomatik kaydedilir.',
         machineName: 'Izleme panelinde (8000) gorunen makine adi.',
-        axisDir: 'Takip cizgisinin kapali→acik yonu. Kirmizi nokta kapali ucu, yesil nokta acik ucu gosterir.',
         roiAngle: 'ROI dortgeninin donus acisi (derece). Cizgiyi hizalamak icin kullanilir.',
         thresholdMode: 'fixed: sabit prominence esigi. adaptive: sahneye gore otomatik esik (parlak zeminlerde genelde daha iyi).',
         thMin: 'Fixed modda reflektor kabul esigi: peak - arka plan en az bu kadar olmali (0-255). Dusuk = zayif reflektor de kabul.',
@@ -467,13 +701,10 @@
         lenMin: 'Reflektor parlak segment minimum uzunlugu (ornek sayisi). Cok kisa parlamalari reddeder.',
         lenMax: 'Reflektor parlak segment maksimum uzunlugu. Cok genis parlak bolgeleri reddeder.',
         lenCalibSec: 'Otomatik uzunluk kalibrasyonu suresi (sn). Bu surede reflektoru cizgi boyunca bir kez gezdirin.',
-        open1d: 'Referans acik pozisyon (0-1, cizgi uzerinde). Yon tabanli modda bilgi amaclidir; asil OPEN/CLOSED hareket yonunden cikar.',
-        closed1d: 'Referans kapali pozisyon (0-1). Yon tabanli modda bilgi amaclidir.',
-        hys: 'Titreme toleransi. Yuksek = kucuk salinimlar MOVING sayilmaz; dusuk = daha hassas hareket algisi. Hareket epsilon ≈ hysteresis × 0.12.',
-        debounceMs: 'Hareketin MOVING olarak onaylanmasi icin minimum sure (ms). Kisa titremeleri filtreler.',
-        stabilityMs: 'OPEN veya CLOSED onayi icin duraklama suresi (ms). Uzun = daha gec ama kararli; kisa = hizli ama titremeye acik.',
+        minProminence: 'Bir acilip-kapanmanin (strok) sayilmasi icin pozisyonun bir uctan en az ne kadar (cizgi boyunun 0-1 kesri) geri donmesi gerektigi. Bu degerin altindaki kucuk ileri-geri oynamalar titresim sayilip yok sayilir. Cok dusuk olursa makine dururken isik titremesi dongu sayilir; cok yuksek olursa kisa stroklu kaliplar kacar. Varsayilan 0.1 (park titremesi ~0.04, gercek stroklar 0.3+ oldugundan guvenli). Makine bazli ayarlanir.',
         occlusionGraceMs: 'Reflektor kisa sure kaybolunca son bilinen pozisyonu tutma suresi (ms). Kaporta alti / anlik kayiplarda sinyal kopmasini geciktirir.',
         machineEnabled: 'false: makine sayimi durur, canli durum DISABLED olur.',
+        diagUntil: 'Bu tarihe/saate (Turkiye saati) kadar bu makinenin pos/state CSV kaydini alir (goruntu yok). Sure dolunca otomatik durur. Bos birakip "Logu durdur" ile hemen kapatabilirsiniz.',
         zoomSlider: 'Takip cizgisi hizalama zoom seviyesi (%50-%400). Ctrl+tekerlek ile de degistirilebilir.',
       };
 
@@ -485,35 +716,49 @@
       }
 
       async function jget(path){
-        const r = await fetch(API + path); if(!r.ok) throw new Error(await r.text()); return r.json();
+        const r = await fetch(location.origin + path, { credentials: 'include' });
+        if(!r.ok) throw new Error(await r.text());
+        return r.json();
       }
       async function jpatch(path, body){
-        const r = await fetch(API + path,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-        if(!r.ok) throw new Error(await r.text()); return r.json();
+        const r = await fetch(location.origin + path, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if(!r.ok) throw new Error(await r.text());
+        return r.json();
       }
       async function jpost(path, body){
-        const r = await fetch(API + path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-        if(!r.ok) throw new Error(await r.text()); return r.json();
+        const r = await fetch(location.origin + path, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if(!r.ok) throw new Error(await r.text());
+        return r.json();
       }
       /** POST to this origin (admin app) — avoids :8000 when only :8080 is reachable */
       async function jpostLocal(path, body){
-        const r = await fetch(location.origin + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        const r = await fetch(location.origin + path, {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
       async function jgetLocal(path){
-        const r = await fetch(location.origin + path);
+        const r = await fetch(location.origin + path, { credentials:'include' });
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
       async function jpatchLocal(path, body){
-        const r = await fetch(location.origin + path, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        const r = await fetch(location.origin + path, {method:'PATCH', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
       async function jpostLocalOp(path, body){
-        const r = await fetch(location.origin + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        const r = await fetch(location.origin + path, {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
       async function jdeleteLocal(path){
-        const r = await fetch(location.origin + path, {method:'DELETE'});
+        const r = await fetch(location.origin + path, {method:'DELETE', credentials:'include'});
         if(!r.ok) throw new Error(await r.text()); return r.json();
       }
 
@@ -575,6 +820,156 @@
         }
       }
 
+      let productionShifts = [];
+
+      function renderShiftRows(){
+        const host = q('shiftRows');
+        if(!host) return;
+        host.innerHTML = '';
+        productionShifts.forEach((sh, idx) => {
+          if(!Array.isArray(sh.breaks)) sh.breaks = [];
+          const wrap = document.createElement('div');
+          wrap.style.marginBottom = '14px';
+          wrap.style.paddingBottom = '10px';
+          wrap.style.borderBottom = '1px solid #26304a';
+          const breaksHtml = sh.breaks.map((b, bidx) => `
+            <div class="row" style="margin-bottom:4px">
+              <div class="col-3">
+                <input data-break-field="start" data-shift-idx="${idx}" data-break-idx="${bidx}" type="time" value="${(b.start || '12:00').slice(0,5)}" />
+              </div>
+              <div class="col-3">
+                <input data-break-field="end" data-shift-idx="${idx}" data-break-idx="${bidx}" type="time" value="${(b.end || '12:30').slice(0,5)}" />
+              </div>
+              <div class="col-2">
+                <button type="button" class="btn-gray" data-break-remove="${idx}:${bidx}">Sil</button>
+              </div>
+            </div>
+          `).join('');
+          wrap.innerHTML = `
+            <div class="row">
+              <div class="col-3">
+                <label>Vardiya adi</label>
+                <input data-shift-field="name" data-shift-idx="${idx}" value="${sh.name || ''}" />
+              </div>
+              <div class="col-2">
+                <label>Baslangic</label>
+                <input data-shift-field="start" data-shift-idx="${idx}" type="time" value="${(sh.start || '08:00').slice(0,5)}" />
+              </div>
+              <div class="col-2">
+                <label>Bitis</label>
+                <input data-shift-field="end" data-shift-idx="${idx}" type="time" value="${(sh.end || '16:00') === '24:00' ? '23:59' : (sh.end || '16:00').slice(0,5)}" />
+              </div>
+              <div class="col-3">
+                <label>Kimlik (id)</label>
+                <input data-shift-field="id" data-shift-idx="${idx}" value="${sh.id || ''}" />
+              </div>
+              <div class="col-2">
+                <label>&nbsp;</label>
+                <button type="button" class="btn-gray" data-shift-remove="${idx}" ${productionShifts.length <= 1 ? 'disabled' : ''}>Sil</button>
+              </div>
+            </div>
+            <div style="margin-left:6px;margin-top:4px">
+              <label style="font-size:12px;color:#9aa6c0">Molalar (manuel kalıpta verimlilikten düşülür)</label>
+              ${breaksHtml || '<div style="font-size:12px;color:#6b7690;margin-bottom:4px">Mola yok</div>'}
+              <button type="button" class="btn-gray" data-break-add="${idx}">+ Mola ekle</button>
+            </div>
+          `;
+          host.appendChild(wrap);
+        });
+        host.querySelectorAll('[data-shift-field]').forEach(inp => {
+          inp.addEventListener('change', () => {
+            const idx = Number(inp.getAttribute('data-shift-idx'));
+            const field = inp.getAttribute('data-shift-field');
+            if(!productionShifts[idx] || !field) return;
+            productionShifts[idx][field] = inp.value;
+          });
+        });
+        host.querySelectorAll('[data-break-field]').forEach(inp => {
+          inp.addEventListener('change', () => {
+            const idx = Number(inp.getAttribute('data-shift-idx'));
+            const bidx = Number(inp.getAttribute('data-break-idx'));
+            const field = inp.getAttribute('data-break-field');
+            if(!productionShifts[idx] || !productionShifts[idx].breaks[bidx] || !field) return;
+            productionShifts[idx].breaks[bidx][field] = inp.value;
+          });
+        });
+        host.querySelectorAll('[data-break-add]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const idx = Number(btn.getAttribute('data-break-add'));
+            if(!productionShifts[idx]) return;
+            if(!Array.isArray(productionShifts[idx].breaks)) productionShifts[idx].breaks = [];
+            productionShifts[idx].breaks.push({ start: '12:00', end: '12:30' });
+            renderShiftRows();
+          });
+        });
+        host.querySelectorAll('[data-break-remove]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const [idx, bidx] = btn.getAttribute('data-break-remove').split(':').map(Number);
+            if(!productionShifts[idx] || !Array.isArray(productionShifts[idx].breaks)) return;
+            productionShifts[idx].breaks.splice(bidx, 1);
+            renderShiftRows();
+          });
+        });
+        host.querySelectorAll('[data-shift-remove]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const idx = Number(btn.getAttribute('data-shift-remove'));
+            if(productionShifts.length <= 1) return;
+            productionShifts.splice(idx, 1);
+            renderShiftRows();
+          });
+        });
+        q('shiftAddBtn').disabled = productionShifts.length >= 4;
+      }
+
+      function collectShiftsFromForm(){
+        const out = [];
+        productionShifts.forEach((sh, idx) => {
+          const name = (sh.name || '').trim() || `Vardiya ${idx + 1}`;
+          let start = sh.start || '08:00';
+          let end = sh.end || '16:00';
+          const id = (sh.id || '').trim() || `shift_${idx + 1}`;
+          if(end === '23:59') end = '24:00';
+          const breaks = (Array.isArray(sh.breaks) ? sh.breaks : [])
+            .map(b => ({ start: (b.start || '').slice(0,5), end: (b.end || '').slice(0,5) }))
+            .filter(b => b.start && b.end);
+          out.push({ id, name, start, end, breaks });
+        });
+        return out;
+      }
+
+      function applyProductionForm(data){
+        q('tvRotateSec').value = String(data.tv_rotate_seconds || 20);
+        q('idleStoppedSec').value = String(data.idle_stopped_seconds || 180);
+        productionShifts = Array.isArray(data.shifts) ? data.shifts.map(s => ({...s})) : [];
+        if(!productionShifts.length){
+          productionShifts = [
+            { id: 'night', name: 'Gece', start: '00:00', end: '08:00' },
+            { id: 'day', name: 'Gunduz', start: '08:00', end: '16:00' },
+            { id: 'evening', name: 'Aksam', start: '16:00', end: '24:00' },
+          ];
+        }
+        renderShiftRows();
+        q('tvProdStatus').innerHTML =
+          `<span class="good">${productionShifts.length} vardiya</span> &nbsp;|&nbsp; TV gecis: <b>${data.tv_rotate_seconds || 20} sn</b> &nbsp;|&nbsp; Durma: <b>${data.idle_stopped_seconds || 180} sn</b>`;
+      }
+
+      async function refreshProductionSettings(){
+        const data = await jgetLocal('/api/settings/production');
+        applyProductionForm(data);
+        setMsg('tvProdMsg', '');
+      }
+
+      async function saveProductionSettings(){
+        const body = {
+          tv_rotate_seconds: Number(q('tvRotateSec').value || 20),
+          idle_stopped_seconds: Number(q('idleStoppedSec').value || 180),
+          shifts: collectShiftsFromForm(),
+        };
+        const data = await jpatchLocal('/api/settings/production', body);
+        applyProductionForm(data);
+        setMsg('tvProdMsg', 'Kaydedildi.', 'good');
+      }
+
       function thresholdLabel(m, sm){
         const mode = String(m.threshold_mode || 'fixed').toLowerCase();
         const off = Number(m.threshold_offset || 0);
@@ -609,7 +1004,7 @@
           .filter(sm => sm.state !== 'DISABLED')
           .sort((a, b) => Number(a.id) - Number(b.id));
         if(!snapList.length){
-          body.innerHTML = '<tr><td colspan="5" class="muted">Canli veri yok — WS baglantisi veya aktif makine bekleniyor</td></tr>';
+          body.innerHTML = '<tr><td colspan="8" class="muted">Canli veri yok — WS baglantisi veya aktif makine bekleniyor</td></tr>';
           return;
         }
         body.innerHTML = snapList.map(sm => {
@@ -617,10 +1012,15 @@
           const m = dbById.get(mid) || sm;
           const name = (m.name != null ? m.name : sm.name) || '';
           const camId = m.camera_id != null ? m.camera_id : sm.camera_id;
+          const pos = sm.position_01 != null ? Number(sm.position_01).toFixed(3) : '—';
+          const cyc = sm.cycle_time_last != null ? Number(sm.cycle_time_last).toFixed(2) + 's' : '—';
           return `<tr>
             <td>${mid}</td>
             <td>${escapeHtml(name)}</td>
             <td>${camId ?? '—'}</td>
+            <td>${escapeHtml(sm.state || '—')}</td>
+            <td>${pos}</td>
+            <td>${cyc}</td>
             <td>${escapeHtml(thresholdLabel(m, sm))}</td>
             <td>${escapeHtml(signalLabel(m, sm))}</td>
           </tr>`;
@@ -635,6 +1035,9 @@
             <td>${escapeHtml(m.name || '')}</td>
             <td>${m.camera_id}</td>
             <td>—</td>
+            <td>—</td>
+            <td>—</td>
+            <td>—</td>
             <td>sinyal yok (henuz kare yok)</td>
           </tr>`).join('');
         }
@@ -646,8 +1049,164 @@
           if(data && Array.isArray(data.machines)){
             liveSnapshot = data;
             renderMachineLiveTable();
+            updateLiveViewPanel();
           }
-        }catch(_e){ /* main app erisilemezse WS kullanilir */ }
+        }catch(_e){ /* WS yedek */ }
+      }
+
+      let liveViewCamSig = '';
+      function populateLiveViewCamSelect(){
+        const sel = q('liveViewCam');
+        if(!sel) return;
+        const liveCams = Array.isArray(liveSnapshot.cameras) && liveSnapshot.cameras.length
+          ? liveSnapshot.cameras
+          : cameras.map(c => ({ id: c.id, status: c.status, fps: 0 }));
+        if(!liveCams.length){
+          if(liveViewCamSig !== 'none'){ sel.innerHTML = '<option value="">Kamera yok</option>'; liveViewCamSig = 'none'; }
+          return;
+        }
+        const ids = liveCams.map(c => Number(c.id));
+        // Sadece kamera listesi gercekten degisince <select>'i yeniden kur.
+        const sig = ids.join(',');
+        if(sig !== liveViewCamSig){
+          sel.innerHTML = liveCams.map(c => {
+            const db = camById(c.id);
+            const label = db ? db.name : `Kamera ${c.id}`;
+            return `<option value="${c.id}">${escapeHtml(label)} (#${c.id})</option>`;
+          }).join('');
+          liveViewCamSig = sig;
+        }
+        if(liveViewCamId == null || !ids.includes(Number(liveViewCamId))){
+          liveViewCamId = ids[0];
+        }
+        if(sel.value !== String(liveViewCamId)) sel.value = String(liveViewCamId);
+      }
+
+      let liveViewImgBusy = false;
+      function refreshLiveViewImage(){
+        if(activePanelId !== 'panel-live') return; // gizli panelde goruntu cekme
+        const camId = Number(liveViewCamId);
+        const img = q('liveViewImg');
+        if(!camId || !img) return;
+        // Onceki JPEG bitmeden yeni src atma — yavas istekte onload iptal olur, noktalar kaybolur.
+        if(liveViewImgBusy) return;
+        liveViewImgBusy = true;
+        liveViewTick += 1;
+        img.src = `${location.origin}/api/cameras/${camId}/snapshot.jpg?t=${liveViewTick}`;
+      }
+
+      function updateLiveViewPanel(){
+        populateLiveViewCamSelect();
+        if(activePanelId !== 'panel-live') return;
+        const camId = Number(liveViewCamId);
+        if(!camId) return;
+        const camLive = (liveSnapshot.cameras || []).find(c => Number(c.id) === camId);
+        const camDb = camById(camId);
+        const fps = camLive && camLive.fps != null ? Number(camLive.fps).toFixed(1) : '0';
+        const status = (camLive && camLive.status) || (camDb && camDb.status) || '?';
+        const name = camDb ? camDb.name : `Kamera ${camId}`;
+        const age = camLive && camLive.frame_age_ms != null ? Number(camLive.frame_age_ms) : null;
+        const stale = !!(camLive && camLive.stale);
+        let ageTxt = '';
+        if(age != null && Number.isFinite(age)){
+          ageTxt = age >= 1000 ? ` — kare ${ (age/1000).toFixed(1) }s once` : ` — kare ${Math.round(age)}ms`;
+        }
+        const readMs = camLive && camLive.read_ms != null ? Number(camLive.read_ms) : null;
+        const grayMs = camLive && camLive.gray_ms != null ? Number(camLive.gray_ms) : null;
+        const probeMs = camLive && camLive.probe_ms != null ? Number(camLive.probe_ms) : null;
+        const totalMs = camLive && camLive.total_ms != null ? Number(camLive.total_ms) : null;
+        const interval = camLive && camLive.sample_interval_ms != null ? Number(camLive.sample_interval_ms) : (liveSnapshot.vision && liveSnapshot.vision.sample_interval_ms) || 100;
+        const keeping = camLive && camLive.keeping_up;
+        const keepTxt = keeping === true ? 'YETISIYOR' : (keeping === false ? 'YETISMIYOR' : '—');
+        q('liveViewBar').textContent = `${name} — ${status}${stale ? ' (ESKI KARE)' : ''} — FPS ~ ${fps}${ageTxt} — aralik ${interval}ms — ${keepTxt}`;
+        q('liveViewBar').className = 'live-view-bar' + (stale || status === 'error' || status === 'disconnected' || keeping === false ? ' bad' : '');
+        const perfEl = q('visionPerfBar');
+        if(perfEl){
+          const loopMs = liveSnapshot.vision && liveSnapshot.vision.loop_ms != null ? Number(liveSnapshot.vision.loop_ms).toFixed(0) : '—';
+          const parts = [];
+          if(readMs != null) parts.push(`okuma ${readMs.toFixed(1)}ms`);
+          if(grayMs != null) parts.push(`gri ${grayMs.toFixed(1)}ms`);
+          if(probeMs != null) parts.push(`cizgi prob ${probeMs.toFixed(1)}ms`);
+          if(totalMs != null) parts.push(`toplam ${totalMs.toFixed(1)}ms`);
+          parts.push(`dongu ${loopMs}ms`);
+          perfEl.textContent = `Son kare isleme: ${parts.join(' · ')}`;
+          perfEl.className = keeping === false ? 'bad' : 'muted';
+        }
+
+        const dots = q('liveViewDots');
+        const meta = liveViewImgMeta;
+        const active = (liveSnapshot.machines || []).filter(m => m.state !== 'DISABLED' && Number(m.camera_id) === camId);
+        // #region agent log
+        const m3 = (liveSnapshot.machines || []).find(m => Number(m.id) === 3);
+        _dbgLiveN += 1;
+        if(_dbgLiveN % 3 === 1){
+          if(!m3){
+            dbgLive('D', 'admin:m3-missing', 'machine 3 not in snapshot', {
+              machineCount: (liveSnapshot.machines||[]).length, camId
+            });
+          } else {
+            const pos = m3.position_01 != null ? Number(m3.position_01) : null;
+            const c = m3.centroid;
+            const dPos = (_dbgLastPos != null && pos != null) ? Math.abs(pos - _dbgLastPos) : null;
+            const dCent = (_dbgLastCent && c)
+              ? Math.hypot(Number(c.x)-_dbgLastCent.x, Number(c.y)-_dbgLastCent.y)
+              : null;
+            _dbgLastPos = pos;
+            _dbgLastCent = c ? { x: Number(c.x), y: Number(c.y) } : null;
+            let cxPct = null, cyPct = null, offscreen = false;
+            if(meta && meta.nw && c){
+              cxPct = (Number(c.x) / meta.nw) * 100;
+              cyPct = (Number(c.y) / meta.nh) * 100;
+              offscreen = Number(c.x) < 0 || Number(c.y) < 0 || Number(c.x) > meta.nw || Number(c.y) > meta.nh;
+            }
+            dbgLive('B', 'admin:m3-motion', 'm3 live motion sample', {
+              state: m3.state,
+              pos, dPos, dCent,
+              idle_s: m3.idle_s ?? null,
+              occlusion_hold: m3.occlusion_hold ?? null,
+              centroid: c || null,
+              onSelectedCam: Number(m3.camera_id) === camId,
+              selectedCamId: camId,
+              camera_id: m3.camera_id,
+              imgNw: meta ? meta.nw : null,
+              imgNh: meta ? meta.nh : null,
+              cxPct, cyPct, offscreen,
+              cycle_time_last: m3.cycle_time_last ?? null,
+              dbg_cycle_emit_count: m3.dbg_cycle_emit_count ?? null,
+              wsConnected: !!(liveWs && liveWs.readyState === 1),
+              activeOnCam: active.map(m => m.id)
+            });
+          }
+        }
+        // #endregion
+        if(!dots) return;
+        if(!meta || !meta.nw){
+          dots.innerHTML = '';
+        }else{
+          dots.innerHTML = active.filter(m => m.centroid).map(m => {
+            const cx = (Number(m.centroid.x) / meta.nw) * meta.cw;
+            const cy = (Number(m.centroid.y) / meta.nh) * meta.ch;
+            const st = String(m.state || 'UNKNOWN').toLowerCase();
+            const pos = m.position_01 != null ? Number(m.position_01).toFixed(3) : '—';
+            const title = escapeHtml(`${m.name || ''} ${m.state || ''} pos=${pos}`);
+            return `<span class="live-view-dot ${st}" style="left:${cx}px;top:${cy}px" title="${title}"></span>`;
+          }).join('');
+        }
+
+        const box = q('liveViewMachines');
+        if(!box) return;
+        if(!active.length){
+          box.innerHTML = '<div class="muted">Bu kamerada aktif makine yok</div>';
+          return;
+        }
+        box.innerHTML = active.map(m => {
+          const mold = m.mold_name ? ` · ${escapeHtml(m.mold_name)}` : '';
+          const pos = m.position_01 != null ? ` · pos=${Number(m.position_01).toFixed(3)}` : '';
+          const probe = m.probe_ms != null ? ` · prob=${Number(m.probe_ms).toFixed(1)}ms` : '';
+          const proc = m.process_ms != null ? ` · islem=${Number(m.process_ms).toFixed(1)}ms` : '';
+          const fage = m.frame_age_ms != null ? ` · kare=${Math.round(Number(m.frame_age_ms))}ms` : '';
+          return `<div class="live-view-mach"><strong>${escapeHtml(m.name || '')}</strong> ${escapeHtml(m.state || '')}${mold}${pos}${probe}${proc}${fage}</div>`;
+        }).join('');
       }
 
       function escapeHtml(s){
@@ -657,18 +1216,26 @@
       function connectLiveWs(){
         if(liveWs) try{ liveWs.close(); }catch(_){}
         liveWs = new WebSocket(WS);
-        liveWs.onopen = () => { q('machineLiveWs').innerHTML = '<span class="good">WS bagli</span>'; };
+        liveWs.onopen = () => {
+          q('machineLiveWs').innerHTML = '<span class="good">WS bagli</span>';
+          if(q('liveViewWs')) q('liveViewWs').innerHTML = '<span class="good">WS bagli</span>';
+        };
         liveWs.onclose = () => {
           q('machineLiveWs').innerHTML = '<span class="warn">WS kopuk — yeniden baglaniyor…</span>';
+          if(q('liveViewWs')) q('liveViewWs').innerHTML = '<span class="warn">WS kopuk — yeniden baglaniyor…</span>';
           setTimeout(connectLiveWs, 2000);
         };
-        liveWs.onerror = () => { q('machineLiveWs').innerHTML = '<span class="bad">WS hata</span>'; };
+        liveWs.onerror = () => {
+          q('machineLiveWs').innerHTML = '<span class="bad">WS hata</span>';
+          if(q('liveViewWs')) q('liveViewWs').innerHTML = '<span class="bad">WS hata</span>';
+        };
         liveWs.onmessage = (ev) => {
           try{
             const msg = JSON.parse(ev.data);
             if(msg.type === 'snapshot' && msg.data){
               liveSnapshot = msg.data;
               renderMachineLiveTable();
+              updateLiveViewPanel();
             }
           }catch(_){}
         };
@@ -705,14 +1272,42 @@
       function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 
       function getMouse(e){
+        // Ekran pikselini canvas tampon pikseline cevir; r.width zaten zoom (CSS scale)
+        // ve scrollbar kaynakli duzen degisimini icerir, bu yuzden viewZoom'a bolmeye gerek yok.
         const r = overlay.getBoundingClientRect();
-        return { x: (e.clientX - r.left)/viewZoom, y: (e.clientY - r.top)/viewZoom };
+        const sx = r.width > 0 ? overlay.width / r.width : 1;
+        const sy = r.height > 0 ? overlay.height / r.height : 1;
+        return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
+      }
+
+      /** Canvas tampon boyutunu goruntuye esitle; degisirse ROI'yi orantili tasi (kayma onler). */
+      function syncOverlayToSnap(){
+        const w = snap.clientWidth, h = snap.clientHeight;
+        if(w <= 0 || h <= 0) return;
+        if(w === overlay.width && h === overlay.height) return;
+        if(roiPoly && overlay.width > 0 && overlay.height > 0){
+          const sx = w / overlay.width, sy = h / overlay.height;
+          roiPoly = roiPoly.map(p => ({ x: p.x * sx, y: p.y * sy }));
+        }
+        overlay.width = w;
+        overlay.height = h;
       }
 
       function applyZoom(){
         canvasInner.style.transform = `scale(${viewZoom})`;
         q('zoomSlider').value = String(Math.round(viewZoom * 100));
         q('zoomLabel').textContent = `${Math.round(viewZoom * 100)}%`;
+        syncOverlayToSnap();
+        drawRoi();
+      }
+
+      /** Overlay cizimleri zoom arttikca incelir — goruntu buyur, cizgi/ nokta goreli kalmaz. */
+      function uiStrokePx(base){
+        return Math.max(0.75, base / viewZoom);
+      }
+
+      function uiMarkerRadiusPx(base){
+        return Math.max(1.1, base / viewZoom);
       }
 
       function polyCenter(poly){
@@ -743,7 +1338,7 @@
         const c = polyCenter(poly);
         const vx = topMid.x - c.x, vy = topMid.y - c.y;
         const len = Math.hypot(vx, vy) || 1;
-        return { x: topMid.x + (vx/len)*ROTATE_HANDLE_DIST, y: topMid.y + (vy/len)*ROTATE_HANDLE_DIST };
+        return { x: topMid.x + (vx/len)*ROTATE_HANDLE_DIST / Math.max(0.5, viewZoom), y: topMid.y + (vy/len)*ROTATE_HANDLE_DIST / Math.max(0.5, viewZoom) };
       }
 
       function handleRadiusPx(){
@@ -778,9 +1373,144 @@
           a = { x:(poly[0].x + poly[1].x)/2, y:(poly[0].y + poly[1].y)/2 };
           b = { x:(poly[2].x + poly[3].x)/2, y:(poly[2].y + poly[3].y)/2 };
         }
-        const dir = (document.getElementById('axisDir').value || 'lr');
-        if(dir === 'rl'){ const tmp=a; a=b; b=tmp; }
         return { a, b };
+      }
+
+      function axisFromSavedMachine(){
+        const m = machineById(machineSelect.value);
+        if(!m || overlay.width <= 0) return null;
+        try{
+          const p0 = JSON.parse(m.axis_p0 || 'null');
+          const p1 = JSON.parse(m.axis_p1 || 'null');
+          if(!Array.isArray(p0) || !Array.isArray(p1) || p0.length < 2 || p1.length < 2) return null;
+          return {
+            a: { x: Number(p0[0]) * overlay.width, y: Number(p0[1]) * overlay.height },
+            b: { x: Number(p1[0]) * overlay.width, y: Number(p1[1]) * overlay.height },
+          };
+        }catch(_e){ return null; }
+      }
+
+      function axisForDraw(poly){
+        if(!interaction.mode){
+          const saved = axisFromSavedMachine();
+          if(saved) return saved;
+        }
+        return axisFromPoly(poly);
+      }
+
+      function updateClosedRefHint(m){
+        const el = q('closedRefHint');
+        if(!el) return;
+        if(m && m.learned_at){
+          let when = m.learned_at;
+          try{ when = new Date(m.learned_at).toLocaleString('tr-TR'); }catch(_e){}
+          el.textContent = `Son ogrenme/override: ${when}. Bos = otomatik ogren.`;
+        }else{
+          el.textContent = 'Bos = otomatik ogren. Elle yazarsan override.';
+        }
+      }
+
+      function updateProminenceHint(){
+        const el = q('minProminenceHint');
+        if(!el) return;
+        const mc = Number(q('minProminence')?.value || 0.1);
+        const axis = axisForDraw(roiPoly);
+        let pxTxt = '';
+        if(axis){
+          const len = Math.hypot(axis.b.x - axis.a.x, axis.b.y - axis.a.y);
+          if(len > 1) pxTxt = ` ≈ ${(len * mc).toFixed(1)} px strok`;
+        }
+        el.textContent = `Sayilan en kucuk strok (0-1).${pxTxt}`;
+      }
+
+      const DIAG_MB_PER_DAY = 2; // light process.csv (~tick+events)
+
+      function fillDiagDtInput(elId, iso){
+        const el = q(elId);
+        if(!el) return;
+        if(!iso){ el.value = ''; return; }
+        try{
+          const d = new Date(iso);
+          if(Number.isNaN(d.getTime())){ el.value = ''; return; }
+          const pad = n => String(n).padStart(2,'0');
+          el.value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }catch(_){ el.value = ''; }
+      }
+      function fillDiagUntilInput(iso){ fillDiagDtInput('diagUntil', iso); }
+      function fillDiagFromInput(iso){ fillDiagDtInput('diagFrom', iso); }
+
+      function diagIsoFromInput(elId){
+        const v = (q(elId)?.value || '').trim();
+        if(!v) return null;
+        const d = new Date(v);
+        if(Number.isNaN(d.getTime())) return null;
+        return d.toISOString();
+      }
+      function diagUntilIsoFromInput(){ return diagIsoFromInput('diagUntil'); }
+      function diagFromIsoFromInput(){ return diagIsoFromInput('diagFrom'); }
+
+      function formatMbEstimate(hours){
+        const mb = Math.max(0, hours) / 24 * DIAG_MB_PER_DAY;
+        if(mb < 1) return `~${(mb*1024).toFixed(0)} KB`;
+        if(mb < 1024) return `~${mb.toFixed(1)} MB`;
+        return `~${(mb/1024).toFixed(2)} GB`;
+      }
+
+      function updateDiagEstimatePreview(){
+        const hint = q('diagSizeHint');
+        if(!hint) return;
+        const isoFrom = diagFromIsoFromInput();
+        const isoUntil = diagUntilIsoFromInput();
+        if(!isoUntil){
+          hint.textContent = 'Bitis secilmedi. Baslangic bos birakilirsa kayit hemen baslar.';
+          return;
+        }
+        const startMs = isoFrom ? new Date(isoFrom).getTime() : Date.now();
+        const endMs = new Date(isoUntil).getTime();
+        const hours = Math.max(0, (endMs - startMs) / 3600000);
+        hint.textContent =
+          `Tahmini process.csv: ${formatMbEstimate(hours)} (${hours.toFixed(1)} saat, hafif log). Goruntu yok.`;
+      }
+
+      async function refreshDiagStatus(){
+        const id = Number(machineSelect.value);
+        if(!id) return;
+        try{
+          const st = await jget(`/api/machines/${id}/diag`);
+          const statusEl = q('diagStatus');
+          if(statusEl){
+            if(st.active){
+              statusEl.textContent = `Kayit aliniyor → ${st.diag_until || ''}`;
+              statusEl.style.color = '#4ade80';
+            }else if(st.pending){
+              statusEl.textContent = `Bekliyor: ${st.diag_from || ''} → ${st.diag_until || ''}`;
+              statusEl.style.color = '#fbbf24';
+            }else{
+              statusEl.textContent = (st.diag_until || st.diag_from) ? 'Suresi dolmus / kapali' : 'Kapali';
+              statusEl.style.color = '';
+            }
+          }
+          const hint = q('diagSizeHint');
+          if(hint){
+            let t = `Diskte su an: ${st.bytes_on_disk_label || '0 B'}.`;
+            if(st.active || st.pending){
+              t += ` Pencere: ${(st.diag_from || 'hemen')} → ${st.diag_until || '—'}.`;
+            }
+            hint.textContent = t;
+          }
+          const hostEl = q('diagHostHint');
+          if(hostEl){
+            const h = st.host || {};
+            const f = (v, u, nd=1) => (v == null || Number.isNaN(Number(v))) ? '—' : `${Number(v).toFixed(nd)}${u}`;
+            hostEl.textContent =
+              `CPU ${f(h.cpu_pct,'%')} · Sicaklik ${f(h.temp_c,'°C')} · Load1 ${f(h.load1,'',2)} · RAM ${f(h.mem_pct,'%')}` +
+              ` (tick satirlarina da yazilir)`;
+          }
+          if(st.diag_until && !q('diagUntil').value) fillDiagUntilInput(st.diag_until);
+          if(st.diag_from && !q('diagFrom').value) fillDiagFromInput(st.diag_from);
+        }catch(e){
+          console.warn(e);
+        }
       }
 
       function drawRoi(){
@@ -801,18 +1531,18 @@
           ctx.setLineDash([]);
         }
 
-        const axis = axisFromPoly(roiPoly);
+        const axis = axisForDraw(roiPoly);
         if(!axis) return;
         const a = axis.a;
         const b = axis.b;
 
-        // Thickness band visualization
+        // Thickness band = gercek algilama genisligi (goruntu pikseli, zoom'dan bagimsiz)
         const thick = Math.max(1, Number(q('lineThickness')?.value || 7));
         const ux = b.x - a.x, uy = b.y - a.y;
         const ulen = Math.hypot(ux, uy) || 1;
         const nx = -uy/ulen, ny = ux/ulen;
         const hw = thick/2;
-        ctx.fillStyle = 'rgba(245,158,11,0.18)';
+        ctx.fillStyle = viewZoom >= 1.5 ? 'rgba(245,158,11,0.10)' : 'rgba(245,158,11,0.18)';
         ctx.beginPath();
         ctx.moveTo(a.x + nx*hw, a.y + ny*hw);
         ctx.lineTo(b.x + nx*hw, b.y + ny*hw);
@@ -821,18 +1551,25 @@
         ctx.closePath();
         ctx.fill();
 
-        // The yellow center line is the active detector path
+        // Sarı merkez cizgi — zoom arttikca incelir (hassas hizalama)
         ctx.strokeStyle = '#facc15';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = uiStrokePx(2.5);
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
         ctx.stroke();
-        // closed / open end markers
-        ctx.fillStyle = '#ef4444';
-        ctx.beginPath(); ctx.arc(a.x, a.y, 5, 0, Math.PI*2); ctx.fill();
-        ctx.fillStyle = '#22c55e';
-        ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, Math.PI*2); ctx.fill();
+        // Kapali / acik uç — mavi KAPALI (p0), cyan ACIK (p1)
+        const capR = uiMarkerRadiusPx(3.5);
+        ctx.fillStyle = '#3b82f6';
+        ctx.beginPath(); ctx.arc(a.x, a.y, capR, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#22d3ee';
+        ctx.beginPath(); ctx.arc(b.x, b.y, capR, 0, Math.PI*2); ctx.fill();
+        ctx.font = `${Math.max(9, uiMarkerRadiusPx(9))}px sans-serif`;
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = '#3b82f6';
+        ctx.fillText('KAPALI', a.x + 6, a.y - 4);
+        ctx.fillStyle = '#22d3ee';
+        ctx.fillText('ACIK', b.x + 6, b.y - 4);
 
         // Show edit handles only while editing so the user sees just the line
         // in idle state.
@@ -858,6 +1595,7 @@
           ctx.arc(rh.x, rh.y, hr, 0, Math.PI*2);
           ctx.fill();
         }
+        updateProminenceHint();
       }
 
       function toNorm(poly){
@@ -933,6 +1671,9 @@
         onCameraChange();
         refreshMachineOptions();
         renderMachineLiveTable();
+        populateLiveViewCamSelect();
+        updateLiveViewPanel();
+        refreshLiveViewImage();
         await refreshSnapshot();
       }
 
@@ -961,6 +1702,17 @@
         formatCameraStatus(c.status);
       }
 
+      function applyMachineRoiToOverlay(){
+        if(overlay.width <= 0 || overlay.height <= 0) return;
+        const m = machineById(machineSelect.value);
+        if(!m){ roiPoly = null; return; }
+        try{
+          const roi = JSON.parse(m.roi_polygon || '[]');
+          roiPoly = fromNorm(roi);
+          if(roiPoly) syncAngleInputFromPoly();
+        }catch(_e){ roiPoly = null; }
+      }
+
       function onMachineChange(){
         const m = machineById(machineSelect.value);
         if(!m) return;
@@ -973,28 +1725,32 @@
         q('lenMax').value = m.reflector_len_max ?? '';
         q('thMax').value = m.threshold_max;
         q('thresholdMode').value = normalizeThresholdMode(m.threshold_mode);
-        q('open1d').value = m.open_position_1d;
-        q('closed1d').value = m.closed_position_1d;
-        q('hys').value = m.hysteresis;
-        q('debounceMs').value = m.debounce_ms ?? 80;
-        q('stabilityMs').value = m.stability_confirm_ms ?? 500;
+        q('minProminence').value = m.min_prominence != null ? m.min_prominence : 0.1;
         q('occlusionGraceMs').value = m.occlusion_grace_ms ?? 300;
         q('machineEnabled').value = String(m.enabled);
-        try{
-          const roi = JSON.parse(m.roi_polygon || '[]');
-          roiPoly = fromNorm(roi);
-          if(roiPoly) syncAngleInputFromPoly();
-        }catch(_e){ roiPoly = null; }
+        q('countingMode').value = m.counting_mode || 'peak_trough';
+        q('closedPolarity').value = m.closed_polarity || 'low';
+        q('closedRef').value = m.closed_ref != null ? m.closed_ref : '';
+        q('closedHyst').value = m.closed_hyst != null ? m.closed_hyst : 0.05;
+        q('smoothWin').value = m.smooth_win ?? 5;
+        q('learnEnabled').value = String(m.learn_enabled !== false);
+        updateClosedRefHint(m);
+        fillDiagFromInput(m.diag_from);
+        fillDiagUntilInput(m.diag_until);
+        applyMachineRoiToOverlay();
         drawRoi();
+        updateProminenceHint();
+        refreshDiagStatus();
       }
 
       async function refreshSnapshot(){
         const camId = machineSnapshotCameraId();
         const c = camById(camId); if(!c){ setMsg('roiMsg','Goruntu kamerasi secilmedi','warn'); return; }
-        snap.src = `${API}/api/cameras/${c.id}/snapshot.jpg?t=${Date.now()}`;
+        snap.src = `${location.origin}/api/cameras/${c.id}/snapshot.jpg?t=${Date.now()}`;
         await new Promise(res=>{ snap.onload=res; snap.onerror=res; });
         overlay.width = snap.clientWidth;
         overlay.height = snap.clientHeight;
+        applyMachineRoiToOverlay();
         drawRoi();
       }
 
@@ -1169,13 +1925,15 @@
             reflector_len_min: q('lenMin').value ? Number(q('lenMin').value) : null,
             reflector_len_max: q('lenMax').value ? Number(q('lenMax').value) : null,
             threshold_max: Number(q('thMax').value),
-            open_position_1d: Number(q('open1d').value),
-            closed_position_1d: Number(q('closed1d').value),
-            hysteresis: Number(q('hys').value),
-            debounce_ms: parseMs('debounceMs', 80),
-            stability_confirm_ms: parseMs('stabilityMs', 500),
+            min_prominence: Number(q('minProminence').value || 0.1),
             occlusion_grace_ms: parseMs('occlusionGraceMs', 300),
             enabled: q('machineEnabled').value === 'true',
+            counting_mode: q('countingMode').value,
+            closed_polarity: q('closedPolarity').value,
+            closed_ref: q('closedRef').value === '' ? null : Number(q('closedRef').value),
+            closed_hyst: Number(q('closedHyst').value || 0.05),
+            smooth_win: Number(q('smoothWin').value || 5),
+            learn_enabled: q('learnEnabled').value === 'true',
           });
           const idx = machines.findIndex(m=>m.id===id);
           if(idx >= 0) machines[idx] = updated;
@@ -1184,6 +1942,83 @@
           setMsg('machineMsg','Makine parametreleri kaydedildi','good');
           await refreshSnapshot();
         }catch(e){ setMsg('machineMsg',String(e),'bad'); }
+      };
+
+      q('diagUntil')?.addEventListener('input', updateDiagEstimatePreview);
+      q('diagFrom')?.addEventListener('input', updateDiagEstimatePreview);
+      q('diagRefreshBtn').onclick = async ()=>{
+        try{
+          await refreshDiagStatus();
+          setMsg('diagMsg','Durum guncellendi','good');
+        }catch(e){ setMsg('diagMsg',String(e),'bad'); }
+      };
+      q('diagSaveBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          const untilIso = diagUntilIsoFromInput();
+          const fromIso = diagFromIsoFromInput();
+          if(!untilIso){ setMsg('diagMsg','Bitis tarih/saat secin','bad'); return; }
+          const untilMs = new Date(untilIso).getTime();
+          if(untilMs <= Date.now() && !fromIso){
+            setMsg('diagMsg','Bitis zamani gelecekte olmali (veya baslangic da sec)','bad'); return;
+          }
+          if(fromIso){
+            const fromMs = new Date(fromIso).getTime();
+            if(!(fromMs < untilMs)){
+              setMsg('diagMsg','Baslangic, bitisten once olmali','bad'); return;
+            }
+          }
+          const updated = await jpatch(`/api/machines/${id}`, {
+            diag_from: fromIso || null,
+            diag_until: untilIso,
+          });
+          const idx = machines.findIndex(m=>m.id===id);
+          if(idx >= 0) machines[idx] = updated;
+          fillDiagFromInput(updated.diag_from);
+          fillDiagUntilInput(updated.diag_until);
+          await refreshDiagStatus();
+          const pending = fromIso && new Date(fromIso).getTime() > Date.now();
+          setMsg('diagMsg', pending
+            ? 'Pencere kaydedildi — baslangica kadar bekleyecek'
+            : 'Log kaydi baslatildi / guncellendi (8000 ~2 sn icinde uygular)', 'good');
+        }catch(e){ setMsg('diagMsg',String(e),'bad'); }
+      };
+      q('diagStopBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          const updated = await jpatch(`/api/machines/${id}`, { diag_from: null, diag_until: null });
+          const idx = machines.findIndex(m=>m.id===id);
+          if(idx >= 0) machines[idx] = updated;
+          fillDiagFromInput(null);
+          fillDiagUntilInput(null);
+          await refreshDiagStatus();
+          setMsg('diagMsg','Log kaydi durduruldu','good');
+        }catch(e){ setMsg('diagMsg',String(e),'bad'); }
+      };
+      q('diagDownloadBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          setMsg('diagMsg','ZIP hazirlaniyor...','warn');
+          const r = await fetch(location.origin + `/api/machines/${id}/diag/download`, { credentials: 'include' });
+          if(!r.ok){
+            let detail = await r.text();
+            try{ detail = JSON.parse(detail).detail || detail; }catch(_){}
+            throw new Error(detail || `HTTP ${r.status}`);
+          }
+          const blob = await r.blob();
+          const cd = r.headers.get('content-disposition') || '';
+          let name = `diag_machine_${id}.zip`;
+          const m = /filename="?([^";]+)"?/i.exec(cd);
+          if(m) name = m[1];
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(a.href);
+          setMsg('diagMsg',`Indirildi: ${name}`,'good');
+        }catch(e){ setMsg('diagMsg',String(e),'bad'); }
       };
 
       q('reloadSnapBtn').onclick = refreshSnapshot;
@@ -1259,6 +2094,17 @@
         }catch(e){ setMsg('wifiApMsg', apiErrText(e), 'bad'); }
       };
 
+      q('shiftAddBtn').onclick = () => {
+        if(productionShifts.length >= 4) return;
+        const n = productionShifts.length + 1;
+        productionShifts.push({ id: `shift_${n}`, name: `Vardiya ${n}`, start: '08:00', end: '16:00' });
+        renderShiftRows();
+      };
+      q('tvProdSaveBtn').onclick = async () => {
+        try { await saveProductionSettings(); }
+        catch(e){ setMsg('tvProdMsg', apiErrText(e), 'bad'); }
+      };
+
       function apiErrText(e){
         let msg = String(e);
         try{
@@ -1288,50 +2134,70 @@
         renderTelegramOperators(t.operators || []);
       }
 
+      function permsLabel(op){
+        if(op.role === 'admin') return 'Tüm yetkiler';
+        const p = op.permissions || {};
+        const names = [];
+        if(p.panel_8000) names.push('8000');
+        if(p.panel_8080) names.push('8080');
+        if(p.bot_mold_create) names.push('Üret');
+        if(p.bot_mold_assign) names.push('Ata');
+        return names.length ? names.join(', ') : '—';
+      }
+
       function renderTelegramOperators(ops){
         const body = q('tgOpBody');
         if(!ops.length){
-          body.innerHTML = '<tr><td colspan="4" class="muted">Henuz operatör yok.</td></tr>';
+          body.innerHTML = '<tr><td colspan="6" class="muted">Henuz kullanici yok.</td></tr>';
           return;
         }
-        body.innerHTML = ops.map(op => `
+        body.innerHTML = ops.map(op => {
+          const tg = op.telegram_user_id || '';
+          const pwLabel = op.has_password ? 'Tanimli' : 'Yok';
+          return `
           <tr>
             <td>${escapeHtml(op.name || '—')}</td>
-            <td><code>${escapeHtml(op.id)}</code></td>
-            <td>${op.level === 1 ? '1 — Ata+Üret' : '2 — Sadece ata'}</td>
+            <td>${tg ? '<code>' + escapeHtml(tg) + '</code>' : '<span class="muted">—</span>'}</td>
+            <td>
+              <span class="muted">${pwLabel}</span>
+              <div style="display:flex;gap:6px;margin-top:6px;align-items:center;">
+                <input type="password" class="tg-op-pw" data-id="${escapeHtml(op.id)}" placeholder="Yeni sifre" maxlength="64" autocomplete="new-password" style="width:130px;" />
+                <button type="button" class="btn-gray tg-op-pw-save" data-id="${escapeHtml(op.id)}">Kaydet</button>
+              </div>
+            </td>
+            <td>${op.role === 'admin' ? 'Yönetici' : 'Kullanıcı'}</td>
+            <td>${escapeHtml(permsLabel(op))}</td>
             <td><button type="button" class="btn-gray tg-op-del" data-id="${escapeHtml(op.id)}" data-name="${escapeHtml(op.name || '')}">Sil</button></td>
-          </tr>
-        `).join('');
+          </tr>`;
+        }).join('');
         body.querySelectorAll('.tg-op-del').forEach(btn=>{
           btn.onclick = async ()=>{
             const id = btn.getAttribute('data-id');
             const nm = btn.getAttribute('data-name') || id;
-            if(!confirm('Operatör silinsin mi?\\n' + nm + ' (' + id + ')')) return;
+            if(!confirm('Kullanici silinsin mi?\\n' + nm)) return;
             try{
               const t = await jdeleteLocal('/api/settings/telegram/operators/' + encodeURIComponent(id));
               applyTelegramForm(t);
-              setMsg('tgMsg', nm + ' silindi.', 'good');
-            }catch(e){ setMsg('tgMsg', apiErrText(e), 'bad'); }
+              setMsg('tgOpMsg', nm + ' silindi.', 'good');
+            }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
           };
         });
-      }
-
-      function escapeHtml(s){
-        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-      }
-
-      function applySshForm(s){
-        q('sshHost').value = s.host || '';
-        q('sshUser').value = s.user || 'pi';
-        q('sshPort').value = String(s.port || 22);
-        q('sshAlias').value = s.alias || '';
-        q('sshAuth').value = s.auth_method === 'password' ? 'password' : 'key';
-        q('sshKeyPath').value = s.key_path || '~/.ssh/id_ed25519';
-        q('sshConnStr').textContent = s.connection_string || '-';
-      }
-
-      async function refreshSshSettings(){
-        applySshForm(await jgetLocal('/api/settings/ssh'));
+        body.querySelectorAll('.tg-op-pw-save').forEach(btn=>{
+          btn.onclick = async ()=>{
+            const id = btn.getAttribute('data-id');
+            const inp = body.querySelector('.tg-op-pw[data-id="' + id + '"]');
+            const password = (inp && inp.value || '').trim();
+            if(!password){
+              setMsg('tgOpMsg', 'Yeni sabit sifre yazin.', 'bad');
+              return;
+            }
+            try{
+              const t = await jpatchLocal('/api/settings/telegram/operators/' + encodeURIComponent(id), { password });
+              applyTelegramForm(t);
+              setMsg('tgOpMsg', 'Sabit sifre kaydedildi.', 'good');
+            }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
+          };
+        });
       }
 
       q('tgRefreshBtn').onclick = ()=> refreshTelegramSettings().then(()=>setMsg('tgMsg','Yenilendi','good')).catch(e=>setMsg('tgMsg',apiErrText(e),'bad'));
@@ -1349,41 +2215,66 @@
         }catch(e){ setMsg('tgMsg', apiErrText(e), 'bad'); }
       };
 
+      function syncPermsVisibility(){
+        const isUser = q('tgOpRole').value === 'user';
+        q('tgOpPermsWrap').style.display = isUser ? '' : 'none';
+      }
+      q('tgOpRole').onchange = syncPermsVisibility;
+
       q('tgOpAddBtn').onclick = async ()=>{
         try{
           const name = q('tgOpName').value.trim();
           const telegram_user_id = q('tgOpId').value.trim();
-          if(!name || !telegram_user_id){
-            setMsg('tgMsg', 'Operatör adi ve Telegram ID gerekli.', 'bad');
+          const password = q('tgOpPassword').value.trim();
+          if(!name){
+            setMsg('tgOpMsg', 'Kullanici adi gerekli.', 'bad');
             return;
           }
-          const t = await jpostLocalOp('/api/settings/telegram/operators', {
-            name,
-            telegram_user_id,
-            level: Number(q('tgOpLevel').value) || 2,
-          });
+          if(!telegram_user_id && !password){
+            setMsg('tgOpMsg', 'Telegram ID veya sabit sifre gerekli.', 'bad');
+            return;
+          }
+          const role = q('tgOpRole').value;
+          const payload = { name, role };
+          if(telegram_user_id) payload.telegram_user_id = telegram_user_id;
+          if(password) payload.password = password;
+          if(role === 'user'){
+            payload.permissions = {
+              panel_8000: q('tgPermPanel8000').checked,
+              panel_8080: q('tgPermPanel8080').checked,
+              bot_mold_create: q('tgPermMoldCreate').checked,
+              bot_mold_assign: q('tgPermMoldAssign').checked,
+            };
+          }
+          const t = await jpostLocalOp('/api/settings/telegram/operators', payload);
           q('tgOpName').value = '';
           q('tgOpId').value = '';
+          q('tgOpPassword').value = '';
+          ['tgPermPanel8000','tgPermPanel8080','tgPermMoldCreate','tgPermMoldAssign'].forEach(id=>{ q(id).checked = false; });
           applyTelegramForm(t);
-          setMsg('tgMsg', name + ' eklendi.', 'good');
-        }catch(e){ setMsg('tgMsg', apiErrText(e), 'bad'); }
+          setMsg('tgOpMsg', name + ' eklendi.', 'good');
+        }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
       };
 
-      q('sshRefreshBtn').onclick = ()=> refreshSshSettings().then(()=>setMsg('sshMsg','Yenilendi','good')).catch(e=>setMsg('sshMsg',apiErrText(e),'bad'));
-      q('sshSaveBtn').onclick = async ()=>{
-        try{
-          const s = await jpatchLocal('/api/settings/ssh', {
-            host: q('sshHost').value.trim(),
-            user: q('sshUser').value.trim(),
-            port: Number(q('sshPort').value) || 22,
-            alias: q('sshAlias').value.trim(),
-            auth_method: q('sshAuth').value,
-            key_path: q('sshKeyPath').value.trim(),
-          });
-          applySshForm(s);
-          setMsg('sshMsg','SSH ayarlari kaydedildi','good');
-        }catch(e){ setMsg('sshMsg', apiErrText(e), 'bad'); }
-      };
+      async function refreshAuditLogs(){
+        const r = await jgetLocal('/api/audit/logs?limit=100');
+        const body = q('auditBody');
+        const logs = (r && r.logs) || [];
+        if(!logs.length){
+          body.innerHTML = '<tr><td colspan="5" class="muted">Kayit yok.</td></tr>';
+          return;
+        }
+        body.innerHTML = logs.map(l => `
+          <tr>
+            <td>${escapeHtml((l.created_at || '').replace('T',' ').slice(0,19))}</td>
+            <td>${escapeHtml(l.actor_name || '—')}</td>
+            <td><code>${escapeHtml(l.action)}</code></td>
+            <td>${escapeHtml(l.resource || '—')}</td>
+            <td>${escapeHtml(l.ip || '—')}</td>
+          </tr>
+        `).join('');
+      }
+      q('auditRefreshBtn').onclick = ()=> refreshAuditLogs().catch(e=>{});
 
       q('resetProdBtn').onclick = async ()=>{
         const ok = confirm('Tum sayim, olay ve kalip gecmisini sifirlamak istiyor musun? Bu islem geri alinmaz.');
@@ -1400,8 +2291,36 @@
         }
       };
       q('clearRoiBtn').onclick = ()=>{ roiPoly = null; drawRoi(); };
-      q('axisDir').addEventListener('change', drawRoi);
+      q('swapAxisBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          const m = machineById(id);
+          if(!m) throw new Error('Makine secilmedi');
+          const p0 = JSON.parse(m.axis_p0 || 'null');
+          const p1 = JSON.parse(m.axis_p1 || 'null');
+          if(!Array.isArray(p0) || !Array.isArray(p1)) throw new Error('Once cizgi kaydet');
+          const payload = {
+            axis_p0: JSON.stringify(p1),
+            axis_p1: JSON.stringify(p0),
+          };
+          if(roiPoly && roiPoly.length === 4){
+            const lineLen01 = Math.hypot(roiPoly[1].x-roiPoly[0].x, roiPoly[1].y-roiPoly[0].y);
+            const lineLen03 = Math.hypot(roiPoly[3].x-roiPoly[0].x, roiPoly[3].y-roiPoly[0].y);
+            const p = roiPoly.map(pt => ({x:pt.x, y:pt.y}));
+            roiPoly = lineLen01 >= lineLen03 ? [p[1], p[0], p[3], p[2]] : [p[3], p[2], p[1], p[0]];
+            const roi = toNorm(roiPoly);
+            if(roi) payload.roi_polygon = JSON.stringify(roi);
+          }
+          const updated = await jpatch(`/api/machines/${id}`, payload);
+          const idx = machines.findIndex(x=>x.id===id);
+          if(idx >= 0) machines[idx] = updated;
+          drawRoi();
+          updateProminenceHint();
+          setMsg('roiMsg','Cizgi yonu cevrildi (KAPALI/ACIK uc yer degisti)','good');
+        }catch(e){ setMsg('roiMsg', String(e), 'bad'); }
+      };
       q('lineThickness').addEventListener('input', drawRoi);
+      q('minProminence').addEventListener('input', updateProminenceHint);
       q('saveRoiBtn').onclick = async ()=>{
         try{
           const id = Number(machineSelect.value);
@@ -1433,18 +2352,112 @@
         }
       };
 
-      applyZoom();
-      applyFieldTips();
-      connectLiveWs();
-      refreshLiveSnapshotHttp();
-      setInterval(() => refreshLiveSnapshotHttp(), 1000);
-      refreshPiTime().catch(e=>setMsg('piTimeMsg', String(e), 'bad'));
-      refreshWifiAp().catch(e=>setMsg('wifiApMsg', String(e), 'bad'));
-      refreshTelegramSettings().catch(e=>setMsg('tgMsg', apiErrText(e), 'bad'));
-      refreshSshSettings().catch(e=>setMsg('sshMsg', apiErrText(e), 'bad'));
-      setInterval(()=>refreshPiTime().catch(()=>{}), 30000);
-      loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
-      setInterval(refreshCameraStatuses, 3000);
+      async function loadVisionSettings(){
+        try{
+          const v = await jget('/api/settings/vision');
+          if(v && v.sample_interval_ms != null) q('visionSampleMs').value = v.sample_interval_ms;
+        }catch(_){}
+      }
+
+      q('saveVisionSampleBtn').onclick = async ()=>{
+        try{
+          const ms = Number(q('visionSampleMs').value || 100);
+          const v = await jpatch('/api/settings/vision', { sample_interval_ms: ms });
+          if(v && v.sample_interval_ms != null) q('visionSampleMs').value = v.sample_interval_ms;
+          setMsg('roiMsg', `Islem araligi ${v.sample_interval_ms} ms kaydedildi (yaklasik ${v.target_fps} Hz)`, 'good');
+        }catch(e){ setMsg('roiMsg', apiErrText(e), 'bad'); }
+      };
+
+      let _appStarted = false;
+      function startApp(){
+        if(_appStarted) return;
+        _appStarted = true;
+        applyZoom();
+        applyFieldTips();
+        connectLiveWs();
+        refreshLiveSnapshotHttp(); // ilk dolum; sonrasi WS uzerinden gelir
+        loadVisionSettings().catch(()=>{});
+        refreshPiTime().catch(e=>setMsg('piTimeMsg', String(e), 'bad'));
+        refreshWifiAp().catch(e=>setMsg('wifiApMsg', String(e), 'bad'));
+        refreshTelegramSettings().catch(e=>setMsg('tgMsg', apiErrText(e), 'bad'));
+        refreshAuditLogs().catch(()=>{});
+        setInterval(()=>refreshPiTime().catch(()=>{}), 30000);
+        loadAll().catch(e=>setMsg('roiMsg', String(e), 'bad'));
+        setInterval(refreshCameraStatuses, 3000);
+        q('liveViewCam').onchange = ()=>{
+          liveViewCamId = Number(q('liveViewCam').value);
+          liveViewImgMeta = null;
+          liveViewImgBusy = false;
+          refreshLiveViewImage();
+          updateLiveViewPanel();
+        };
+        q('liveViewImg').onload = ()=>{
+          liveViewImgBusy = false;
+          const el = q('liveViewImg');
+          liveViewImgMeta = {
+            nw: el.naturalWidth || 1,
+            nh: el.naturalHeight || 1,
+            cw: el.clientWidth || 1,
+            ch: el.clientHeight || 1,
+          };
+          updateLiveViewPanel();
+        };
+        q('liveViewImg').onerror = ()=>{ liveViewImgBusy = false; };
+        setInterval(()=> refreshLiveViewImage(), 750);
+      }
+
+      function showLogin(show){
+        q('loginOverlay').style.display = show ? 'flex' : 'none';
+        q('wrapRoot').style.display = show ? 'none' : '';
+      }
+
+      async function doLogin(){
+        const username = (q('loginUser').value || '').trim();
+        const pw = q('loginPw').value;
+        if(!username || !pw){ setMsg('loginMsg','Kullanici adi ve sifre girin','bad'); return; }
+        try{
+          const r = await fetch(location.origin + '/api/auth/login', {
+            method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({username, password: pw}),
+          });
+          if(!r.ok){ throw new Error(await r.text()); }
+          const me = await r.json();
+          q('loginPw').value = '';
+          q('whoami').textContent = me.display_name + (me.is_super ? ' (Super)' : '');
+          showLogin(false);
+          startApp();
+        }catch(e){ setMsg('loginMsg', apiErrText(e), 'bad'); }
+      }
+
+      async function doLogout(){
+        try{ await fetch(location.origin + '/api/auth/logout', {method:'POST', credentials:'include'}); }catch(_){}
+        location.reload();
+      }
+
+      q('loginBtn').onclick = doLogin;
+      q('loginPw').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+      q('logoutBtn').onclick = doLogout;
+
+      (async function bootstrap(){
+        try{
+          const mode = await fetch(location.origin + '/api/auth/login-mode');
+          if(mode.ok){
+            const info = await mode.json();
+            if(info && info.hint) q('loginHint').textContent = info.hint;
+          }
+        }catch(_){}
+        try{
+          const r = await fetch(location.origin + '/api/auth/me', { credentials:'include' });
+          if(r.ok){
+            const me = await r.json();
+            q('whoami').textContent = me.display_name + (me.is_super ? ' (Super)' : '');
+            showLogin(false);
+            startApp();
+            return;
+          }
+        }catch(_){}
+        showLogin(true);
+      })();
     </script>
   </body>
 </html>

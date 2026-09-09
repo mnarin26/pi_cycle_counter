@@ -6,9 +6,10 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_super_or_admin
 from app.db.models import AppSetting
 from app.services.reset_production import wipe_production_history
+from app.services.production_settings import get_production_settings, patch_production_settings
 from app.services.stored_settings import (
     add_operator,
     get_section,
@@ -46,6 +47,45 @@ class SshSettingsPatch(BaseModel):
 class SettingKV(BaseModel):
     key: str
     value: dict
+
+
+class ProductionBreak(BaseModel):
+    start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    end: str = Field(..., pattern=r"^(\d{2}:\d{2}|24:00)$")
+
+
+class ProductionShift(BaseModel):
+    id: str = Field(..., min_length=1, max_length=32)
+    name: str = Field(..., min_length=1, max_length=64)
+    start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    end: str = Field(..., pattern=r"^(\d{2}:\d{2}|24:00)$")
+    breaks: list[ProductionBreak] | None = None
+
+
+class ProductionSettingsPatch(BaseModel):
+    tv_rotate_seconds: int | None = Field(default=None, ge=5, le=300)
+    idle_stopped_seconds: int | None = Field(default=None, ge=30, le=3600)
+    shifts: list[ProductionShift] | None = None
+
+
+@router.get("/production")
+def get_production_settings_route(db: Session = Depends(get_db)):
+    return get_production_settings(db)
+
+
+@router.patch("/production")
+def patch_production_settings_route(
+    body: ProductionSettingsPatch,
+    db: Session = Depends(get_db),
+    _user=Depends(require_super_or_admin),
+):
+    patch = body.model_dump(exclude_unset=True)
+    if "shifts" in patch and patch["shifts"] is not None:
+        patch["shifts"] = [s.model_dump() if hasattr(s, "model_dump") else s for s in patch["shifts"]]
+    try:
+        return patch_production_settings(db, patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/telegram")

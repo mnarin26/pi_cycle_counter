@@ -61,6 +61,11 @@ def assign_mold_to_machine(
         raise ValueError("Makine bulunamadi")
     if not mold:
         raise ValueError("Kalip bulunamadi")
+    # Bir kalip ayni anda yalnizca bir makinede calisabilir.
+    db.query(Machine).filter(Machine.current_mold_id == mold.id, Machine.id != machine.id).update(
+        {Machine.current_mold_id: None},
+        synchronize_session=False,
+    )
     machine.current_mold_id = mold.id
     link_mold_machine(db, mold.id, machine.id)
     db.add(
@@ -93,6 +98,12 @@ def create_mold_from_qr(
     name: str,
     source: str = "telegram",
     operator_name: str | None = None,
+    target_cycle_s: float | None = None,
+    daily_target_count: int | None = None,
+    work_mode: str = "auto",
+    mount_minutes: int | None = None,
+    removal_minutes: int | None = None,
+    tolerance_s: float = 0.35,
 ) -> Mold:
     code = qr_code.strip()
     if not code:
@@ -102,12 +113,23 @@ def create_mold_from_qr(
     nm = name.strip()
     if not nm:
         raise ValueError("Kalip adi bos")
+    target = float(target_cycle_s) if target_cycle_s and target_cycle_s > 0 else None
+    daily_target = int(daily_target_count) if daily_target_count and daily_target_count > 0 else None
+    tol = float(tolerance_s) if tolerance_s and tolerance_s > 0 else 0.35
+    mode = "manual" if str(work_mode).strip().lower() == "manual" else "auto"
+    mount_m = int(mount_minutes) if mount_minutes and mount_minutes > 0 else None
+    removal_m = int(removal_minutes) if removal_minutes and removal_minutes > 0 else None
     mold = Mold(
         qr_code=code,
         name=nm,
         status="active",
-        avg_cycle_s=0.0,
-        tolerance_s=0.35,
+        avg_cycle_s=target or 0.0,
+        target_cycle_s=target,
+        daily_target_count=daily_target,
+        work_mode=mode,
+        mount_minutes=mount_m,
+        removal_minutes=removal_m,
+        tolerance_s=tol,
         sample_count=0,
         confidence=0.0,
     )

@@ -8,12 +8,13 @@ import {
   ComposedChart,
   Legend,
   Line,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { apiDownloadCsv, apiGet, apiPost } from "../api/client";
+import { apiDelete, apiDownloadCsv, apiGet, apiPost } from "../api/client";
 import {
   buildZigzagSeries,
   buildZigzagLineSegments,
@@ -23,7 +24,6 @@ import {
   computeZigzagYDomain,
   applyZigzagYScale,
   datetimeLocalInputToUtcIso,
-  eventColor,
   formatAxisTime,
   formatZigzagAxisTick,
   parseApiTime,
@@ -42,6 +42,7 @@ import {
 } from "../lib/chartTheme";
 import { useLiveSnapshot } from "../hooks/useLiveSnapshot";
 import { useZigzagViewport } from "../hooks/useZigzagViewport";
+import { DEFAULT_IDLE_STOPPED_S, machineStatusView } from "../lib/machineStatus";
 
 type Machine = {
   id: number;
@@ -71,6 +72,17 @@ type EventRow = {
   type: string;
   created_at: string | null;
 };
+
+type DowntimeRow = {
+  id: number;
+  machine_id: number;
+  start_at: string;
+  end_at: string;
+  note: string;
+  created_by?: string | null;
+};
+
+type IntervalWindow = { start: string; end: string };
 
 type TrendMoldSlice = { mold_name: string; count: number };
 
@@ -107,6 +119,14 @@ type DashboardPayload = {
     min_cycle_s: number;
     max_cycle_s: number;
   } | null;
+  range_efficiency?: {
+    actual_count: number;
+    target_count: number;
+    efficiency_pct: number | null;
+    avg_cycle_s: number;
+    target_cycle_s: number | null;
+    available: boolean;
+  } | null;
   mold_breakdown: Array<{
     mold_id: number | null;
     mold_name: string;
@@ -120,8 +140,12 @@ type DashboardPayload = {
   trend_mold_names: string[];
   series: CyclePoint[];
   series_total: number;
+  series_shown?: number;
+  series_truncated?: boolean;
   series_lazy?: boolean;
   events: EventRow[];
+  downtimes?: IntervalWindow[];
+  changeovers?: IntervalWindow[];
 };
 
 type RangeKey = "daily" | "weekly" | "monthly" | "yearly";
@@ -249,6 +273,14 @@ function ChartLegend({
                 <span className="inline-block h-0.5 w-4 border-t border-dashed border-amber-400" />
                 Duruş boşluğu (çizgi kopuk)
               </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-3 w-4 rounded-sm bg-rose-400/25 ring-1 ring-rose-400/50" />
+                Girilen duruş
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-3 w-4 rounded-sm bg-sky-400/20 ring-1 ring-sky-400/40" />
+                Kalıp değişimi
+              </span>
             </>
           ) : (
             <>
@@ -293,17 +325,22 @@ export function MachineDetailPage() {
   const [range, setRange] = useState<RangeKey>("daily");
   const [fromInput, setFromInput] = useState("");
   const [toInput, setToInput] = useState("");
-  const [replayMode, setReplayMode] = useState<"missing_only" | "reprocess">("missing_only");
-  const [replayBusy, setReplayBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState<"summary" | "cycles" | null>(null);
-  const [replayMsg, setReplayMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [zigzagResolution, setZigzagResolution] = useState<ZigzagResolution>("6h");
+  const [idleStoppedSeconds, setIdleStoppedSeconds] = useState(DEFAULT_IDLE_STOPPED_S);
+  const [zigzagResolution, setZigzagResolution] = useState<ZigzagResolution>("24h");
+  const [downtimeList, setDowntimeList] = useState<DowntimeRow[]>([]);
+  const [dtStart, setDtStart] = useState("");
+  const [dtEnd, setDtEnd] = useState("");
+  const [dtNote, setDtNote] = useState("");
+  const [dtBusy, setDtBusy] = useState(false);
+  const [dtErr, setDtErr] = useState<string | null>(null);
   const lastLiveEmitRef = useRef<number>(-1);
   const liveDashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadGenRef = useRef(0);
   const machineLoadedRef = useRef(0);
+  const viewLoggedRef = useRef(0);
 
   const snapMachine = useMemo(
     () => snapshot.machines.find((m) => m.id === machineId) ?? null,
@@ -330,14 +367,32 @@ export function MachineDetailPage() {
     }
   }, [machineId]);
 
+  useEffect(() => {
+    apiGet<{ idle_stopped_seconds?: number }>("/api/settings/production")
+      .then((cfg) => {
+        const idle = Number(cfg.idle_stopped_seconds);
+        if (Number.isFinite(idle) && idle >= 30) setIdleStoppedSeconds(idle);
+      })
+      .catch(() => setIdleStoppedSeconds(DEFAULT_IDLE_STOPPED_S));
+  }, []);
+
+  // Record a single "detail viewed" activity per machine navigation.
+  useEffect(() => {
+    if (!machineId || viewLoggedRef.current === machineId) return;
+    viewLoggedRef.current = machineId;
+    void apiPost("/api/activity", {
+      action: "machine.detail.view",
+      machine_id: machineId,
+      machine_name: machine?.name,
+    }).catch(() => {});
+  }, [machineId, machine?.name]);
+
   const loadDash = useCallback(async () => {
     if (!machineId) return;
     const gen = ++loadGenRef.current;
     setLoading(true);
     try {
-      const eventsCap =
-        range === "yearly" ? 60 : range === "monthly" ? 80 : range === "weekly" ? 120 : 100;
-      const dashPath = `/api/analytics/machine_dashboard?${buildWindowQuery()}&events_limit=${eventsCap}`;
+      const dashPath = `/api/analytics/machine_dashboard?${buildWindowQuery()}&events_limit=10`;
       const [machineData, dashData] = await Promise.all([
         apiGet<Machine>(`/api/machines/${machineId}`),
         apiGet<DashboardPayload>(dashPath),
@@ -353,34 +408,61 @@ export function MachineDetailPage() {
     }
   }, [machineId, buildWindowQuery, range]);
 
-  const runReplay = useCallback(async () => {
+  const loadDowntimes = useCallback(async () => {
     if (!machineId) return;
-    setReplayBusy(true);
-    setReplayMsg(null);
     try {
-      const body: Record<string, unknown> = { range, mode: replayMode };
-      if (fromInput) body.from = datetimeLocalInputToUtcIso(fromInput);
-      if (toInput) body.to = datetimeLocalInputToUtcIso(toInput);
-      const res = await apiPost<{
-        cycles_total: number;
-        cycles_assigned: number;
-        cycles_skipped_existing: number;
-        events_created: number;
-      }>(`/api/machines/${machineId}/replay-mold-matching`, body);
-      setReplayMsg(
-        `${res.cycles_total} döngü tarandı · ${res.cycles_assigned} kalıp atandı` +
-          (res.cycles_skipped_existing
-            ? ` · ${res.cycles_skipped_existing} zaten kayıtlıydı (atlanıldı)`
-            : "") +
-          (res.events_created ? ` · ${res.events_created} olay` : ""),
-      );
-      await loadDash();
-    } catch (e) {
-      setReplayMsg(String(e));
-    } finally {
-      setReplayBusy(false);
+      const rows = await apiGet<DowntimeRow[]>(`/api/machines/${machineId}/downtimes`);
+      setDowntimeList(rows);
+    } catch {
+      /* non-fatal */
     }
-  }, [machineId, range, replayMode, fromInput, toInput, loadDash]);
+  }, [machineId]);
+
+  useEffect(() => {
+    void loadDowntimes();
+  }, [loadDowntimes]);
+
+  const submitDowntime = useCallback(async () => {
+    if (!machineId) return;
+    if (!dtStart || !dtEnd) {
+      setDtErr("Başlangıç ve bitiş girin");
+      return;
+    }
+    if (!dtNote.trim()) {
+      setDtErr("Açıklama zorunlu");
+      return;
+    }
+    setDtBusy(true);
+    setDtErr(null);
+    try {
+      await apiPost(`/api/machines/${machineId}/downtimes`, {
+        start_at: datetimeLocalInputToUtcIso(dtStart),
+        end_at: datetimeLocalInputToUtcIso(dtEnd),
+        note: dtNote.trim(),
+      });
+      setDtStart("");
+      setDtEnd("");
+      setDtNote("");
+      await Promise.all([loadDowntimes(), loadDash()]);
+    } catch (e) {
+      setDtErr(String(e));
+    } finally {
+      setDtBusy(false);
+    }
+  }, [machineId, dtStart, dtEnd, dtNote, loadDowntimes, loadDash]);
+
+  const removeDowntime = useCallback(
+    async (id: number) => {
+      if (!machineId) return;
+      try {
+        await apiDelete(`/api/machines/${machineId}/downtimes/${id}`);
+        await Promise.all([loadDowntimes(), loadDash()]);
+      } catch (e) {
+        setDtErr(String(e));
+      }
+    },
+    [machineId, loadDowntimes, loadDash],
+  );
 
   const downloadExport = useCallback(
     async (kind: "summary" | "cycles") => {
@@ -588,11 +670,30 @@ export function MachineDetailPage() {
     [chartMode, xDomain, zigzagResolution],
   );
 
+  const downtimeBands = useMemo(
+    () =>
+      (dash?.downtimes ?? []).map((w) => ({
+        x1: parseApiTime(w.start),
+        x2: parseApiTime(w.end),
+      })),
+    [dash?.downtimes],
+  );
+
+  const changeoverBands = useMemo(
+    () =>
+      (dash?.changeovers ?? []).map((w) => ({
+        x1: parseApiTime(w.start),
+        x2: parseApiTime(w.end),
+      })),
+    [dash?.changeovers],
+  );
+
   if (!machineId) {
     return <p className="text-alarm">Geçersiz makine id</p>;
   }
 
   const summary = dash?.summary;
+  const rangeEff = dash?.range_efficiency ?? null;
   const activeMold = dash?.active_mold ?? null;
   // Prefer active-mold stats for avg/min/max; fall back to global summary
   const moldStats = activeMold ?? summary;
@@ -649,26 +750,6 @@ export function MachineDetailPage() {
               onChange={(e) => setToInput(e.target.value)}
             />
           </label>
-          <label className="text-sm">
-            <span className="mb-1 block text-xs text-slate-400">Geçmiş işleme</span>
-            <select
-              className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
-              value={replayMode}
-              onChange={(e) => setReplayMode(e.target.value as "missing_only" | "reprocess")}
-              disabled={replayBusy}
-            >
-              <option value="missing_only">Sadece boş olanlar</option>
-              <option value="reprocess">Aralığı yeniden işle</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            className="rounded bg-amber-700 px-3 py-2 text-sm font-medium disabled:opacity-50"
-            disabled={replayBusy || loading}
-            onClick={() => void runReplay()}
-          >
-            {replayBusy ? "İşleniyor…" : "Kalıp eşleştirmesini çalıştır"}
-          </button>
           <button
             type="button"
             className="rounded bg-emerald-800 px-3 py-2 text-sm font-medium disabled:opacity-50"
@@ -686,20 +767,14 @@ export function MachineDetailPage() {
             {exportBusy === "cycles" ? "İndiriliyor…" : "Döngü CSV indir"}
           </button>
         </div>
-        <p className="mt-2 text-xs text-slate-500">
-          Yukarıdaki aralık kullanılır (günlük ≈ bugün, haftalık ≈ bu hafta). En fazla 7 gün.
-          <strong className="font-normal text-slate-400"> Sadece boş olanlar:</strong> daha önce
-          kayıtlı kalıplara dokunulmaz.
-          <strong className="font-normal text-slate-400"> Yeniden işle:</strong> seçili aralıktaki
-          atamalar silinip matcher baştan çalışır.
-        </p>
-        {replayMsg && <p className="mt-1 text-xs text-amber-200">{replayMsg}</p>}
       </div>
 
-      <div className="grid gap-3 md:grid-cols-6">
+      <div className="grid gap-3 md:grid-cols-7">
         <div className="rounded border border-slate-700 bg-panel2 p-3">
           <div className="text-xs text-slate-400">Canlı Durum</div>
-          <div className="text-lg font-semibold">{snapMachine?.state || "—"}</div>
+          <div className={`text-lg font-semibold ${machineStatusView(snapMachine, idleStoppedSeconds).colorClass}`}>
+            {snapMachine ? machineStatusView(snapMachine, idleStoppedSeconds).label : "—"}
+          </div>
         </div>
         <div className="rounded border border-slate-700 bg-panel2 p-3">
           <div className="text-xs text-slate-400">Toplam Döngü</div>
@@ -729,6 +804,23 @@ export function MachineDetailPage() {
           <div className="text-lg font-semibold">
             {summary ? `${summary.last_cycle_s.toFixed(2)}s` : "—"}
           </div>
+        </div>
+        <div className="rounded border border-slate-700 bg-panel2 p-3">
+          <div className="text-xs text-slate-400">Aralık Verimliliği</div>
+          {rangeEff && rangeEff.available && rangeEff.efficiency_pct != null ? (
+            <>
+              <div className="text-lg font-semibold text-amber-300">
+                %{rangeEff.efficiency_pct.toFixed(0)}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {rangeEff.actual_count} / {rangeEff.target_count || "—"} gereken
+              </div>
+            </>
+          ) : (
+            <div className="text-sm font-semibold text-slate-500">
+              {rangeEff && !rangeEff.available ? "Kalıp tanımlı değil" : "—"}
+            </div>
+          )}
         </div>
       </div>
       {moldStats && summary && moldStats !== summary && (
@@ -775,7 +867,7 @@ export function MachineDetailPage() {
           <p className="mb-2 text-xs text-amber-200">
             {seriesLazy
               ? `${viewport.mergedSeries.length.toLocaleString("tr-TR")} / ${totalCycles.toLocaleString("tr-TR")} döngü`
-              : `${dash!.series_shown.toLocaleString("tr-TR")} / ${dash!.series_total.toLocaleString("tr-TR")} döngü`}
+              : `${(dash?.series_shown ?? 0).toLocaleString("tr-TR")} / ${(dash?.series_total ?? 0).toLocaleString("tr-TR")} döngü`}
           </p>
         )}
         <div
@@ -820,6 +912,30 @@ export function MachineDetailPage() {
                   shared={false}
                   filterNull={false}
                 />
+                {changeoverBands.map((b, i) => (
+                  <ReferenceArea
+                    key={`co-${b.x1}-${i}`}
+                    x1={b.x1}
+                    x2={b.x2}
+                    ifOverflow="hidden"
+                    fill="#38bdf8"
+                    fillOpacity={0.12}
+                    stroke="#38bdf8"
+                    strokeOpacity={0.3}
+                  />
+                ))}
+                {downtimeBands.map((b, i) => (
+                  <ReferenceArea
+                    key={`dt-${b.x1}-${i}`}
+                    x1={b.x1}
+                    x2={b.x2}
+                    ifOverflow="hidden"
+                    fill="#f87171"
+                    fillOpacity={0.16}
+                    stroke="#f87171"
+                    strokeOpacity={0.4}
+                  />
+                ))}
                 {zigzagLineSegments.map((seg, i) => (
                   <Line
                     key={`${seg.mold}-${i}`}
@@ -896,6 +1012,98 @@ export function MachineDetailPage() {
       </div>
 
       <div className="rounded border border-slate-700 bg-panel2 p-3">
+        <h3 className="mb-1 text-sm font-semibold">Duruş Girişi</h3>
+        <p className="mb-3 text-xs text-slate-400">
+          Girilen aralık, makine çalışmış olsa bile duruş sayılır: o aralıktaki döngüler
+          verimliliğe eklenmez ve süre affedilmez. Mola ve kalıp değişimine denk gelen kısım
+          önceliklidir.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-sm">
+            <span className="mb-1 block text-xs text-slate-400">Başlangıç</span>
+            <input
+              type="datetime-local"
+              className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
+              value={dtStart}
+              onChange={(e) => setDtStart(e.target.value)}
+            />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs text-slate-400">Bitiş</span>
+            <input
+              type="datetime-local"
+              className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
+              value={dtEnd}
+              onChange={(e) => setDtEnd(e.target.value)}
+            />
+          </label>
+          <label className="text-sm flex-1 min-w-[200px]">
+            <span className="mb-1 block text-xs text-slate-400">Açıklama</span>
+            <input
+              type="text"
+              maxLength={256}
+              placeholder="Örn. kalıp arızası, malzeme bekleme"
+              className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+              value={dtNote}
+              onChange={(e) => setDtNote(e.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="rounded bg-rose-800 px-3 py-2 text-sm font-medium disabled:opacity-50"
+            disabled={dtBusy}
+            onClick={() => void submitDowntime()}
+          >
+            {dtBusy ? "Kaydediliyor…" : "Duruş ekle"}
+          </button>
+        </div>
+        {dtErr && <p className="mt-2 text-sm text-rose-300">{dtErr}</p>}
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-left text-slate-400">
+              <tr>
+                <th className="py-1 pr-3">Başlangıç</th>
+                <th className="py-1 pr-3">Bitiş</th>
+                <th className="py-1 pr-3">Açıklama</th>
+                <th className="py-1 pr-3">Ekleyen</th>
+                <th className="py-1 pr-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {downtimeList.map((d) => (
+                <tr key={d.id} className="border-t border-slate-800">
+                  <td className="py-1 pr-3 whitespace-nowrap">
+                    {new Date(parseApiTime(d.start_at)).toLocaleString("tr-TR")}
+                  </td>
+                  <td className="py-1 pr-3 whitespace-nowrap">
+                    {new Date(parseApiTime(d.end_at)).toLocaleString("tr-TR")}
+                  </td>
+                  <td className="py-1 pr-3">{d.note}</td>
+                  <td className="py-1 pr-3 text-slate-500">{d.created_by || "—"}</td>
+                  <td className="py-1 pr-3 text-right">
+                    <button
+                      type="button"
+                      className="rounded bg-slate-700 px-2 py-1 text-xs hover:bg-slate-600"
+                      onClick={() => void removeDowntime(d.id)}
+                    >
+                      Sil
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {downtimeList.length === 0 && (
+                <tr>
+                  <td className="py-2 text-slate-500" colSpan={5}>
+                    Kayıtlı duruş yok
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="rounded border border-slate-700 bg-panel2 p-3">
         <h3 className="mb-2 text-sm font-semibold">Kalıp Bazlı Üretim Dağılımı</h3>
         <div className="h-56">
           <ResponsiveContainer width="100%" height="100%">
@@ -957,90 +1165,6 @@ export function MachineDetailPage() {
         </div>
       </div>
 
-      <div className="rounded border border-slate-700 bg-panel2 p-3">
-        <h3 className="mb-2 text-sm font-semibold">Canlı Tespit Telemetrisi</h3>
-        <div className="grid gap-2 text-sm md:grid-cols-3">
-          <div>Pozisyon: {snapMachine?.position_01 != null ? snapMachine.position_01.toFixed(3) : "—"}</div>
-          <div>Prominence: {snapMachine?.prominence ?? "—"}</div>
-          <div>Segment Len: {snapMachine?.segment_len ?? "—"}</div>
-          <div>
-            Peak/Bg: {snapMachine ? `${snapMachine.peak ?? 0}/${snapMachine.background ?? 0}` : "—"}
-          </div>
-          <div>
-            Len Aralığı:{" "}
-            {machine?.reflector_len_min != null && machine?.reflector_len_max != null
-              ? `${machine.reflector_len_min}-${machine.reflector_len_max}`
-              : "—"}
-          </div>
-          <div>Kamera FPS: {snapMachine?.fps != null ? snapMachine.fps.toFixed(1) : "—"}</div>
-        </div>
-      </div>
-
-      <div className="rounded border border-slate-700 bg-panel2 p-3">
-        <h3 className="mb-2 text-sm font-semibold">Makine Ayarları</h3>
-        <div className="grid gap-2 text-sm md:grid-cols-3">
-          <div>Debounce: {machine?.debounce_ms ?? "—"} ms</div>
-          <div>Sabit Onay: {machine?.stability_confirm_ms ?? "—"} ms</div>
-          <div>Hysteresis: {machine?.hysteresis ?? "—"}</div>
-          <div>Threshold: {machine ? `${machine.threshold_mode} / ${machine.threshold_min}` : "—"}</div>
-          <div>Offset: {machine?.threshold_offset ?? "—"}</div>
-          <div>Line Thickness: {machine?.line_thickness ?? "—"}</div>
-        </div>
-      </div>
-
-      <div className="rounded border border-slate-700 bg-panel2 p-3">
-        <h3 className="mb-2 text-sm font-semibold">Son 20 Döngü</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-left text-slate-400">
-              <tr>
-                <th className="py-1 pr-3">Zaman</th>
-                <th className="py-1 pr-3">Döngü (s)</th>
-                <th className="py-1 pr-3">Kalıp</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(dash?.series ?? []).slice(-20).map((x, i) => (
-                <tr key={`${x.t}-${i}`} className="border-t border-slate-800">
-                  <td className="py-1 pr-3">
-                    {new Date(parseApiTime(x.t)).toLocaleString("tr-TR", {
-                      timeZone: "Europe/Istanbul",
-                    })}
-                  </td>
-                  <td className="py-1 pr-3">{x.cycle_time_s.toFixed(2)}</td>
-                  <td className="py-1 pr-3">{x.mold || "—"}</td>
-                </tr>
-              ))}
-              {(dash?.series?.length ?? 0) === 0 && (
-                <tr>
-                  <td className="py-2 text-slate-500" colSpan={3}>
-                    Kayıt yok
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className="rounded border border-slate-700 bg-panel2 p-3">
-        <h3 className="mb-2 text-sm font-semibold">Son Olaylar</h3>
-        <ul className="space-y-1 text-sm">
-          {(dash?.events ?? []).slice(-10).reverse().map((e) => (
-            <li key={e.id} className="border-b border-slate-800 pb-1">
-              <span
-                className="mr-2 inline-block h-2 w-2 rounded-full"
-                style={{ background: eventColor(e.type) }}
-              />
-              <span className="mr-2 text-slate-400">
-                {e.created_at ? new Date(e.created_at).toLocaleString("tr-TR") : "—"}
-              </span>
-              <span className="font-medium">{e.type}</span>
-            </li>
-          ))}
-          {(dash?.events?.length ?? 0) === 0 && <li className="text-slate-500">Olay yok</li>}
-        </ul>
-      </div>
     </div>
   );
 }

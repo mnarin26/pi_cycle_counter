@@ -44,7 +44,7 @@ def _effective_camera_status(camera: Camera, orch) -> str:
     if w is None:
         return "disconnected"
     age_ms = w.latest_age_ms()
-    if age_ms >= 0 and age_ms < 10_000:
+    if age_ms >= 0 and age_ms < 2000:
         return "ok"
     live = w.status or "disconnected"
     if live == "ok" and age_ms < 0:
@@ -87,22 +87,38 @@ def test_camera(camera_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{camera_id}/snapshot.jpg")
-def snapshot_jpg(camera_id: int, request: Request):
+async def snapshot_jpg(camera_id: int, request: Request):
+    """JPEG for live view: use fresh cache, else encode off the event loop."""
+    import asyncio
+
     orch = request.app.state.vision
     w = orch.workers.get(camera_id)
     if not w:
         raise HTTPException(404, "camera worker not running")
-    frame = w.read_latest()
-    if frame is None:
+
+    def _encode() -> tuple[bytes | None, float]:
+        cached, age = w.read_latest_jpeg()
+        if cached is not None and 0 <= age < 450:
+            return cached, age
+        frame = w.read_latest()
+        if frame is None:
+            return None, -1.0
+        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
+        if not ok:
+            return None, -1.0
+        data = buf.tobytes()
+        age_ms = w.latest_age_ms() if hasattr(w, "latest_age_ms") else -1.0
+        if hasattr(w, "publish_jpeg"):
+            w.publish_jpeg(data)
+        return data, float(age_ms)
+
+    content, age_ms = await asyncio.to_thread(_encode)
+    if content is None:
         raise HTTPException(503, "no frame")
-    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-    if not ok:
-        raise HTTPException(500, "encode failed")
-    age_ms = w.latest_age_ms() if hasattr(w, "latest_age_ms") else -1.0
     headers = {
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
         "Expires": "0",
-        "X-Frame-Age-Ms": f"{age_ms:.0f}",
+        "X-Frame-Age-Ms": f"{float(age_ms):.0f}",
     }
-    return Response(content=buf.tobytes(), media_type="image/jpeg", headers=headers)
+    return Response(content=content, media_type="image/jpeg", headers=headers)

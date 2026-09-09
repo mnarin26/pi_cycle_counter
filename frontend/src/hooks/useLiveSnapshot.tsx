@@ -25,12 +25,15 @@ export type MachineSnap = {
   reflector_len_min?: number | null;
   reflector_len_max?: number | null;
   dbg_cycle_emit_count?: number;
+  idle_s?: number | null;
 };
 
 export type Snapshot = {
   machines: MachineSnap[];
   cameras: { id: number; status: string; fps: number }[];
   cpu_proxy: number;
+  ws_clients?: number;
+  load_warn?: { level: "info" | "warn"; message: string } | null;
 };
 
 const defaultSnap: Snapshot = { machines: [], cameras: [], cpu_proxy: 0 };

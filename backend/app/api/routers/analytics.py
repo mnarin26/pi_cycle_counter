@@ -5,19 +5,38 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Integer, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.db.models import Cycle, Event, Machine, Mold
+from app.services.production_efficiency import (
+    active_mold_start,
+    changeover_windows as changeover_windows_calc,
+    downtime_windows as downtime_windows_calc,
+    hurt_downtime_windows,
+    mold_target_cycle_s,
+    range_efficiency as range_efficiency_block,
+    segment_efficiency,
+    shift_efficiency as shift_efficiency_block,
+    shift_target_plan as shift_target_plan_calc,
+)
 from app.services.mold_names import (
     enrich_series_mold_names,
     mold_name_map,
     resolve_cycle_mold_label,
     resolve_mold_display_name,
 )
-from app.services.time_windows import format_window_label, resolve_window
+from app.services.shifts import (
+    current_shift,
+    format_shift_clock,
+    get_shift_defs,
+    recent_shift_windows,
+    shift_hour_slots,
+    shift_window,
+)
+from app.services.time_windows import DISPLAY_TZ, format_window_label, resolve_window
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -307,39 +326,6 @@ def _aggregate_cycle_stats(db: Session, machine_id: int, start: datetime, end: d
     }
 
 
-@router.get("/summary")
-def summary(
-    db: Session = Depends(get_db),
-    range: Literal["daily", "weekly", "monthly", "yearly"] = "daily",
-    machine_id: int | None = None,
-    from_ts: datetime | None = Query(None, alias="from"),
-    to_ts: datetime | None = Query(None, alias="to"),
-):
-    start, end = resolve_window(range, from_ts, to_ts)
-    filt = db.query(Cycle).filter(Cycle.t_end >= start, Cycle.t_end <= end, Cycle.is_counted.is_(True))
-    if machine_id is not None:
-        filt = filt.filter(Cycle.machine_id == machine_id)
-    cnt = int(filt.with_entities(func.count(Cycle.id)).scalar() or 0)
-    if cnt == 0:
-        return {
-            "range": range,
-            "cycle_count": 0,
-            "avg_cycle_s": 0.0,
-            "uptime_proxy": 0.0,
-            "downtime_proxy": 0.0,
-        }
-    avg = float(filt.with_entities(func.avg(Cycle.cycle_time_s)).scalar() or 0)
-    return {
-        "range": range,
-        "from": start.isoformat(),
-        "to": end.isoformat(),
-        "cycle_count": cnt,
-        "avg_cycle_s": round(avg, 3),
-        "uptime_proxy": round(min(1.0, cnt / max(1, (end - start).total_seconds() / 10)), 3),
-        "downtime_proxy": 0.0,
-    }
-
-
 @router.get("/cycles_viewport")
 def cycles_viewport(
     machine_id: int,
@@ -361,46 +347,6 @@ def cycles_viewport(
         "shown": len(series),
         "truncated": truncated,
     }
-
-
-@router.get("/cycles_series")
-def cycles_series(
-    db: Session = Depends(get_db),
-    from_ts: datetime | None = Query(None, alias="from"),
-    to_ts: datetime | None = Query(None, alias="to"),
-    machine_id: int | None = None,
-    limit: int = Query(2500, le=8000),
-):
-    now = datetime.now(timezone.utc)
-    start = from_ts or (now - timedelta(days=1))
-    end = to_ts or now
-    q = (
-        db.query(Cycle)
-        .filter(Cycle.t_end >= start, Cycle.t_end <= end, Cycle.is_counted.is_(True))
-        .order_by(Cycle.t_end)
-    )
-    if machine_id is not None:
-        q = q.filter(Cycle.machine_id == machine_id)
-    rows = q.limit(limit).all()
-    if machine_id is not None:
-        # #region agent log
-        logger.info(
-            "[DBG][H1/H4] analytics_cycles_series machine_id=%s limit=%s rows=%s",
-            machine_id,
-            limit,
-            len(rows),
-        )
-        # #endregion
-    return [
-        {
-            "t": r.t_end.isoformat(),
-            "machine_id": r.machine_id,
-            "cycle_time_s": r.cycle_time_s,
-            "mold_id": r.mold_id,
-            "mold": r.mold_name_snapshot,
-        }
-        for r in rows
-    ]
 
 
 @router.get("/machine_analysis")
@@ -638,6 +584,14 @@ def machine_dashboard(
     }
     window_label = format_window_label(range, start, end)
 
+    # Range efficiency: target-vs-actual over [start, end], split by mold changes,
+    # breaks and changeovers (summed across shift instances).
+    range_efficiency = range_efficiency_block(
+        db, machine_id, start, end, datetime.now(timezone.utc)
+    )
+    downtimes = downtime_windows_calc(db, machine_id, start, end)
+    changeovers = changeover_windows_calc(db, machine_id, start, end)
+
     return {
         "machine_id": machine_id,
         "range": range,
@@ -647,6 +601,7 @@ def machine_dashboard(
         "chart_mode": chart_mode,
         "gap_threshold_s": gap_threshold_s,
         "summary": stats,
+        "range_efficiency": range_efficiency,
         "active_mold": active_mold,
         "mold_breakdown": mold_breakdown,
         "trend_resolution": trend_resolution,
@@ -659,6 +614,8 @@ def machine_dashboard(
         "series_truncated": series_truncated,
         "series_lazy": series_lazy,
         "events": events,
+        "downtimes": downtimes,
+        "changeovers": changeovers,
     }
 
 
@@ -816,31 +773,261 @@ def tv_board(
     }
 
 
-@router.get("/histogram")
-def histogram(
-    db: Session = Depends(get_db),
-    from_ts: datetime | None = Query(None, alias="from"),
-    to_ts: datetime | None = Query(None, alias="to"),
-    machine_id: int | None = None,
-    bins: int = 20,
-):
-    now = datetime.now(timezone.utc)
-    start = from_ts or (now - timedelta(days=7))
-    end = to_ts or now
-    q = db.query(Cycle.cycle_time_s).filter(Cycle.t_end >= start, Cycle.t_end <= end, Cycle.is_counted.is_(True))
-    if machine_id is not None:
-        q = q.filter(Cycle.machine_id == machine_id)
-    vals = [float(r[0]) for r in q.all() if r[0] is not None]
-    if not vals:
-        return {"bins": [], "counts": []}
-    lo, hi = min(vals), max(vals)
-    if hi <= lo:
-        hi = lo + 1e-3
-    width = (hi - lo) / bins
-    counts = [0] * bins
-    for v in vals:
-        i = int((v - lo) / width)
-        i = max(0, min(bins - 1, i))
-        counts[i] += 1
-    edges = [lo + i * width for i in range(bins + 1)]
-    return {"bin_edges": edges, "counts": counts}
+def _count_cycles(db: Session, machine_id: int, start: datetime, end: datetime) -> int:
+    return int(
+        db.query(func.count(Cycle.id))
+        .filter(
+            Cycle.machine_id == machine_id,
+            Cycle.t_end >= start,
+            Cycle.t_end <= end,
+            Cycle.is_counted.is_(True),
+        )
+        .scalar()
+        or 0
+    )
+
+
+def _avg_cycle_s(db: Session, machine_id: int, start: datetime, end: datetime, mold_id: int | None = None) -> float:
+    stats = _cycle_time_stats(db, machine_id, start, end, mold_id)
+    return stats["avg_cycle_s"]
+
+
+def _cycle_time_stats(
+    db: Session,
+    machine_id: int,
+    start: datetime,
+    end: datetime,
+    mold_id: int | None = None,
+    *,
+    exclude_hurt_downtime: bool = False,
+) -> dict[str, float | int]:
+    empty = {"cycle_count": 0, "avg_cycle_s": 0.0, "min_cycle_s": 0.0, "max_cycle_s": 0.0}
+    base = [
+        Cycle.machine_id == machine_id,
+        Cycle.t_end >= start,
+        Cycle.t_end <= end,
+        Cycle.is_counted.is_(True),
+    ]
+    if exclude_hurt_downtime:
+        base.extend(_exclude_hurt_filters(db, machine_id, start, end))
+
+    def _run(extra: list) -> dict[str, float | int]:
+        row = (
+            db.query(
+                func.count(Cycle.id),
+                func.avg(Cycle.cycle_time_s),
+                func.min(Cycle.cycle_time_s),
+                func.max(Cycle.cycle_time_s),
+            )
+            .filter(*base, *extra)
+            .one()
+        )
+        cnt = int(row[0] or 0)
+        if cnt <= 0:
+            return dict(empty)
+        return {
+            "cycle_count": cnt,
+            "avg_cycle_s": round(float(row[1] or 0), 2),
+            "min_cycle_s": round(float(row[2] or 0), 2),
+            "max_cycle_s": round(float(row[3] or 0), 2),
+        }
+
+    if mold_id is not None:
+        labeled = _run([Cycle.mold_id == mold_id])
+        if labeled["cycle_count"] > 0:
+            return labeled
+        return _run([Cycle.mold_id.is_(None)])
+    return _run([])
+
+
+def _active_mold_for_machine(db: Session, machine_id: int, start: datetime, end: datetime) -> tuple[int | None, str | None]:
+    row = (
+        db.query(Cycle.mold_id, Cycle.mold_name_snapshot)
+        .filter(
+            Cycle.machine_id == machine_id,
+            Cycle.t_end >= start,
+            Cycle.t_end <= end,
+            Cycle.is_counted.is_(True),
+            Cycle.mold_id.is_not(None),
+        )
+        .order_by(Cycle.t_end.desc())
+        .limit(1)
+        .first()
+    )
+    if not row or row[0] is None:
+        machine = db.get(Machine, machine_id)
+        if machine and machine.current_mold_id:
+            mold = db.get(Mold, machine.current_mold_id)
+            if mold:
+                return mold.id, resolve_mold_display_name(db, mold.id, mold.name)
+        return None, None
+    mold_id = int(row[0])
+    return mold_id, resolve_mold_display_name(db, mold_id, row[1])
+
+
+def _exclude_hurt_filters(db: Session, machine_id: int, start: datetime, end: datetime) -> list:
+    """SQLAlchemy filters that drop cycles falling inside hurt downtime windows."""
+    from sqlalchemy import and_, not_
+
+    return [
+        not_(and_(Cycle.t_end >= hs, Cycle.t_end <= he))
+        for hs, he in hurt_downtime_windows(db, machine_id, start, end)
+    ]
+
+
+def _shift_charts_for_machine(db: Session, machine_id: int, now: datetime) -> list[dict]:
+    from sqlalchemy import and_, not_
+
+    hour_col = func.cast(
+        func.strftime("%H", func.datetime(Cycle.t_end, "+3 hours")),
+        Integer,
+    ).label("hour")
+    charts: list[dict] = []
+    for i, (sh, win_start, win_end) in enumerate(recent_shift_windows(db, now)):
+        count_end = min(win_end, now)
+        slots = shift_hour_slots(win_start, win_end)
+        hurt = hurt_downtime_windows(db, machine_id, win_start, count_end)
+        excl = [not_(and_(Cycle.t_end >= hs, Cycle.t_end <= he)) for hs, he in hurt]
+        rows = (
+            db.query(hour_col, Cycle.mold_id, Cycle.mold_name_snapshot, func.count(Cycle.id))
+            .filter(
+                Cycle.machine_id == machine_id,
+                Cycle.t_end >= win_start,
+                Cycle.t_end <= count_end,
+                Cycle.is_counted.is_(True),
+                *excl,
+            )
+            .group_by(hour_col, Cycle.mold_id, Cycle.mold_name_snapshot)
+            .all()
+        )
+        # hour -> {mold_name: count}; plus stable list of mold names seen this shift
+        per_hour: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        mold_names: list[str] = []
+        for h, mold_id, mold_snap, cnt in rows:
+            label = resolve_cycle_mold_label(db, mold_id, mold_snap) or "Kalıp tanımlı değil"
+            per_hour[int(h or 0)][label] += int(cnt or 0)
+            if label not in mold_names:
+                mold_names.append(label)
+
+        # Mark Istanbul wall-clock hours that overlap hurt downtime (for TV tint).
+        downtime_hours: set[int] = set()
+        for hs, he in hurt:
+            t = hs.astimezone(DISPLAY_TZ).replace(minute=0, second=0, microsecond=0)
+            end_local = he.astimezone(DISPLAY_TZ)
+            guard = 0
+            while t < end_local and guard < 48:
+                guard += 1
+                downtime_hours.add(t.hour)
+                t += timedelta(hours=1)
+
+        date_label = win_start.astimezone(DISPLAY_TZ).strftime("%d.%m.%Y")
+        charts.append(
+            {
+                "id": sh.id,
+                "name": sh.name,
+                "date": date_label,
+                "title": f"{date_label} · {sh.name}",
+                "start": format_shift_clock(sh.start),
+                "end": format_shift_clock(sh.end, is_end=True),
+                "is_current": i == 0,
+                "mold_names": mold_names,
+                "hourly": [
+                    {
+                        "hour": h,
+                        "label": f"{h:02d}:00",
+                        "count": sum(per_hour.get(h, {}).values()),
+                        "by_mold": dict(per_hour.get(h, {})),
+                        "is_downtime": h in downtime_hours,
+                    }
+                    for h in slots
+                ],
+            }
+        )
+    return charts
+
+
+@router.get("/tv_machine")
+def tv_machine(machine_id: int, db: Session = Depends(get_db)):
+    """Full-screen TV payload for a single machine (daily + current shift KPIs)."""
+    machine = db.get(Machine, machine_id)
+    if not machine:
+        raise HTTPException(404, detail="Makine bulunamadı")
+
+    start, end = resolve_window("daily", None, None)
+    shift = current_shift(db)
+    # Full (uncapped) shift bounds — the plan stays fixed for the whole shift,
+    # otherwise the target keeps growing as `now` advances.
+    shift_start, shift_plan_end = shift_window(shift, end, cap_now=False)
+
+    now = end
+    active_mold_id, active_mold_name = _active_mold_for_machine(db, machine_id, start, end)
+    target_cycle_s = mold_target_cycle_s(db, active_mold_id)
+
+    cap_shift = min(shift_plan_end, now)
+
+    # Mold window: assigned this shift -> from assignment; else from shift start.
+    mold_start = active_mold_start(db, machine_id, active_mold_id, shift_start, cap_shift)
+    mold_efficiency = segment_efficiency(
+        db,
+        machine_id,
+        shift,
+        shift_start,
+        shift_plan_end,
+        mold_start,
+        shift_plan_end,
+        now,
+        mold_id=active_mold_id,
+    )
+    mold_actual = mold_efficiency["actual_count"]
+
+    # Shift efficiency: split by mold changes / breaks / changeovers across the shift.
+    shift_efficiency = shift_efficiency_block(db, machine_id, shift, shift_start, shift_plan_end, now)
+    shift_actual = shift_efficiency["actual_count"]
+
+    # Planned shift target: fixed for the whole shift (not capped at `now`).
+    shift_target_count, plan_available = shift_target_plan_calc(
+        db, machine_id, shift, shift_start, shift_plan_end, now
+    )
+
+    mold_stats = _cycle_time_stats(
+        db, machine_id, start, end, active_mold_id, exclude_hurt_downtime=True
+    )
+    downtimes = downtime_windows_calc(db, machine_id, shift_start, cap_shift)
+
+    return {
+        "machine_id": machine.id,
+        "name": machine.name,
+        "range": "daily",
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "window_label": format_window_label("daily", start, end),
+        "active_mold_id": active_mold_id,
+        "active_mold_name": active_mold_name,
+        "active_mold": {
+            "mold_id": active_mold_id,
+            "mold_name": active_mold_name,
+            "target_cycle_s": target_cycle_s,
+        }
+        if active_mold_id
+        else None,
+        "shift": {"id": shift.id, "name": shift.name},
+        "mold_output": {
+            "actual_count": mold_actual,
+            "mold_name": active_mold_name,
+            "available": active_mold_id is not None,
+        },
+        "shift_output": {"actual_count": shift_actual},
+        "shift_target_plan": {
+            "target_count": shift_target_count,
+            "available": plan_available,
+        },
+        "mold_efficiency": mold_efficiency,
+        "shift_efficiency": shift_efficiency,
+        "summary": mold_stats,
+        "downtimes": downtimes,
+        "shift_charts": _shift_charts_for_machine(db, machine_id, end),
+        "shifts": [
+            {"id": s.id, "name": s.name, "start": s.start.strftime("%H:%M"), "end": s.end.strftime("%H:%M")}
+            for s in get_shift_defs(db)
+        ],
+    }

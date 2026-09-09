@@ -10,8 +10,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_mold_assign, require_panel_8000
 from app.db.models import Cycle, Machine, Mold, MoldMachine
+from app.services.audit_log import log_action
 from app.services.cycle_export import (
     export_filename,
     mold_cycles_csv,
@@ -22,6 +23,7 @@ from app.services.mold_names import (
     clear_mold_name_snapshots,
     clear_orphan_cycle_mold_labels,
 )
+from app.services.mold_registry import assign_mold_to_machine, create_mold_from_qr
 from app.services.time_windows import resolve_window
 
 router = APIRouter()
@@ -33,14 +35,32 @@ class MoldOut(BaseModel):
     qr_code: str | None = None
     status: str
     avg_cycle_s: float
+    target_cycle_s: float | None = None
+    daily_target_count: int | None = None
+    work_mode: str = "auto"
+    mount_minutes: int | None = None
+    removal_minutes: int | None = None
     tolerance_s: float
     stdev_limit_s: float | None = None
     sample_count: int
     confidence: float
     created_at: datetime | None = None
+    assigned_machine_id: int | None = None
+    assigned_machine_name: str | None = None
 
     class Config:
         from_attributes = True
+
+
+class MoldCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=256)
+    qr_code: str = Field(..., min_length=1, max_length=64)
+    target_cycle_s: float | None = Field(default=None, gt=0, description="Hedef ortalama çalışma süresi (sn)")
+    daily_target_count: int | None = Field(default=None, gt=0, description="Günlük hedef baskı adedi")
+    work_mode: Literal["auto", "manual"] = "auto"
+    mount_minutes: int | None = Field(default=None, ge=0, description="Kalıp montaj süresi (dk)")
+    removal_minutes: int | None = Field(default=None, ge=0, description="Kalıp sökme süresi (dk)")
+    tolerance_s: float = Field(default=0.35, gt=0)
 
 
 class NameBody(BaseModel):
@@ -52,6 +72,11 @@ class MoldUpdate(BaseModel):
     qr_code: str | None = Field(default=None, max_length=64)
     status: Literal["candidate", "active", "ignored"] | None = None
     avg_cycle_s: float | None = Field(default=None, gt=0)
+    target_cycle_s: float | None = Field(default=None, gt=0)
+    daily_target_count: int | None = Field(default=None, gt=0)
+    work_mode: Literal["auto", "manual"] | None = None
+    mount_minutes: int | None = Field(default=None, ge=0)
+    removal_minutes: int | None = Field(default=None, ge=0)
     tolerance_s: float | None = Field(default=None, gt=0)
     stdev_limit_s: float | None = Field(default=None, gt=0)
 
@@ -62,9 +87,113 @@ class ConfirmMatchBody(BaseModel):
     sample_cycle_s: float | None = None
 
 
+class AssignMoldBody(BaseModel):
+    machine_id: int = Field(..., gt=0)
+
+
+def _assignment_map(db: Session) -> dict[int, Machine]:
+    rows = db.query(Machine).filter(Machine.current_mold_id.isnot(None)).all()
+    return {int(m.current_mold_id): m for m in rows if m.current_mold_id}
+
+
+def _mold_out(mold: Mold, assigned: Machine | None) -> MoldOut:
+    return MoldOut(
+        id=mold.id,
+        name=mold.name,
+        qr_code=mold.qr_code,
+        status=mold.status,
+        avg_cycle_s=mold.avg_cycle_s,
+        target_cycle_s=mold.target_cycle_s,
+        daily_target_count=mold.daily_target_count,
+        work_mode=mold.work_mode or "auto",
+        mount_minutes=mold.mount_minutes,
+        removal_minutes=mold.removal_minutes,
+        tolerance_s=mold.tolerance_s,
+        stdev_limit_s=mold.stdev_limit_s,
+        sample_count=mold.sample_count,
+        confidence=mold.confidence,
+        created_at=mold.created_at,
+        assigned_machine_id=assigned.id if assigned else None,
+        assigned_machine_name=assigned.name if assigned else None,
+    )
+
+
 @router.get("", response_model=list[MoldOut])
 def list_molds(db: Session = Depends(get_db)):
-    return db.query(Mold).order_by(Mold.id.desc()).limit(200).all()
+    assigned = _assignment_map(db)
+    molds = db.query(Mold).order_by(Mold.id.desc()).limit(200).all()
+    return [_mold_out(m, assigned.get(m.id)) for m in molds]
+
+
+@router.post("", response_model=MoldOut)
+def create_mold(
+    body: MoldCreate,
+    db: Session = Depends(get_db),
+    user=Depends(require_panel_8000),
+):
+    try:
+        mold = create_mold_from_qr(
+            db,
+            qr_code=body.qr_code.strip(),
+            name=body.name.strip(),
+            source="web",
+            operator_name=user.display_name,
+            target_cycle_s=body.target_cycle_s,
+            daily_target_count=body.daily_target_count,
+            work_mode=body.work_mode,
+            mount_minutes=body.mount_minutes,
+            removal_minutes=body.removal_minutes,
+            tolerance_s=body.tolerance_s,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    log_action(
+        db,
+        actor_type=user.actor_type,
+        actor_name=user.display_name,
+        telegram_user_id=user.telegram_user_id,
+        action="mold.create",
+        resource=f"mold:{mold.id}",
+        detail={"name": mold.name, "qr_code": mold.qr_code, "source": "web"},
+    )
+    return _mold_out(mold, None)
+
+
+@router.post("/{mold_id}/assign", response_model=MoldOut)
+def assign_mold(
+    mold_id: int,
+    body: AssignMoldBody,
+    db: Session = Depends(get_db),
+    user=Depends(require_mold_assign),
+):
+    try:
+        machine, mold = assign_mold_to_machine(
+            db,
+            machine_id=body.machine_id,
+            mold_id=mold_id,
+            source="web",
+            operator_name=user.display_name,
+            operator_id=user.telegram_user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    log_action(
+        db,
+        actor_type=user.actor_type,
+        actor_name=user.display_name,
+        telegram_user_id=user.telegram_user_id,
+        action="mold.assign",
+        resource=f"mold:{mold.id}",
+        detail={
+            "machine_id": machine.id,
+            "machine_name": machine.name,
+            "mold_id": mold.id,
+            "mold_name": mold.name,
+            "mold_qr_code": mold.qr_code,
+            "source": "web",
+        },
+    )
+    return _mold_out(mold, machine)
 
 
 @router.get("/usage")
@@ -161,7 +290,12 @@ def export_molds_data(
 
 
 @router.patch("/{mold_id}", response_model=MoldOut)
-def update_mold(mold_id: int, body: MoldUpdate, db: Session = Depends(get_db)):
+def update_mold(
+    mold_id: int,
+    body: MoldUpdate,
+    db: Session = Depends(get_db),
+    user=Depends(require_panel_8000),
+):
     m = db.get(Mold, mold_id)
     if not m:
         raise HTTPException(404)
@@ -189,14 +323,29 @@ def update_mold(mold_id: int, body: MoldUpdate, db: Session = Depends(get_db)):
         clear_orphan_cycle_mold_labels(db)
     db.commit()
     db.refresh(m)
-    return m
+    log_action(
+        db,
+        actor_type=user.actor_type,
+        actor_name=user.display_name,
+        telegram_user_id=user.telegram_user_id,
+        action="mold.update",
+        resource=f"mold:{m.id}",
+        detail={"name": m.name, "mold_name": m.name},
+    )
+    assigned = _assignment_map(db).get(m.id)
+    return _mold_out(m, assigned)
 
 
 @router.delete("/{mold_id}")
-def delete_mold(mold_id: int, db: Session = Depends(get_db)):
+def delete_mold(
+    mold_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_panel_8000),
+):
     m = db.get(Mold, mold_id)
     if not m:
         raise HTTPException(404)
+    mold_name = m.name
     db.query(Cycle).filter(Cycle.mold_id == mold_id).update(
         {Cycle.mold_id: None, Cycle.mold_name_snapshot: None},
         synchronize_session=False,
@@ -208,6 +357,15 @@ def delete_mold(mold_id: int, db: Session = Depends(get_db)):
     db.query(MoldMachine).filter(MoldMachine.mold_id == mold_id).delete(synchronize_session=False)
     db.delete(m)
     db.commit()
+    log_action(
+        db,
+        actor_type=user.actor_type,
+        actor_name=user.display_name,
+        telegram_user_id=user.telegram_user_id,
+        action="mold.delete",
+        resource=f"mold:{mold_id}",
+        detail={"name": mold_name, "mold_name": mold_name},
+    )
     return {"ok": True}
 
 

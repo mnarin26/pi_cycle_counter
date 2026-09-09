@@ -60,6 +60,10 @@ def cycle_to_row(machine_name: str, cycle: Cycle) -> list[str | int | float]:
 
 def append_cycle_to_daily_csv(logs_dir: Path, machine_name: str, cycle: Cycle) -> None:
     """Append one counted cycle row to the Istanbul calendar-day file."""
+    from app.config import settings
+
+    if not bool(getattr(settings, "cycle_daily_csv_enabled", False)):
+        return
     if not cycle.is_counted:
         return
     local_date = istanbul_date(cycle.t_end)
