@@ -1,46 +1,74 @@
-# Injection Monitor
+# Injection Monitor (pi_cycle_counter)
 
-Endüstriyel enjeksiyon makinesi izleme: RTSP + OpenCV (ROI / parlak yansıtıcı), FastAPI, SQLite, WebSocket, React + Tailwind + Recharts.
+Raspberry Pi üzerinde enjeksiyon makinesi **çevrim sayımı**: RTSP kameralar + 1D çizgi profili (reflektör), FastAPI, SQLite, WebSocket, React paneli + 8080 admin.
 
-**Python 3.10 veya üzeri** gerekir (SQLAlchemy 2.0 `Mapped[...]` / birleşik tip sözdizimi). Raspberry Pi OS Bookworm uyumludur.
+**Kaynak dal:** `main` = rsp3b fabrika Pi’deki canlı yazılım (Eyl 2026 zigzag stack).  
+**Python:** 3.10+ (Bookworm uyumlu).
 
-## Hızlı başlangıç
+## Ne yapar?
+
+1. Kameradan sarı **takip çizgisi** boyunca reflektör konumunu okur (`position_01`, 0→1).
+2. **Zigzag (peak/trough)** durum makinesi OPEN/CLOSED üretir.
+3. Tam tur **A → B → A** = 1 çevrim (yarım strok sayılmaz).
+4. Işık sıçraması gibi dik teleporterler `jump_abs` ile tutulur; küçük titreme `min_prominence` ile yok sayılır.
+
+Varsayılan global eşikler (canlı): `jump_abs=0.30`, `min_prominence=0.12`.
+
+## Portlar
+
+| Port | Süreç | Rol |
+|------|--------|-----|
+| **8000** | `app.main` | Vision + sayım + izleme paneli (pano/TV/detay) + API + WS |
+| **8080** | `admin_app` | Kalibrasyon, **canlı kamera görüntüsü**, çizgi, teshis (çoğu API 8000’e proxy) |
+
+`/tv` oturumsuz kalabilir. **Otomatik kalıp matcher kapalı** (`AUTO_MOLD_MATCHING=false`); kalıp Telegram/manuel. Analitik sayfası yok.
+
+## Hızlı başlangıç (PC)
 
 ```bash
-cd backend && pip install -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000
-cd frontend && npm install && npm run build
+git clone https://github.com/mnarin26/pi_cycle_counter.git
+cd pi_cycle_counter/backend
+python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Üretimde önce frontend derleyin (`Node.js 18+`); bu makinede `npm` yoksa derlemeyi başka bir bilgisayarda yapıp `frontend/dist` klasörünü Pi’ye kopyalayın.
+Ayrı terminalde admin:
 
-Portlar:
+```bash
+cd backend && source .venv/bin/activate
+uvicorn admin_app:app --host 0.0.0.0 --port 8080
+```
 
-- `8000`: Izleme paneli
-- `8080`: Ayar / Kalibrasyon paneli (RTSP + ROI cizim)
+Frontend üretim derlemesi (`Node 18+`):
 
-Ayrıntılı Pi kurulumu: [deploy/README-DEPLOY.md](deploy/README-DEPLOY.md).
+```bash
+cd frontend && npm ci && npm run build
+```
 
-## Telegram bot kullanimi (QR akisi)
+Pi kurulumu: [deploy/README-DEPLOY.md](deploy/README-DEPLOY.md).  
+Kullanım: [docs/KULLANIM-KILAVUZU.md](docs/KULLANIM-KILAVUZU.md).  
+Başka Pi / ayar seed: [deploy/seed/README.md](deploy/seed/README.md).
 
-Bu projede operatör akisi Telegram bot ile ilerler (`@Alfamold_bot`):
+## Telegram bot
 
-1. `/start` ile menuyu ac
-2. `📌 Kalip Ata`:
-   - once makine QR foto (`MACHINE:3`, `MAKINE:3`, `M:3`)
-   - sonra kalip QR foto (`MOLD:042`, `KALIP:042`, `K:042`)
-3. `➕ Kalip Uret` (yalniz seviye 1):
-   - kalip QR foto gonder
-   - kalip adini yaz
-4. `❌ Iptal` veya `/iptal` ile oturumu sifirla
+Operatör kalıp atama/üretim QR ile (`backend/app/bot`). Token ve operatörler **8080** Telegram ayarlarından; git’e token koyulmaz.
 
-Notlar:
+Akış özeti: `/start` → Kalıp Ata (makine QR → kalıp QR) → seviye 1 ise Kalıp Üret.  
+QR: `MACHINE:3` / `MOLD:042` (eşdeğer `MAKINE`/`KALIP`/`M`/`K`).
 
-- `KALIP URET` gibi buyuk harf yazimlari da desteklenir.
-- QR okunmazsa daha yakin/net fotografla tekrar gonderin.
-- Ayni anda tek bot instance calistirin; cift instance Telegram `409 Conflict` hatasi uretir.
+## Güvenlik notları
 
-## Guvenlik ve paylasim
+- `backend/.env`, Telegram token, RTSP şifreleri **commit edilmez**.
+- Süper / günlük panel şifreleri ve `injection.db` Pi’ye özeldir; clone tek başına fabrika verisini taşımaz.
+- Seed JSON içindeki RTSP kimlikleri maskelidir (`USER:PASS`).
 
-- GitHub'a push etmeden once gizli verileri kontrol edin: bot token, sifre, API key, private key.
-- `.env`, ham token metinleri, cihaz sifreleri ve SSH private key dosyalarini commitlemeyin.
-- Log veya ekran goruntusu paylasirken token/sifre kisimlarini maskeleyin.
+## Repo yapısı (özet)
+
+```
+backend/app/vision/     # RTSP, çizgi profili, zigzag SM, orchestrator
+backend/admin_static/   # 8080 tek sayfa UI
+frontend/               # 8000 React paneli
+deploy/                 # systemd + seed
+docs/                   # kullanım kılavuzu
+```

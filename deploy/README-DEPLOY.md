@@ -1,74 +1,113 @@
 # Injection Monitor — Raspberry Pi dağıtımı
 
+Bu belge **canlı rsp3b stack**’ine göredir (`main` dalı). Clone = yazılım; kamera/çizgi/şifreler ayrıca kurulur.
+
 ## Mimari
 
-- **pi-wifi (WPA2, sabit IP):**
-  - Izleme paneli: `http://<AP_IP>:8000`
-  - Ayar/Kalibrasyon paneli: `http://<AP_IP>:8080`
-  - SSH: `ssh pi@<AP_IP>`
-- **eth0 (DHCP):** İnternet çıkışı; Tailscale güncelleme ve uzaktan erişim.
-- **Tailscale:**
-  - Izleme paneli: `http://<magicdns veya 100.x>:8000`
-  - Ayar/Kalibrasyon paneli: `http://<magicdns veya 100.x>:8080`
-  - SSH aynı Pi üzerindeki servislere gider.
+```
+Kameralar (AP Wi‑Fi) ──RTSP──► Pi:8000 (vision + zigzag sayım + DB)
+                                    ▲
+Tarayıcı / TV ──────────────────────┤
+                                    │
+Tarayıcı admin ──► Pi:8080 ──proxy──┘
+```
 
-Uygulama iki porttan dinler:
+- **AP (ör. 192.168.4.1):** paneller + SSH (fabrika içi)
+- **eth0 / Tailscale:** internet + uzaktan erişim (`http://100.x:8000` / `:8080`)
+- Vision **yalnızca 8000** sürecindedir. 8080 ayrı process (~90 MB RAM); CPU yükü asıl 8000’dedir.
 
-- `8000`: Ana izleme paneli (`app.main`)
-- `8080`: Ayar/kalibrasyon paneli (`admin_app`) — ROI cizim ve RTSP ayarlari buradan yapilir.
-
-## Kurulum (özet)
+## Kurulum
 
 ```bash
 cd /home/pi
-git clone <repo> injection-monitor   # veya rsync/scp ile kopyalayın
+git clone https://github.com/mnarin26/pi_cycle_counter.git injection-monitor
 cd injection-monitor/backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Frontend (Node 18+ olan makinede derleyip dist kopyalanabilir)
 cd ../frontend && npm ci && npm run build
 ```
 
-Veritabanı ve loglar:
+İsteğe bağlı `backend/.env` (git’e ekleme):
 
-- SQLite: `backend/data/injection.db` (çalışma dizinine göre oluşur)
-- CSV: `backend/logs/machine_<id>/YYYY-MM-DD.csv`
+```
+CORS_ORIGINS=http://192.168.4.1:8000,http://100.x.y.z:8000
+AUTO_MOLD_MATCHING=false
+```
 
-## systemd
+Veri:
+
+- SQLite: `backend/data/injection.db` (ilk çalışmada oluşur; **repoda yok**)
+- Loglar: `backend/logs/` (repoda yok)
+
+## Servisleri başlatma
+
+### systemd (önerilen, boot’ta otomatik)
 
 ```bash
 sudo cp deploy/systemd/injection-monitor.service /etc/systemd/system/
 sudo cp deploy/systemd/injection-monitor-admin.service /etc/systemd/system/
+sudo cp deploy/systemd/injection-monitor-bot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now injection-monitor.service
 sudo systemctl enable --now injection-monitor-admin.service
+sudo systemctl enable --now injection-monitor-bot.service   # Telegram kullanılacaksa
 ```
 
-`User=` ve yolları kendi kullanıcı dizininize göre düzenleyin.
+Unit içindeki `User=` / yolları kendi dizinine göre düzenle.
 
-## Ortam değişkenleri (isteğe bağlı)
+### Elle (geçici)
 
-`backend/.env` örneği (git’e eklemeyin):
-
+```bash
+cd /home/pi/injection-monitor/backend
+nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 >> logs/main.log 2>&1 &
+nohup .venv/bin/uvicorn admin_app:app --host 0.0.0.0 --port 8080 >> logs/admin.log 2>&1 &
 ```
-CORS_ORIGINS=http://192.168.4.1:8000,http://100.x.y.z:8000
-```
 
-RTSP, ROI, threshold ve axis ayarlari `8080` panelinden yapilir; gizli bilgileri repoda tutmayin.
+Not: Canlı rsp3b’de bir süre systemd unit’ler disable iken elle uvicorn kullanıldı; üretimde enable etmek reboot sonrası panelleri ayağa kaldırır.
 
-## Güvenlik
+## İlk kalibrasyon (yeni Pi / yeni kamera)
 
-- SSH için parola yerine **anahtar** kullanın.
-- Fabrika Wi-Fi WPA2 trafiği kablosuz gizlilik sağlar; uygulama katmanında ileride basit web kimliği eklenebilir.
+1. **8080** → giriş (süper şifre veya bottan günlük şifre).
+2. Kamera: RTSP, `target_width` (canlıda sıkça **480**), FPS, aktif.
+3. Makine: kameraya bağla → sarı **takip çizgisini** çiz → **Çizgi Kaydet**.
+4. Gerekirse reflektör uzunluk kalibrasyonu.
+5. **8080 canlı görüntü:** reflektör noktası görünüyor mu bak. **8000** Pano/TV ile sayımı izle (8000’de ayrı “Canlı” sayfası yok).
+6. Seed referansı: [seed/README.md](seed/README.md).
+
+**Kapalı:** otomatik kalıp matcher / öneri; analitik sayfası.
+
+## Sayım motoru (canlı)
+
+- Dosya: `backend/app/vision/state_machine.py` (peak/trough zigzag).
+- Tam çevrim: **A→B→A** (`cycle_tracker`).
+- Global: `jump_abs≈0.30` (ışık teleport), `min_prominence≈0.12` (min salınım).
+- Eski dwell / `move_eps` “uçta bekle” sayımı **kullanılmaz** (alanlar UI uyumu için kalabilir).
+
+## Wi‑Fi AP
+
+Fabrika AP (hostapd) kamera ağı içindir. `192.168.4.1` reboot sonrası düşerse `cyw-ap-addr` benzeri bir unit ile IP geri yüklenmeli (rsp3b’de böyle kuruldu). Ayrıntı sahaya özeldir; SSID/şifre **8080 → Wi‑Fi AP**.
+
+## Başka Pi’ye taşıma — gerçekçi beklenti
+
+| Taşınır (git) | Taşınmaz / yeniden |
+|---------------|-------------------|
+| Kod, admin UI, frontend | `injection.db` (çevrim geçmişi, oturumlar) |
+| systemd unit şablonları | RTSP kullanıcı/şifre |
+| Seed JSON (maskeli ayar) | Telegram token, panel şifreleri |
+| | Çizgi/ROI (kamera açısı değişince) |
+| | Tailscale / AP IP |
+
+Yani: **yazılım çalışır**; fabrika kalibrasyonu ve sırlar ikinci adımdır.
 
 ## Geliştirme (PC)
 
 ```bash
-# Terminal 1
-cd backend && pip install -r requirements.txt && uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# Terminal 2
-cd frontend && npm install && npm run dev
+cd backend && source .venv/bin/activate
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# ayrı terminal
+uvicorn admin_app:app --reload --host 0.0.0.0 --port 8080
+cd frontend && npm run dev   # Vite → /api ve /ws proxy 8000
 ```
-
-Vite `5173` portunda `/api` ve `/ws` isteklerini `8000`e proxyler.
