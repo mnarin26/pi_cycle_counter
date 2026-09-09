@@ -231,9 +231,13 @@ export type ZigzagPoint = {
   gap_ms?: number;
   /** Uzun duruştan sonraki ilk döngü (ölçüm mola süresini içerir). */
   is_post_gap?: boolean;
+  /** Otomatik duruş: son döngü Y hizasında dakika işareti. */
+  is_idle_tick?: boolean;
 };
 
 export const ZIGZAG_CHART_MARGIN = { top: 8, right: 16, bottom: 24, left: 8 };
+export const IDLE_TICK_MS = 60_000;
+export const IDLE_LINE_COLOR = "#f87171";
 
 /** Map Recharts cursor X → wall-clock ms (number axis + gap markers in data). */
 export function resolveZigzagHoverMs(
@@ -317,7 +321,7 @@ export function buildZigzagLineSegments(data: ZigzagPoint[]): ZigzagLineSegment[
   };
 
   for (const p of data) {
-    if (p.is_gap || p.cycle_time_s == null) {
+    if (p.is_gap || p.is_idle_tick || p.cycle_time_s == null) {
       flush();
       continue;
     }
@@ -339,42 +343,121 @@ export function buildZigzagLineSegments(data: ZigzagPoint[]): ZigzagLineSegment[
   return segments;
 }
 
+export type IdleLineSegment = {
+  points: ZigzagPoint[];
+};
+
+/** Red horizontal idle stretches (minute ticks at last cycle Y). */
+export function buildIdleLineSegments(data: ZigzagPoint[]): IdleLineSegment[] {
+  const segments: IdleLineSegment[] = [];
+  let current: ZigzagPoint[] = [];
+
+  const flush = () => {
+    if (current.length >= 2) {
+      segments.push({ points: [...current] });
+    }
+    current = [];
+  };
+
+  for (const p of data) {
+    if (p.is_idle_tick && p.cycle_time_s != null) {
+      current.push(p);
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return segments;
+}
+
+function pushIdleTicks(
+  out: ZigzagPoint[],
+  fromMs: number,
+  toMs: number,
+  y: number,
+): void {
+  if (!(toMs > fromMs) || !Number.isFinite(y) || y <= 0) return;
+  const gap_ms = toMs - fromMs;
+  out.push({
+    t: new Date(fromMs + gap_ms / 2).toISOString(),
+    t_ms: fromMs + gap_ms / 2,
+    cycle_time_s: null,
+    mold: "",
+    mold_color: "transparent",
+    is_gap: true,
+    gap_ms,
+  });
+
+  const yFixed = Number(y.toFixed(3));
+  for (let t = fromMs; t < toMs; t += IDLE_TICK_MS) {
+    out.push({
+      t: new Date(t).toISOString(),
+      t_ms: t,
+      cycle_time_s: yFixed,
+      cycle_time_s_raw: yFixed,
+      mold: "",
+      mold_color: IDLE_LINE_COLOR,
+      is_idle_tick: true,
+    });
+  }
+  const endMs = Math.max(fromMs, toMs - 1);
+  const last = out[out.length - 1];
+  if (!last?.is_idle_tick || last.t_ms < endMs - 250) {
+    out.push({
+      t: new Date(endMs).toISOString(),
+      t_ms: endMs,
+      cycle_time_s: yFixed,
+      cycle_time_s_raw: yFixed,
+      mold: "",
+      mold_color: IDLE_LINE_COLOR,
+      is_idle_tick: true,
+    });
+  }
+}
+
 export function buildZigzagSeries(
   series: Array<{ t: string; cycle_time_s: number; mold: string | null }>,
   gapThresholdMs: number,
   colorMap: Map<string, string>,
+  opts?: { windowEndMs?: number },
 ): ZigzagPoint[] {
   const out: ZigzagPoint[] = [];
   let prevMs = 0;
+  let prevCycleS: number | null = null;
   let expectPostGap = false;
   for (const x of series) {
     const t_ms = parseApiTime(x.t);
     const mold = x.mold || "—";
     const color = moldColorFromMap(colorMap, mold);
+    const cycleS = Number(x.cycle_time_s.toFixed(3));
 
-    if (prevMs > 0 && t_ms - prevMs >= gapThresholdMs) {
-      out.push({
-        t: new Date(prevMs + (t_ms - prevMs) / 2).toISOString(),
-        t_ms: prevMs + (t_ms - prevMs) / 2,
-        cycle_time_s: null,
-        mold: "",
-        mold_color: "transparent",
-        is_gap: true,
-        gap_ms: t_ms - prevMs,
-      });
+    if (prevMs > 0 && t_ms - prevMs >= gapThresholdMs && prevCycleS != null) {
+      pushIdleTicks(out, prevMs, t_ms, prevCycleS);
       expectPostGap = true;
     }
     out.push({
       t: x.t,
       t_ms,
-      cycle_time_s: Number(x.cycle_time_s.toFixed(3)),
-      cycle_time_s_raw: Number(x.cycle_time_s.toFixed(3)),
+      cycle_time_s: cycleS,
+      cycle_time_s_raw: cycleS,
       mold,
       mold_color: color,
       is_post_gap: expectPostGap,
     });
     expectPostGap = false;
     prevMs = t_ms;
+    prevCycleS = cycleS;
+  }
+
+  const endMs = opts?.windowEndMs;
+  if (
+    prevMs > 0 &&
+    prevCycleS != null &&
+    endMs != null &&
+    Number.isFinite(endMs) &&
+    endMs - prevMs >= gapThresholdMs
+  ) {
+    pushIdleTicks(out, prevMs, endMs, prevCycleS);
   }
   return out;
 }
@@ -385,7 +468,7 @@ export function computeZigzagYDomain(
   hint?: { avgCycleS?: number; maxCycleS?: number },
 ): [number, number] {
   const values = points
-    .filter((p) => !p.is_gap && !p.is_post_gap)
+    .filter((p) => !p.is_gap && !p.is_post_gap && !p.is_idle_tick)
     .map((p) => p.cycle_time_s_raw ?? p.cycle_time_s)
     .filter((v): v is number => v != null && Number.isFinite(v) && v > 0);
 

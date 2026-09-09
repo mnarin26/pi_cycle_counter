@@ -32,6 +32,8 @@ export type Snapshot = {
   machines: MachineSnap[];
   cameras: { id: number; status: string; fps: number }[];
   cpu_proxy: number;
+  ws_clients?: number;
+  load_warn?: { level: "info" | "warn"; message: string } | null;
 };
 
 const defaultSnap: Snapshot = { machines: [], cameras: [], cpu_proxy: 0 };

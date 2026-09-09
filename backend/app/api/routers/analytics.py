@@ -13,6 +13,9 @@ from app.api.deps import get_db
 from app.db.models import Cycle, Event, Machine, Mold
 from app.services.production_efficiency import (
     active_mold_start,
+    changeover_windows as changeover_windows_calc,
+    downtime_windows as downtime_windows_calc,
+    hurt_downtime_windows,
     mold_target_cycle_s,
     range_efficiency as range_efficiency_block,
     segment_efficiency,
@@ -30,6 +33,7 @@ from app.services.shifts import (
     format_shift_clock,
     get_shift_defs,
     recent_shift_windows,
+    shift_break_windows,
     shift_hour_slots,
     shift_window,
 )
@@ -169,6 +173,38 @@ def _iso_utc_z(dt: datetime) -> str:
     else:
         dt = dt.astimezone(timezone.utc)
     return dt.isoformat().replace("+00:00", "Z")
+
+
+def _chart_break_windows(db: Session, start: datetime, end: datetime) -> list[dict]:
+    """Shift break intervals overlapping [start, end] for chart 'Mola saati' overlays."""
+    start_u = start if start.tzinfo else start.replace(tzinfo=timezone.utc)
+    end_u = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
+    if end_u <= start_u:
+        return []
+    out: list[tuple[datetime, datetime]] = []
+    cursor = start_u
+    guard = 0
+    while cursor < end_u and guard < 400:
+        guard += 1
+        sh = current_shift(db, cursor)
+        sw_start, sw_end = shift_window(sh, cursor, cap_now=False)
+        for bs, be in shift_break_windows(sh, sw_start, sw_end):
+            lo, hi = max(bs, start_u), min(be, end_u)
+            if hi > lo:
+                out.append((lo, hi))
+        cursor = sw_end + timedelta(seconds=1)
+    # Merge overlapping
+    if not out:
+        return []
+    out.sort(key=lambda x: x[0])
+    merged: list[tuple[datetime, datetime]] = [out[0]]
+    for lo, hi in out[1:]:
+        mlo, mhi = merged[-1]
+        if lo <= mhi:
+            merged[-1] = (mlo, max(mhi, hi))
+        else:
+            merged.append((lo, hi))
+    return [{"start": _iso_utc_z(a), "end": _iso_utc_z(b)} for a, b in merged]
 
 
 def _cycle_series_row_dict(r) -> dict:
@@ -450,7 +486,12 @@ def machine_dashboard(
     # Keep machine detail graph style consistent across all machines/ranges:
     # always use cycle-by-cycle zigzag presentation (same as Machine #2 view).
     chart_mode = "cycles"
-    gap_threshold_s = 20 * 60  # 20 min — likely mold change / downtime between runs
+    machine = db.get(Machine, machine_id)
+    if not machine:
+        raise HTTPException(404, detail="machine not found")
+    idle_gap_min = int(getattr(machine, "idle_gap_minutes", None) or 3)
+    idle_gap_min = max(1, min(120, idle_gap_min))
+    gap_threshold_s = idle_gap_min * 60
 
     stats = _aggregate_cycle_stats(db, machine_id, start, end)
     total = stats["cycle_count"]
@@ -478,11 +519,19 @@ def machine_dashboard(
     )
     active_mold_id: int | None = None
     active_mold_name: str | None = None
+    active_mold_work_mode: str = "auto"
     if _last_cycle and _last_cycle[0] is not None:
         mold_row = db.get(Mold, _last_cycle[0])
         if mold_row:
             active_mold_id = int(_last_cycle[0])
             active_mold_name = resolve_mold_display_name(db, active_mold_id, _last_cycle[1])
+            active_mold_work_mode = (mold_row.work_mode or "auto").strip().lower() or "auto"
+    elif machine.current_mold_id is not None:
+        mold_row = db.get(Mold, machine.current_mold_id)
+        if mold_row:
+            active_mold_id = int(machine.current_mold_id)
+            active_mold_name = resolve_mold_display_name(db, active_mold_id, mold_row.name)
+            active_mold_work_mode = (mold_row.work_mode or "auto").strip().lower() or "auto"
 
     if active_mold_id is not None:
         _am = (
@@ -505,6 +554,7 @@ def machine_dashboard(
         active_mold: dict | None = {
             "mold_id": active_mold_id,
             "mold_name": active_mold_name or f"#{active_mold_id}",
+            "work_mode": active_mold_work_mode,
             "cycle_count": _am_cnt,
             "avg_cycle_s": round(float(_am[1] or 0), 3) if _am_cnt else 0.0,
             "min_cycle_s": round(float(_am[2] or 0), 3) if _am_cnt else 0.0,
@@ -586,6 +636,11 @@ def machine_dashboard(
     range_efficiency = range_efficiency_block(
         db, machine_id, start, end, datetime.now(timezone.utc)
     )
+    downtimes = downtime_windows_calc(db, machine_id, start, end)
+    changeovers = changeover_windows_calc(db, machine_id, start, end)
+    break_windows: list[dict] = []
+    if active_mold_work_mode == "manual":
+        break_windows = _chart_break_windows(db, start, end)
 
     return {
         "machine_id": machine_id,
@@ -595,6 +650,7 @@ def machine_dashboard(
         "window_label": window_label,
         "chart_mode": chart_mode,
         "gap_threshold_s": gap_threshold_s,
+        "idle_gap_minutes": idle_gap_min,
         "summary": stats,
         "range_efficiency": range_efficiency,
         "active_mold": active_mold,
@@ -609,6 +665,9 @@ def machine_dashboard(
         "series_truncated": series_truncated,
         "series_lazy": series_lazy,
         "events": events,
+        "downtimes": downtimes,
+        "changeovers": changeovers,
+        "break_windows": break_windows,
     }
 
 
@@ -791,6 +850,8 @@ def _cycle_time_stats(
     start: datetime,
     end: datetime,
     mold_id: int | None = None,
+    *,
+    exclude_hurt_downtime: bool = False,
 ) -> dict[str, float | int]:
     empty = {"cycle_count": 0, "avg_cycle_s": 0.0, "min_cycle_s": 0.0, "max_cycle_s": 0.0}
     base = [
@@ -799,6 +860,8 @@ def _cycle_time_stats(
         Cycle.t_end <= end,
         Cycle.is_counted.is_(True),
     ]
+    if exclude_hurt_downtime:
+        base.extend(_exclude_hurt_filters(db, machine_id, start, end))
 
     def _run(extra: list) -> dict[str, float | int]:
         row = (
@@ -854,7 +917,19 @@ def _active_mold_for_machine(db: Session, machine_id: int, start: datetime, end:
     return mold_id, resolve_mold_display_name(db, mold_id, row[1])
 
 
+def _exclude_hurt_filters(db: Session, machine_id: int, start: datetime, end: datetime) -> list:
+    """SQLAlchemy filters that drop cycles falling inside hurt downtime windows."""
+    from sqlalchemy import and_, not_
+
+    return [
+        not_(and_(Cycle.t_end >= hs, Cycle.t_end <= he))
+        for hs, he in hurt_downtime_windows(db, machine_id, start, end)
+    ]
+
+
 def _shift_charts_for_machine(db: Session, machine_id: int, now: datetime) -> list[dict]:
+    from sqlalchemy import and_, not_
+
     hour_col = func.cast(
         func.strftime("%H", func.datetime(Cycle.t_end, "+3 hours")),
         Integer,
@@ -863,6 +938,8 @@ def _shift_charts_for_machine(db: Session, machine_id: int, now: datetime) -> li
     for i, (sh, win_start, win_end) in enumerate(recent_shift_windows(db, now)):
         count_end = min(win_end, now)
         slots = shift_hour_slots(win_start, win_end)
+        hurt = hurt_downtime_windows(db, machine_id, win_start, count_end)
+        excl = [not_(and_(Cycle.t_end >= hs, Cycle.t_end <= he)) for hs, he in hurt]
         rows = (
             db.query(hour_col, Cycle.mold_id, Cycle.mold_name_snapshot, func.count(Cycle.id))
             .filter(
@@ -870,6 +947,7 @@ def _shift_charts_for_machine(db: Session, machine_id: int, now: datetime) -> li
                 Cycle.t_end >= win_start,
                 Cycle.t_end <= count_end,
                 Cycle.is_counted.is_(True),
+                *excl,
             )
             .group_by(hour_col, Cycle.mold_id, Cycle.mold_name_snapshot)
             .all()
@@ -882,6 +960,18 @@ def _shift_charts_for_machine(db: Session, machine_id: int, now: datetime) -> li
             per_hour[int(h or 0)][label] += int(cnt or 0)
             if label not in mold_names:
                 mold_names.append(label)
+
+        # Mark Istanbul wall-clock hours that overlap hurt downtime (for TV tint).
+        downtime_hours: set[int] = set()
+        for hs, he in hurt:
+            t = hs.astimezone(DISPLAY_TZ).replace(minute=0, second=0, microsecond=0)
+            end_local = he.astimezone(DISPLAY_TZ)
+            guard = 0
+            while t < end_local and guard < 48:
+                guard += 1
+                downtime_hours.add(t.hour)
+                t += timedelta(hours=1)
+
         date_label = win_start.astimezone(DISPLAY_TZ).strftime("%d.%m.%Y")
         charts.append(
             {
@@ -899,6 +989,7 @@ def _shift_charts_for_machine(db: Session, machine_id: int, now: datetime) -> li
                         "label": f"{h:02d}:00",
                         "count": sum(per_hour.get(h, {}).values()),
                         "by_mold": dict(per_hour.get(h, {})),
+                        "is_downtime": h in downtime_hours,
                     }
                     for h in slots
                 ],
@@ -950,7 +1041,10 @@ def tv_machine(machine_id: int, db: Session = Depends(get_db)):
         db, machine_id, shift, shift_start, shift_plan_end, now
     )
 
-    mold_stats = _cycle_time_stats(db, machine_id, start, end, active_mold_id)
+    mold_stats = _cycle_time_stats(
+        db, machine_id, start, end, active_mold_id, exclude_hurt_downtime=True
+    )
+    downtimes = downtime_windows_calc(db, machine_id, shift_start, cap_shift)
 
     return {
         "machine_id": machine.id,
@@ -982,6 +1076,7 @@ def tv_machine(machine_id: int, db: Session = Depends(get_db)):
         "mold_efficiency": mold_efficiency,
         "shift_efficiency": shift_efficiency,
         "summary": mold_stats,
+        "downtimes": downtimes,
         "shift_charts": _shift_charts_for_machine(db, machine_id, end),
         "shifts": [
             {"id": s.id, "name": s.name, "start": s.start.strftime("%H:%M"), "end": s.end.strftime("%H:%M")}

@@ -1,15 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { MachineCard } from "../components/MachineCard";
 import { apiGet, apiPost } from "../api/client";
 import { useAuth } from "../hooks/useAuth";
 import { useLiveSnapshot, type MachineSnap } from "../hooks/useLiveSnapshot";
 import { DEFAULT_IDLE_STOPPED_S } from "../lib/machineStatus";
+import { datetimeLocalInputToUtcIso } from "../lib/chartTheme";
 
 type MoldRow = {
   id: number;
   name: string | null;
   qr_code: string | null;
   status: string;
+  mount_minutes: number | null;
+  removal_minutes: number | null;
   assigned_machine_id: number | null;
   assigned_machine_name: string | null;
 };
@@ -37,6 +40,9 @@ function AssignMoldModal({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [assignedAt, setAssignedAt] = useState("");
+  const [coStart, setCoStart] = useState("");
+  const [coEnd, setCoEnd] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -64,16 +70,37 @@ function AssignMoldModal({
     selected &&
     selected.assigned_machine_id != null &&
     selected.assigned_machine_id !== machine.id;
+  const currentMold = molds.find((m) => m.assigned_machine_id === machine.id) ?? null;
+
+  const standardMinutes = useMemo(() => {
+    if (!selected) return 0;
+    const removal =
+      currentMold && currentMold.id !== selected.id ? currentMold.removal_minutes ?? 0 : 0;
+    const mount = selected.mount_minutes ?? 0;
+    return removal + mount;
+  }, [selected, currentMold]);
+
+  const customChangeover = coStart !== "" || coEnd !== "";
 
   async function submit() {
     if (typeof selectedId !== "number") {
       setErr("Kalip secin");
       return;
     }
+    if (customChangeover && (coStart === "" || coEnd === "")) {
+      setErr("Kalıp değişimi için başlangıç ve bitişi birlikte girin");
+      return;
+    }
     setSaving(true);
     setErr(null);
     try {
-      await apiPost(`/api/molds/${selectedId}/assign`, { machine_id: machine.id });
+      const body: Record<string, unknown> = { machine_id: machine.id };
+      if (assignedAt) body.assigned_at = datetimeLocalInputToUtcIso(assignedAt);
+      if (customChangeover) {
+        body.changeover_start = datetimeLocalInputToUtcIso(coStart);
+        body.changeover_end = datetimeLocalInputToUtcIso(coEnd);
+      }
+      await apiPost(`/api/molds/${selectedId}/assign`, body);
       onClose();
     } catch (e) {
       setErr(parseApiError(e));
@@ -116,6 +143,56 @@ function AssignMoldModal({
             Atarsanız oradan kalkar.
           </p>
         )}
+
+        <label className="mt-4 block text-sm text-slate-300">
+          Atama saati
+          <input
+            type="datetime-local"
+            className="mt-1 w-full rounded-md border border-slate-600 bg-slate-800 px-3 py-2 text-white"
+            value={assignedAt}
+            onChange={(e) => setAssignedAt(e.target.value)}
+          />
+          <span className="mt-1 block text-xs text-slate-500">
+            Boş bırakılırsa şimdi. Geçmişe dönük atama için geçmiş bir saat seçin (grafik ve
+            verimlilik yeniden hesaplanır).
+          </span>
+        </label>
+
+        <div className="mt-4 rounded-md border border-slate-700 bg-slate-800/50 p-3">
+          <div className="text-sm font-medium text-slate-200">Kalıp değişim süresi</div>
+          {customChangeover ? (
+            <p className="mt-1 text-xs text-slate-400">
+              Girdiğiniz aralık kalıp değişimi olarak işlenecek.
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-slate-400">
+              Boş bırakılırsa kalıp tanımına göre toplam{" "}
+              <span className="font-semibold text-slate-200">{standardMinutes} dk</span> düşülecek
+              (atama saatinde biten değişim).
+            </p>
+          )}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <label className="text-xs text-slate-400">
+              <span className="mb-1 block">Değişim başlangıcı</span>
+              <input
+                type="datetime-local"
+                className="rounded-md border border-slate-600 bg-slate-800 px-2 py-1.5 text-white"
+                value={coStart}
+                onChange={(e) => setCoStart(e.target.value)}
+              />
+            </label>
+            <label className="text-xs text-slate-400">
+              <span className="mb-1 block">Değişim bitişi</span>
+              <input
+                type="datetime-local"
+                className="rounded-md border border-slate-600 bg-slate-800 px-2 py-1.5 text-white"
+                value={coEnd}
+                onChange={(e) => setCoEnd(e.target.value)}
+              />
+            </label>
+          </div>
+        </div>
+
         {err && <p className="mt-3 text-sm text-red-400">{err}</p>}
         <div className="mt-5 flex gap-2">
           <button

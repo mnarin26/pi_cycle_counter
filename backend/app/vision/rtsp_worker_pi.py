@@ -51,12 +51,6 @@ class RtspWorker(threading.Thread):
         self._lock = threading.Lock()
         self._latest: np.ndarray | None = None
         self._latest_mono: float = 0.0
-        # Pre-encoded JPEG for /snapshot.jpg — avoids imencode on the API event loop.
-        self._jpeg: bytes | None = None
-        self._jpeg_mono: float = 0.0
-        self._jpeg_last_enc = 0.0
-        self._jpeg_min_interval_s = 0.25  # ~4 Hz max encode cost
-        self._jpeg_quality = 65
         self._status = "disconnected"
         self._fps_ema = 0.0
         self._last_tick = time.monotonic()
@@ -70,23 +64,8 @@ class RtspWorker(threading.Thread):
                 return None
             return self._latest.copy()
 
-    def read_latest_jpeg(self) -> tuple[bytes | None, float]:
-        """Cached JPEG bytes + age_ms. Safe to serve from the HTTP thread."""
-        with self._lock:
-            if not self._jpeg:
-                return None, -1.0
-            age_ms = (time.monotonic() - self._jpeg_mono) * 1000.0 if self._jpeg_mono > 0 else -1.0
-            return self._jpeg, age_ms
-
-    def publish_jpeg(self, data: bytes, mono: float | None = None) -> None:
-        """Store a JPEG produced off the grab thread (snapshot path)."""
-        with self._lock:
-            self._jpeg = data
-            self._jpeg_mono = float(mono if mono is not None else time.monotonic())
-            self._jpeg_last_enc = self._jpeg_mono
-
     def read_latest_gray(self) -> tuple[np.ndarray | None, float, float]:
-        """One BGR→GRAY; convert outside the frame lock so RTSP grab is not stalled.
+        """One BGR→GRAY under lock; returned gray is a new buffer (grab-safe).
 
         Returns:
             (gray, frame_mono, age_ms). gray is None when no frame yet.
@@ -96,9 +75,8 @@ class RtspWorker(threading.Thread):
                 return None, 0.0, -1.0
             mono = float(self._latest_mono)
             age_ms = (time.monotonic() - mono) * 1000.0 if mono > 0 else -1.0
-            bgr = self._latest
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        return gray, mono, age_ms
+            gray = cv2.cvtColor(self._latest, cv2.COLOR_BGR2GRAY)
+            return gray, mono, age_ms
 
     def latest_age_ms(self) -> float:
         with self._lock:
@@ -183,8 +161,6 @@ class RtspWorker(threading.Thread):
                 with self._lock:
                     self._latest = frame
                     self._latest_mono = now
-                # JPEG cache is refreshed lazily from snapshot path — never on the
-                # grab loop (imencode here stole CPU and made pos samples jumpy).
                 dt = now - self._last_tick
                 self._last_tick = now
                 if dt > 1e-6:

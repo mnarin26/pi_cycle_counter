@@ -49,10 +49,18 @@
       .live-view-wrap { position:relative; border:1px solid #334155; border-radius:10px; overflow:hidden; background:#000; max-width:100%; }
       .live-view-wrap img { display:block; width:100%; height:auto; opacity:0.92; }
       .live-view-dots { position:absolute; inset:0; pointer-events:none; }
-      .live-view-dot { position:absolute; width:5px; height:5px; margin:-2.5px 0 0 -2.5px; border-radius:999px; background:#22c55e; box-shadow:0 0 0 1px rgba(2,6,23,0.9), 0 0 4px rgba(34,197,94,0.75); }
+      .live-view-dot { position:absolute; width:7px; height:7px; margin:-3.5px 0 0 -3.5px; border-radius:999px; background:#94a3b8; box-shadow:0 0 0 1px rgba(2,6,23,0.9); }
+      .live-view-dot.open { background:#22d3ee; box-shadow:0 0 0 1px rgba(2,6,23,0.9), 0 0 6px rgba(34,211,238,0.8); }
+      .live-view-dot.closed { background:#3b82f6; box-shadow:0 0 0 1px rgba(2,6,23,0.9), 0 0 6px rgba(59,130,246,0.8); }
+      .live-view-dot.moving { background:#fbbf24; box-shadow:0 0 0 1px rgba(2,6,23,0.9), 0 0 6px rgba(251,191,36,0.8); }
+      .live-view-legend { display:flex; gap:12px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:#94a3b8; }
+      .live-view-legend i { display:inline-block; width:8px; height:8px; border-radius:99px; margin-right:4px; vertical-align:middle; }
       .live-view-bar { position:absolute; left:0; right:0; bottom:0; background:rgba(0,0,0,0.65); padding:8px 10px; font-size:12px; }
       .live-view-machines { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; margin-top:10px; }
       .live-view-mach { border:1px solid #334155; border-radius:8px; padding:8px 10px; background:#0f172a; font-size:13px; }
+
+      .full-stack { display: block !important; width: 100% !important; max-width: 100% !important; clear: both !important; float: none !important; }
+      .full-stack .row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 10px; width: 100%; }
     </style>
   </head>
   <body>
@@ -84,33 +92,50 @@
           <button type="button" class="nav-item active" data-panel="panel-live">1. Canli goruntu</button>
           <button type="button" class="nav-item" data-panel="panel-machines">2. Makineler</button>
           <button type="button" class="nav-item" data-panel="panel-camera">3. Kamera</button>
-          <button type="button" class="nav-item" data-panel="panel-telegram">4. Telegram botu</button>
+          <button type="button" class="nav-item" data-panel="panel-telegram">4. Yetkilendirme</button>
           <button type="button" class="nav-item" data-panel="panel-system">5. Pi saati ve Wi-Fi</button>
           <button type="button" class="nav-item" data-panel="panel-tv">6. TV ve vardiya</button>
           <button type="button" class="nav-item" data-panel="panel-audit">7. Islem kayitlari</button>
+          <button type="button" class="nav-item" data-panel="panel-diagnosis">8. Diagnosis</button>
         </nav>
         <main class="admin-main">
 
       <section id="panel-live" class="admin-panel active">
       <div class="card" id="live">
         <h3>Canli goruntu</h3>
-        <p class="muted">Secili kameradan canli kare; yesil nokta reflektor merkezini gosterir.</p>
+        <p class="muted">Secili kameradan canli kare. Nokta rengi: cyan acik, mavi kapali, amber hareket, gri bilinmiyor.</p>
         <div class="row">
           <div class="col-4">
             <label>Kamera</label>
             <select id="liveViewCam"></select>
           </div>
-          <div class="col-8">
+          <div class="col-3">
+            <label>Islem araligi (ms)</label>
+            <input id="visionSampleMs" type="number" min="50" max="500" step="10" value="100" />
+            <p class="muted" style="margin-top:4px;">Kamera + cizgi probu bu aralikla calisir (varsayilan 100).</p>
+          </div>
+          <div class="col-2">
+            <label>&nbsp;</label>
+            <button type="button" id="saveVisionSampleBtn">Kaydet</button>
+          </div>
+          <div class="col-3">
             <label>&nbsp;</label>
             <div id="liveViewWs" class="muted">WS baglaniyor…</div>
           </div>
         </div>
+        <div id="visionPerfBar" class="muted" style="margin-top:6px;font-size:12px;">Islem: —</div>
         <div class="live-view-wrap" id="liveViewWrap" style="margin-top:10px;">
           <img id="liveViewImg" alt="Canli kamera" />
           <div class="live-view-dots" id="liveViewDots"></div>
           <div class="live-view-bar" id="liveViewBar">Kamera —</div>
         </div>
         <div class="live-view-machines" id="liveViewMachines"></div>
+        <div class="live-view-legend">
+          <span><i style="background:#22d3ee"></i>OPEN</span>
+          <span><i style="background:#3b82f6"></i>CLOSED</span>
+          <span><i style="background:#fbbf24"></i>MOVING</span>
+          <span><i style="background:#94a3b8"></i>UNKNOWN</span>
+        </div>
       </div>
       </section>
 
@@ -127,8 +152,11 @@
                 <th>ID</th>
                 <th>Ad</th>
                 <th>Kamera</th>
-                <th>Esik</th>
-                <th>Sinyal (peak/bg)</th>
+                <th>Durum</th>
+                <th>Pos</th>
+                <th>Son cevrim</th>
+                <th title="Reflektoru bulma esigi (peak-bg). Dongu sayimi degil; sadece cizgide parlak nokta aranirken.">Tespit esigi</th>
+                <th title="peak/bg = cizgi uzerinde en parlak nokta / arka plan (0-255). Δ = fark. len = parlak segment uzunlugu. Sayim zigzag pos ile yapilir; bu sutun 'reflektor gorunuyor mu?' teshisidir.">Tespit sinyali (peak/bg)</th>
               </tr>
             </thead>
             <tbody id="machineLiveBody">
@@ -152,13 +180,6 @@
           <div class="col-3">
             <label>Makine Adi</label>
             <input id="machineName" type="text" maxlength="128" />
-          </div>
-          <div class="col-3">
-            <label>Yon (axis)</label>
-            <select id="axisDir">
-              <option value="lr">Sol -> Sag</option>
-              <option value="rl">Sag -> Sol</option>
-            </select>
           </div>
           <div class="col-3">
             <label>ROI Aci (derece)</label>
@@ -200,33 +221,59 @@
             <input id="thMax" type="number" min="0" max="255" />
           </div>
           <div class="col-3">
-            <label>Open 1D</label>
-            <input id="open1d" type="number" step="0.01" min="0" max="1" />
-          </div>
-          <div class="col-3">
-            <label>Closed 1D</label>
-            <input id="closed1d" type="number" step="0.01" min="0" max="1" />
-          </div>
-          <div class="col-3">
-            <label>Hysteresis</label>
-            <input id="hys" type="number" step="0.01" min="0" max="0.5" />
-          </div>
-          <div class="col-3">
-            <label>Hareket Debounce (ms)</label>
-            <input id="debounceMs" type="number" min="0" max="3000" step="1" />
-          </div>
-          <div class="col-3">
-            <label>Sabit Kalma Onay (ms)</label>
-            <input id="stabilityMs" type="number" min="0" max="10000" step="1" />
+            <label>Strok algilama esigi (UI; canlida global 0.12)</label>
+            <input id="minProminence" type="number" step="0.005" min="0.02" max="0.5" />
+            <p class="muted" id="minProminenceHint" style="margin-top:4px;">Cizgi boyunun kesri (0-1).</p>
           </div>
           <div class="col-3">
             <label>Gorunmezlik Toleransi (ms)</label>
             <input id="occlusionGraceMs" type="number" min="0" max="5000" step="10" />
           </div>
           <div class="col-3">
+            <label>Durus algilama (dk)</label>
+            <input id="idleGapMinutes" type="number" min="1" max="120" step="1" value="3" />
+            <p class="muted" style="margin-top:4px;">Detay grafikte bu sure boyunca dongu yoksa cizgi kopar + kirmizi durus. Sayima etki yok.</p>
+          </div>
+          <div class="col-3">
             <label>Makine Aktif</label>
             <select id="machineEnabled"><option value="true">true</option><option value="false">false</option></select>
           </div>
+          <div class="col-12">
+            <p class="muted" style="margin:8px 0 4px;padding:8px;border:1px solid #334155;border-radius:8px;background:#0f172a;">
+              <b>Canli sayim:</b> zigzag peak/trough (global <code>min_prominence=0.12</code>, <code>jump_abs=0.30</code>).
+              Asagidaki «Sayim modu / Schmitt» alanlari kaydedilebilir ama <b>canli sayimda kullanilmaz</b>.
+              Ustteki threshold / peak-bg / uzunluk alanlari <b>reflektor tespit</b> icindir (parlak nokta bulma); dongu sayaci degildir.
+            </p>
+          </div>
+          <div class="col-12"><details style="margin:4px 0 8px;"><summary style="cursor:pointer;color:#94a3b8;">Eski Schmitt ayarlari (canlida kullanilmiyor)</summary>
+          <div class="row" style="margin-top:8px;">
+          <div class="col-3">
+            <label>Sayim modu (kullanilmiyor)</label>
+            <select id="countingMode"><option value="peak_trough">peak_trough (klasik)</option><option value="schmitt">schmitt (esik)</option></select>
+            <p class="muted" style="margin-top:4px;">schmitt: tek kapali-esik + otomatik ogrenme (AF-4/5/6).</p>
+          </div>
+          <div class="col-3">
+            <label>Kapali polarite</label>
+            <select id="closedPolarity"><option value="low">Dusuk pozisyon = kapali</option><option value="high">Yuksek pozisyon = kapali</option></select>
+          </div>
+          <div class="col-3">
+            <label>Kapali referans (ogrenilen)</label>
+            <input id="closedRef" type="number" step="0.005" min="0" max="1" placeholder="otomatik" />
+            <p class="muted" id="closedRefHint" style="margin-top:4px;">Bos = otomatik ogren. Elle yazarsan override.</p>
+          </div>
+          <div class="col-3">
+            <label>Histerezis</label>
+            <input id="closedHyst" type="number" step="0.005" min="0.01" max="0.3" />
+          </div>
+          <div class="col-3">
+            <label>Yumusatma penceresi</label>
+            <input id="smoothWin" type="number" step="1" min="1" max="31" />
+          </div>
+          <div class="col-3">
+            <label>Otomatik ogrenme</label>
+            <select id="learnEnabled"><option value="true">Acik</option><option value="false">Kapali</option></select>
+          </div>
+          </div></details></div>
           <div class="col-3"><button id="saveMachineBtn">Makine Parametre Kaydet</button></div>
           <div class="col-3"><button id="learnLenBtn" class="btn-orange">Uzunluk Kalibrasyon Baslat</button></div>
           <div class="col-3"><button id="resetProdBtn" class="btn-gray">Sayim ve Kalip Verisini Sifirla</button></div>
@@ -235,25 +282,65 @@
         </div>
 
         <hr class="section-divider" />
-        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Takip cizgisi</h4>
-        <p class="muted">Sistem sadece sari takip cizgisi + kalinlik bandini kullanir. ROI sekli sadece cizgiyi hizalamak icin yardimcidir.</p>
-        <div class="row" style="margin-bottom:8px;">
-          <div class="col-3"><button id="zoomOutBtn" class="btn-gray">- Zoom</button></div>
-          <div class="col-3"><button id="zoomInBtn" class="btn-gray">+ Zoom</button></div>
-          <div class="col-3"><button id="zoomResetBtn" class="btn-gray">Zoom Sifirla</button></div>
-          <div class="col-3"><label>Zoom <span id="zoomLabel">100%</span></label><input id="zoomSlider" type="range" min="50" max="400" step="10" value="100" /></div>
-        </div>
-        <div class="canvas-viewport" id="canvasViewport">
-          <div class="canvas-wrap canvas-inner" id="canvasInner">
-            <img id="snap" />
-            <canvas id="overlay"></canvas>
+        <section class="full-stack" style="display:block;width:100%;max-width:100%;clear:both;box-sizing:border-box;">
+          <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Takip cizgisi</h4>
+          <p class="muted">Sistem sadece sari takip cizgisi + kalinlik bandini kullanir. ROI sekli sadece cizgiyi hizalamak icin yardimcidir.</p>
+          <div class="row" style="margin-bottom:8px;">
+            <div class="col-3"><button id="zoomOutBtn" class="btn-gray">- Zoom</button></div>
+            <div class="col-3"><button id="zoomInBtn" class="btn-gray">+ Zoom</button></div>
+            <div class="col-3"><button id="zoomResetBtn" class="btn-gray">Zoom Sifirla</button></div>
+            <div class="col-3"><label>Zoom <span id="zoomLabel">100%</span></label><input id="zoomSlider" type="range" min="50" max="400" step="10" value="100" /></div>
           </div>
-        </div>
-        <div class="row" style="margin-top: 8px;">
-          <div class="col-3"><button id="clearRoiBtn" class="btn-gray">Cizimi Temizle</button></div>
-          <div class="col-3"><button id="saveRoiBtn" class="btn-green">Cizgi Kaydet</button></div>
-          <div class="col-6"><div id="roiMsg" class="muted"></div></div>
-        </div>
+          <div class="canvas-viewport" id="canvasViewport" style="display:block;width:100%;max-width:100%;clear:both;">
+            <div class="canvas-wrap canvas-inner" id="canvasInner">
+              <img id="snap" />
+              <canvas id="overlay"></canvas>
+            </div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <div class="col-3"><button id="clearRoiBtn" class="btn-gray">Cizimi Temizle</button></div>
+            <div class="col-3"><button id="saveRoiBtn" class="btn-green">Cizgi Kaydet</button></div>
+            <div class="col-3"><button id="swapAxisBtn" class="btn-orange">Cizgi yonunu cevir</button></div>
+            <div class="col-3"><div id="roiMsg" class="muted"></div></div>
+          </div>
+        </section>
+
+        <hr class="section-divider" />
+        <section class="full-stack" style="display:block;width:100%;max-width:100%;clear:both;box-sizing:border-box;">
+          <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Teshis logu (makine)</h4>
+          <p class="muted">Secilen makine icin islem logu (CSV, goruntu yok). Baslangic–bitis araliginda yazar; bitis gelince otomatik durur. Baslangic bos = hemen baslar.</p>
+          <div class="row" style="margin-bottom:8px;">
+            <div class="col-3">
+              <label>Log baslangic (TR saati)</label>
+              <input id="diagFrom" type="datetime-local" step="60" />
+            </div>
+            <div class="col-3">
+              <label>Log bitis (TR saati)</label>
+              <input id="diagUntil" type="datetime-local" step="60" />
+            </div>
+            <div class="col-3">
+              <label>Durum</label>
+              <div id="diagStatus" class="muted" style="padding-top:8px;">Kapali</div>
+            </div>
+            <div class="col-3">
+              <label>Boyut</label>
+              <div id="diagSizeHint" class="muted" style="padding-top:8px;">—</div>
+            </div>
+          </div>
+          <div class="row" style="margin-bottom:8px;">
+            <div class="col-3"><button id="diagSaveBtn" class="btn-orange">Logu baslat / guncelle</button></div>
+            <div class="col-3"><button id="diagStopBtn" class="btn-gray">Logu durdur</button></div>
+            <div class="col-3"><button id="diagDownloadBtn">Logu indir (ZIP)</button></div>
+            <div class="col-3"><button id="diagRefreshBtn" class="btn-gray">Durumu yenile</button></div>
+          </div>
+          <div style="display:block;width:100%;margin-top:8px;">
+            <label>Pi host (anlik)</label>
+            <div id="diagHostHint" class="muted" style="padding-top:4px;">CPU / sicaklik / load / RAM / disk — «Durumu yenile» ile guncellenir (otomatik akmaz)</div>
+            <p class="muted" style="margin:4px 0 0;">Bu satirlar canli degismez; teshis durumunu yenilemeden eski kalir.</p>
+          </div>
+          <div id="diagMsg" class="muted" style="margin-top:8px;"></div>
+        </section>
+
       </div>
       </section>
 
@@ -300,7 +387,7 @@
 
       <section id="panel-telegram" class="admin-panel">
       <div class="card">
-        <h3>Telegram Kalip Botu</h3>
+        <h3>Yetkilendirme</h3>
         <div class="guide" style="margin-bottom:12px;">
           <b>Kurulum adimlari</b>
           <ol>
@@ -507,6 +594,84 @@
       </div>
       </section>
 
+      <section id="panel-diagnosis" class="admin-panel">
+      <div class="card" id="diagnosisCard">
+        <h3>Diagnosis / Alarm ve uyarilar</h3>
+        <p class="muted">
+          Global alarm/uyari listesi. Liste sadece zaman / makine / kod / hata / durum gosterir.
+          Esik, peak/bg, Δ, len ve oneri <b>Detay</b> icinde. Ornekler alarm suresince 1 dk aralikla
+          yazilir (ornegin 5 dk aktifse 5 satir). Kayitlar <b>7 gun</b> sonra silinir.
+          E001: reflektör bulununca alarm hemen kapanir (diger kodlarin bitis sarti kendi kuralina gore).
+        </p>
+        <div id="diagCodesBox" class="muted" style="margin:8px 0;padding:8px;border:1px solid #334155;border-radius:8px;background:#0f172a;"></div>
+        <div class="row" style="margin-top:8px;">
+          <div class="col-3">
+            <label>Makine</label>
+            <select id="diagFaultMachine"><option value="">Tumu</option></select>
+          </div>
+          <div class="col-3">
+            <label>Hata kodu</label>
+            <select id="diagFaultCode"><option value="">Tumu</option></select>
+          </div>
+          <div class="col-3">
+            <label>Durum</label>
+            <select id="diagFaultStatus">
+              <option value="active" selected>Aktif</option>
+              <option value="past">Gecmis</option>
+              <option value="">Tumu</option>
+            </select>
+          </div>
+          <div class="col-3" style="padding-top:22px;">
+            <button id="diagFaultRefreshBtn" class="btn-gray" style="width:auto;padding:8px 14px;">Yenile</button>
+          </div>
+        </div>
+        <div id="diagFaultMsg" class="muted" style="margin-top:6px;"></div>
+        <div style="overflow-x:auto;margin-top:10px;">
+          <table class="live">
+            <thead>
+              <tr>
+                <th>Olusma</th>
+                <th>Makine</th>
+                <th>Kod</th>
+                <th>Hata</th>
+                <th>Durum</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="diagFaultBody">
+              <tr><td colspan="6" class="muted">Kayit yok / henuz yenilenmedi.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="diagAlarmDetail" style="display:none;margin-top:14px;padding:12px;border:1px solid #334155;border-radius:8px;background:#0b1220;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <h4 id="diagDetailTitle" style="margin:0;font-size:14px;color:#93c5fd;">Alarm detayi</h4>
+            <button type="button" id="diagDetailCloseBtn" class="btn-gray" style="width:auto;padding:6px 12px;">Kapat</button>
+          </div>
+          <div id="diagDetailMeta" class="muted" style="margin-top:8px;"></div>
+          <h5 style="margin:12px 0 6px;font-size:13px;color:#cbd5e1;">Oneri</h5>
+          <ul id="diagDetailSuggestions" style="margin:0;padding-left:18px;color:#e2e8f0;font-size:13px;"></ul>
+          <h5 style="margin:12px 0 6px;font-size:13px;color:#cbd5e1;">Ornekler (1 dk)</h5>
+          <div style="overflow-x:auto;">
+            <table class="live">
+              <thead>
+                <tr>
+                  <th>Zaman</th>
+                  <th>Esik</th>
+                  <th>peak/bg</th>
+                  <th>Δ</th>
+                  <th>len</th>
+                </tr>
+              </thead>
+              <tbody id="diagDetailSamples">
+                <tr><td colspan="5" class="muted">—</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      </section>
+
         </main>
       </div>
     </div>
@@ -527,6 +692,33 @@
       let liveViewCamId = null;
       let liveViewImgMeta = null;
       let liveViewTick = 0;
+      // #region agent log
+      let _dbgLiveN = 0;
+      let _dbgLastPos = null;
+      let _dbgLastCent = null;
+      let _dbgFrameSig = '';
+      function dbgLive(hypothesisId, location, message, data){
+        const body = {
+          sessionId: '3a2fad',
+          runId: 'm3-live-8080',
+          hypothesisId,
+          location,
+          message,
+          data,
+          timestamp: Date.now()
+        };
+        fetch('/api/debug/agent-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        }).catch(()=>{});
+        fetch('http://127.0.0.1:7662/ingest/cbe83440-6fdc-44a5-a3d6-275b7d410b22', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '3a2fad' },
+          body: JSON.stringify(body)
+        }).catch(()=>{});
+      }
+      // #endregion
       let roiPoly = null; // [{x,y},...4]
       let interaction = { mode: null, start: null, basePoly: null, cornerIdx: -1, rotateBaseAngle: 0, rotateStart: 0 };
       let viewZoom = 1.0;
@@ -555,6 +747,7 @@
         system: 'panel-system',
         tv: 'panel-tv',
         audit: 'panel-audit',
+        diagnosis: 'panel-diagnosis',
       };
 
       let activePanelId = 'panel-live';
@@ -572,6 +765,7 @@
           refreshSnapshot().catch(()=>{});
         }
         if(panelId === 'panel-tv') refreshProductionSettings().catch(e=>setMsg('tvProdMsg', String(e), 'bad'));
+        if(panelId === 'panel-diagnosis') refreshDiagnosisPanel().catch(e=>setMsg('diagFaultMsg', String(e), 'bad'));
       }
 
       document.querySelectorAll('.nav-item').forEach(btn => {
@@ -606,29 +800,36 @@
         machineSelect: 'Kalibrasyon ve parametreler icin makine secimi.',
         machineCameraSelect: 'Secili makine hangi kameranin goruntusunden takip edilecek. Degisince otomatik kaydedilir.',
         machineName: 'Izleme panelinde (8000) gorunen makine adi.',
-        axisDir: 'Takip cizgisinin kapali→acik yonu. Kirmizi nokta kapali ucu, yesil nokta acik ucu gosterir.',
         roiAngle: 'ROI dortgeninin donus acisi (derece). Cizgiyi hizalamak icin kullanilir.',
-        thresholdMode: 'fixed: sabit prominence esigi. adaptive: sahneye gore otomatik esik (parlak zeminlerde genelde daha iyi).',
-        thMin: 'Fixed modda reflektor kabul esigi: peak - arka plan en az bu kadar olmali (0-255). Dusuk = zayif reflektor de kabul.',
-        thOffset: 'Esige eklenen +/- deger. Negatif yaparsaniz daha zayif reflektorler de kabul edilir.',
-        lineThickness: 'Sari takip cizgisi etrafindaki piksel bandi (max-pool). Kalin = titreme/blur toleransi; ince = daha hassas.',
-        lenMin: 'Reflektor parlak segment minimum uzunlugu (ornek sayisi). Cok kisa parlamalari reddeder.',
-        lenMax: 'Reflektor parlak segment maksimum uzunlugu. Cok genis parlak bolgeleri reddeder.',
-        lenCalibSec: 'Otomatik uzunluk kalibrasyonu suresi (sn). Bu surede reflektoru cizgi boyunca bir kez gezdirin.',
-        open1d: 'Referans acik pozisyon (0-1, cizgi uzerinde). Yon tabanli modda bilgi amaclidir; asil OPEN/CLOSED hareket yonunden cikar.',
-        closed1d: 'Referans kapali pozisyon (0-1). Yon tabanli modda bilgi amaclidir.',
-        hys: 'Titreme toleransi. Yuksek = kucuk salinimlar MOVING sayilmaz; dusuk = daha hassas hareket algisi. Hareket epsilon ≈ hysteresis × 0.12.',
-        debounceMs: 'Hareketin MOVING olarak onaylanmasi icin minimum sure (ms). Kisa titremeleri filtreler.',
-        stabilityMs: 'OPEN veya CLOSED onayi icin duraklama suresi (ms). Uzun = daha gec ama kararli; kisa = hizli ama titremeye acik.',
-        occlusionGraceMs: 'Reflektor kisa sure kaybolunca son bilinen pozisyonu tutma suresi (ms). Kaporta alti / anlik kayiplarda sinyal kopmasini geciktirir.',
-        machineEnabled: 'false: makine sayimi durur, canli durum DISABLED olur.',
+        thresholdMode: 'REFLEKTOR TESPITI (sayim degil). fixed: sabit (peak-bg) esigi. adaptive: sahneye gore esik. Parlak zeminde reflektor kayboluyorsa once bunu / thMin deneyin.',
+        thMin: 'REFLEKTOR TESPITI. Fixed: peak - arka plan en az bu kadar (0-255) olmali. Dusuk = daha zayif parlamayi da nokta kabul eder. Dongu sayacini degistirmez.',
+        thOffset: 'Tespit esigine +/- ek. Negatif = daha hassas bulma. Sayim zigzag esigi degildir.',
+        lineThickness: 'Sari cizgi etrafindaki ornek bandi (px). Tespit dayanikliligi; zigzag sayim kurali degil.',
+        lenMin: 'Parlak segment min uzunlugu. Cok kisa isik noktalarini reddeder (tespit).',
+        lenMax: 'Parlak segment max uzunlugu. Cok genis parlak alanlari reddeder (tespit).',
+        lenCalibSec: 'Uzunluk kalibrasyon suresi (sn). Reflektoru cizgi boyunca gezdirin.',
+        minProminence: 'UI alani: kaydedilir ama CANLI kod su an global 0.12 sabit kullanir (makine satiri yok sayilir). Zigzag min salinim esigi.',
+        countingMode: 'KULLANILMIYOR. Canli her zaman zigzag peak/trough. Schmitt secimi sayimi degistirmez.',
+        closedPolarity: 'KULLANILMIYOR (eski Schmitt).',
+        closedRef: 'KULLANILMIYOR (eski Schmitt ogrenilen kapali uc).',
+        closedHyst: 'KULLANILMIYOR (eski Schmitt histerezis).',
+        smoothWin: 'KULLANILMIYOR (eski Schmitt yumusatma).',
+        learnEnabled: 'KULLANILMIYOR (eski Schmitt otomatik ogrenme).',
+        occlusionGraceMs: 'Reflektor kisa sure kaybolunca son pozisyonu tutma (ms). Tespit surekliligi.',
+        idleGapMinutes: 'Detay grafik: ardısik donguler arasi bu kadar dk asilirsa zigzag kopar ve kirmizi durus (dk isaretleri) cizilir. Varsayilan 3. Sayima / TV DURUYOR esigine etki etmez.',
+        machineEnabled: 'false: makine sayimi durur, durum DISABLED.',
+        roiAngle: 'ROI dortgen donusu; sadece cizgi hizalama yardimi. Detector ROI maskesi kullanmaz.',
+        diagUntil: 'Bu tarihe/saate (Turkiye saati) kadar bu makinenin pos/state CSV kaydini alir (goruntu yok). Sure dolunca otomatik durur. Bos birakip "Logu durdur" ile hemen kapatabilirsiniz.',
         zoomSlider: 'Takip cizgisi hizalama zoom seviyesi (%50-%400). Ctrl+tekerlek ile de degistirilebilir.',
       };
 
       function applyFieldTips(){
         for(const [id, text] of Object.entries(FIELD_TIPS)){
           const el = q(id);
-          if(el) el.title = text;
+          if(!el) continue;
+          el.title = text;
+          const lab = el.closest('.col-3, .col-6, .col-12')?.querySelector('label');
+          if(lab) lab.title = text;
         }
       }
 
@@ -921,7 +1122,7 @@
           .filter(sm => sm.state !== 'DISABLED')
           .sort((a, b) => Number(a.id) - Number(b.id));
         if(!snapList.length){
-          body.innerHTML = '<tr><td colspan="5" class="muted">Canli veri yok — WS baglantisi veya aktif makine bekleniyor</td></tr>';
+          body.innerHTML = '<tr><td colspan="8" class="muted">Canli veri yok — WS baglantisi veya aktif makine bekleniyor</td></tr>';
           return;
         }
         body.innerHTML = snapList.map(sm => {
@@ -929,10 +1130,15 @@
           const m = dbById.get(mid) || sm;
           const name = (m.name != null ? m.name : sm.name) || '';
           const camId = m.camera_id != null ? m.camera_id : sm.camera_id;
+          const pos = sm.position_01 != null ? Number(sm.position_01).toFixed(3) : '—';
+          const cyc = sm.cycle_time_last != null ? Number(sm.cycle_time_last).toFixed(2) + 's' : '—';
           return `<tr>
             <td>${mid}</td>
             <td>${escapeHtml(name)}</td>
             <td>${camId ?? '—'}</td>
+            <td>${escapeHtml(sm.state || '—')}</td>
+            <td>${pos}</td>
+            <td>${cyc}</td>
             <td>${escapeHtml(thresholdLabel(m, sm))}</td>
             <td>${escapeHtml(signalLabel(m, sm))}</td>
           </tr>`;
@@ -946,6 +1152,9 @@
             <td>${m.id}</td>
             <td>${escapeHtml(m.name || '')}</td>
             <td>${m.camera_id}</td>
+            <td>—</td>
+            <td>—</td>
+            <td>—</td>
             <td>—</td>
             <td>sinyal yok (henuz kare yok)</td>
           </tr>`).join('');
@@ -991,11 +1200,15 @@
         if(sel.value !== String(liveViewCamId)) sel.value = String(liveViewCamId);
       }
 
+      let liveViewImgBusy = false;
       function refreshLiveViewImage(){
         if(activePanelId !== 'panel-live') return; // gizli panelde goruntu cekme
         const camId = Number(liveViewCamId);
         const img = q('liveViewImg');
         if(!camId || !img) return;
+        // Onceki JPEG bitmeden yeni src atma — yavas istekte onload iptal olur, noktalar kaybolur.
+        if(liveViewImgBusy) return;
+        liveViewImgBusy = true;
         liveViewTick += 1;
         img.src = `${location.origin}/api/cameras/${camId}/snapshot.jpg?t=${liveViewTick}`;
       }
@@ -1010,11 +1223,80 @@
         const fps = camLive && camLive.fps != null ? Number(camLive.fps).toFixed(1) : '0';
         const status = (camLive && camLive.status) || (camDb && camDb.status) || '?';
         const name = camDb ? camDb.name : `Kamera ${camId}`;
-        q('liveViewBar').textContent = `${name} — ${status} — FPS ~ ${fps}`;
+        const age = camLive && camLive.frame_age_ms != null ? Number(camLive.frame_age_ms) : null;
+        const stale = !!(camLive && camLive.stale);
+        let ageTxt = '';
+        if(age != null && Number.isFinite(age)){
+          ageTxt = age >= 1000 ? ` — kare ${ (age/1000).toFixed(1) }s once` : ` — kare ${Math.round(age)}ms`;
+        }
+        const readMs = camLive && camLive.read_ms != null ? Number(camLive.read_ms) : null;
+        const grayMs = camLive && camLive.gray_ms != null ? Number(camLive.gray_ms) : null;
+        const probeMs = camLive && camLive.probe_ms != null ? Number(camLive.probe_ms) : null;
+        const totalMs = camLive && camLive.total_ms != null ? Number(camLive.total_ms) : null;
+        const interval = camLive && camLive.sample_interval_ms != null ? Number(camLive.sample_interval_ms) : (liveSnapshot.vision && liveSnapshot.vision.sample_interval_ms) || 100;
+        const keeping = camLive && camLive.keeping_up;
+        const keepTxt = keeping === true ? 'YETISIYOR' : (keeping === false ? 'YETISMIYOR' : '—');
+        q('liveViewBar').textContent = `${name} — ${status}${stale ? ' (ESKI KARE)' : ''} — FPS ~ ${fps}${ageTxt} — aralik ${interval}ms — ${keepTxt}`;
+        q('liveViewBar').className = 'live-view-bar' + (stale || status === 'error' || status === 'disconnected' || keeping === false ? ' bad' : '');
+        const perfEl = q('visionPerfBar');
+        if(perfEl){
+          const loopMs = liveSnapshot.vision && liveSnapshot.vision.loop_ms != null ? Number(liveSnapshot.vision.loop_ms).toFixed(0) : '—';
+          const parts = [];
+          if(readMs != null) parts.push(`okuma ${readMs.toFixed(1)}ms`);
+          if(grayMs != null) parts.push(`gri ${grayMs.toFixed(1)}ms`);
+          if(probeMs != null) parts.push(`cizgi prob ${probeMs.toFixed(1)}ms`);
+          if(totalMs != null) parts.push(`toplam ${totalMs.toFixed(1)}ms`);
+          parts.push(`dongu ${loopMs}ms`);
+          perfEl.textContent = `Son kare isleme: ${parts.join(' · ')}`;
+          perfEl.className = keeping === false ? 'bad' : 'muted';
+        }
 
         const dots = q('liveViewDots');
         const meta = liveViewImgMeta;
         const active = (liveSnapshot.machines || []).filter(m => m.state !== 'DISABLED' && Number(m.camera_id) === camId);
+        // #region agent log
+        const m3 = (liveSnapshot.machines || []).find(m => Number(m.id) === 3);
+        _dbgLiveN += 1;
+        if(_dbgLiveN % 3 === 1){
+          if(!m3){
+            dbgLive('D', 'admin:m3-missing', 'machine 3 not in snapshot', {
+              machineCount: (liveSnapshot.machines||[]).length, camId
+            });
+          } else {
+            const pos = m3.position_01 != null ? Number(m3.position_01) : null;
+            const c = m3.centroid;
+            const dPos = (_dbgLastPos != null && pos != null) ? Math.abs(pos - _dbgLastPos) : null;
+            const dCent = (_dbgLastCent && c)
+              ? Math.hypot(Number(c.x)-_dbgLastCent.x, Number(c.y)-_dbgLastCent.y)
+              : null;
+            _dbgLastPos = pos;
+            _dbgLastCent = c ? { x: Number(c.x), y: Number(c.y) } : null;
+            let cxPct = null, cyPct = null, offscreen = false;
+            if(meta && meta.nw && c){
+              cxPct = (Number(c.x) / meta.nw) * 100;
+              cyPct = (Number(c.y) / meta.nh) * 100;
+              offscreen = Number(c.x) < 0 || Number(c.y) < 0 || Number(c.x) > meta.nw || Number(c.y) > meta.nh;
+            }
+            dbgLive('B', 'admin:m3-motion', 'm3 live motion sample', {
+              state: m3.state,
+              pos, dPos, dCent,
+              idle_s: m3.idle_s ?? null,
+              occlusion_hold: m3.occlusion_hold ?? null,
+              centroid: c || null,
+              onSelectedCam: Number(m3.camera_id) === camId,
+              selectedCamId: camId,
+              camera_id: m3.camera_id,
+              imgNw: meta ? meta.nw : null,
+              imgNh: meta ? meta.nh : null,
+              cxPct, cyPct, offscreen,
+              cycle_time_last: m3.cycle_time_last ?? null,
+              dbg_cycle_emit_count: m3.dbg_cycle_emit_count ?? null,
+              wsConnected: !!(liveWs && liveWs.readyState === 1),
+              activeOnCam: active.map(m => m.id)
+            });
+          }
+        }
+        // #endregion
         if(!dots) return;
         if(!meta || !meta.nw){
           dots.innerHTML = '';
@@ -1022,8 +1304,10 @@
           dots.innerHTML = active.filter(m => m.centroid).map(m => {
             const cx = (Number(m.centroid.x) / meta.nw) * meta.cw;
             const cy = (Number(m.centroid.y) / meta.nh) * meta.ch;
-            const title = escapeHtml(m.name || '');
-            return `<span class="live-view-dot" style="left:${cx}px;top:${cy}px" title="${title}"></span>`;
+            const st = String(m.state || 'UNKNOWN').toLowerCase();
+            const pos = m.position_01 != null ? Number(m.position_01).toFixed(3) : '—';
+            const title = escapeHtml(`${m.name || ''} ${m.state || ''} pos=${pos}`);
+            return `<span class="live-view-dot ${st}" style="left:${cx}px;top:${cy}px" title="${title}"></span>`;
           }).join('');
         }
 
@@ -1035,7 +1319,11 @@
         }
         box.innerHTML = active.map(m => {
           const mold = m.mold_name ? ` · ${escapeHtml(m.mold_name)}` : '';
-          return `<div class="live-view-mach"><strong>${escapeHtml(m.name || '')}</strong> ${escapeHtml(m.state || '')}${mold}</div>`;
+          const pos = m.position_01 != null ? ` · pos=${Number(m.position_01).toFixed(3)}` : '';
+          const probe = m.probe_ms != null ? ` · prob=${Number(m.probe_ms).toFixed(1)}ms` : '';
+          const proc = m.process_ms != null ? ` · islem=${Number(m.process_ms).toFixed(1)}ms` : '';
+          const fage = m.frame_age_ms != null ? ` · kare=${Math.round(Number(m.frame_age_ms))}ms` : '';
+          return `<div class="live-view-mach"><strong>${escapeHtml(m.name || '')}</strong> ${escapeHtml(m.state || '')}${mold}${pos}${probe}${proc}${fage}</div>`;
         }).join('');
       }
 
@@ -1203,9 +1491,147 @@
           a = { x:(poly[0].x + poly[1].x)/2, y:(poly[0].y + poly[1].y)/2 };
           b = { x:(poly[2].x + poly[3].x)/2, y:(poly[2].y + poly[3].y)/2 };
         }
-        const dir = (document.getElementById('axisDir').value || 'lr');
-        if(dir === 'rl'){ const tmp=a; a=b; b=tmp; }
         return { a, b };
+      }
+
+      function axisFromSavedMachine(){
+        const m = machineById(machineSelect.value);
+        if(!m || overlay.width <= 0) return null;
+        try{
+          const p0 = JSON.parse(m.axis_p0 || 'null');
+          const p1 = JSON.parse(m.axis_p1 || 'null');
+          if(!Array.isArray(p0) || !Array.isArray(p1) || p0.length < 2 || p1.length < 2) return null;
+          return {
+            a: { x: Number(p0[0]) * overlay.width, y: Number(p0[1]) * overlay.height },
+            b: { x: Number(p1[0]) * overlay.width, y: Number(p1[1]) * overlay.height },
+          };
+        }catch(_e){ return null; }
+      }
+
+      function axisForDraw(poly){
+        if(!interaction.mode){
+          const saved = axisFromSavedMachine();
+          if(saved) return saved;
+        }
+        return axisFromPoly(poly);
+      }
+
+      function updateClosedRefHint(m){
+        const el = q('closedRefHint');
+        if(!el) return;
+        if(m && m.learned_at){
+          let when = m.learned_at;
+          try{ when = new Date(m.learned_at).toLocaleString('tr-TR'); }catch(_e){}
+          el.textContent = `Son ogrenme/override: ${when}. Bos = otomatik ogren.`;
+        }else{
+          el.textContent = 'Bos = otomatik ogren. Elle yazarsan override.';
+        }
+      }
+
+      function updateProminenceHint(){
+        const el = q('minProminenceHint');
+        if(!el) return;
+        const mc = Number(q('minProminence')?.value || 0.1);
+        const axis = axisForDraw(roiPoly);
+        let pxTxt = '';
+        if(axis){
+          const len = Math.hypot(axis.b.x - axis.a.x, axis.b.y - axis.a.y);
+          if(len > 1) pxTxt = ` ≈ ${(len * mc).toFixed(1)} px strok`;
+        }
+        el.textContent = `Sayilan en kucuk strok (0-1).${pxTxt}`;
+      }
+
+      const DIAG_MB_PER_DAY = 2; // light process.csv (~tick+events)
+
+      function fillDiagDtInput(elId, iso){
+        const el = q(elId);
+        if(!el) return;
+        if(!iso){ el.value = ''; return; }
+        try{
+          const d = new Date(iso);
+          if(Number.isNaN(d.getTime())){ el.value = ''; return; }
+          const pad = n => String(n).padStart(2,'0');
+          el.value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }catch(_){ el.value = ''; }
+      }
+      function fillDiagUntilInput(iso){ fillDiagDtInput('diagUntil', iso); }
+      function fillDiagFromInput(iso){ fillDiagDtInput('diagFrom', iso); }
+
+      function diagIsoFromInput(elId){
+        const v = (q(elId)?.value || '').trim();
+        if(!v) return null;
+        const d = new Date(v);
+        if(Number.isNaN(d.getTime())) return null;
+        return d.toISOString();
+      }
+      function diagUntilIsoFromInput(){ return diagIsoFromInput('diagUntil'); }
+      function diagFromIsoFromInput(){ return diagIsoFromInput('diagFrom'); }
+
+      function formatMbEstimate(hours){
+        const mb = Math.max(0, hours) / 24 * DIAG_MB_PER_DAY;
+        if(mb < 1) return `~${(mb*1024).toFixed(0)} KB`;
+        if(mb < 1024) return `~${mb.toFixed(1)} MB`;
+        return `~${(mb/1024).toFixed(2)} GB`;
+      }
+
+      function updateDiagEstimatePreview(){
+        const hint = q('diagSizeHint');
+        if(!hint) return;
+        const isoFrom = diagFromIsoFromInput();
+        const isoUntil = diagUntilIsoFromInput();
+        if(!isoUntil){
+          hint.textContent = 'Bitis secilmedi. Baslangic bos birakilirsa kayit hemen baslar.';
+          return;
+        }
+        const startMs = isoFrom ? new Date(isoFrom).getTime() : Date.now();
+        const endMs = new Date(isoUntil).getTime();
+        const hours = Math.max(0, (endMs - startMs) / 3600000);
+        hint.textContent =
+          `Tahmini process.csv: ${formatMbEstimate(hours)} (${hours.toFixed(1)} saat, hafif log). Goruntu yok.`;
+      }
+
+      async function refreshDiagStatus(){
+        const id = Number(machineSelect.value);
+        if(!id) return;
+        try{
+          const st = await jget(`/api/machines/${id}/diag`);
+          const statusEl = q('diagStatus');
+          if(statusEl){
+            if(st.active){
+              statusEl.textContent = `Kayit aliniyor → ${st.diag_until || ''}`;
+              statusEl.style.color = '#4ade80';
+            }else if(st.pending){
+              statusEl.textContent = `Bekliyor: ${st.diag_from || ''} → ${st.diag_until || ''}`;
+              statusEl.style.color = '#fbbf24';
+            }else{
+              statusEl.textContent = (st.diag_until || st.diag_from) ? 'Suresi dolmus / kapali' : 'Kapali';
+              statusEl.style.color = '';
+            }
+          }
+          const hint = q('diagSizeHint');
+          if(hint){
+            let t = `Diskte su an: ${st.bytes_on_disk_label || '0 B'}.`;
+            if(st.active || st.pending){
+              t += ` Pencere: ${(st.diag_from || 'hemen')} → ${st.diag_until || '—'}.`;
+            }
+            hint.textContent = t;
+          }
+          const hostEl = q('diagHostHint');
+          if(hostEl){
+            const h = st.host || {};
+            const f = (v, u, nd=1) => (v == null || Number.isNaN(Number(v))) ? '—' : `${Number(v).toFixed(nd)}${u}`;
+            const disk = (h.disk_free_gb == null)
+              ? 'Disk —'
+              : `Disk bos ${Number(h.disk_free_gb).toFixed(1)}G / ${Number(h.disk_total_gb||0).toFixed(1)}G (dolu ${f(h.disk_used_pct,'%')})`;
+            hostEl.textContent =
+              `CPU ${f(h.cpu_pct,'%')} · Sicaklik ${f(h.temp_c,'°C')} · Load1 ${f(h.load1,'',2)} · RAM ${f(h.mem_pct,'%')} · ${disk}` +
+              ` — sadece «Durumu yenile» ile guncellenir`;
+          }
+          if(st.diag_until && !q('diagUntil').value) fillDiagUntilInput(st.diag_until);
+          if(st.diag_from && !q('diagFrom').value) fillDiagFromInput(st.diag_from);
+        }catch(e){
+          console.warn(e);
+        }
       }
 
       function drawRoi(){
@@ -1226,7 +1652,7 @@
           ctx.setLineDash([]);
         }
 
-        const axis = axisFromPoly(roiPoly);
+        const axis = axisForDraw(roiPoly);
         if(!axis) return;
         const a = axis.a;
         const b = axis.b;
@@ -1253,12 +1679,18 @@
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
         ctx.stroke();
-        // Kapali / acik uç — zoom ile kuculur
+        // Kapali / acik uç — mavi KAPALI (p0), cyan ACIK (p1)
         const capR = uiMarkerRadiusPx(3.5);
-        ctx.fillStyle = '#ef4444';
+        ctx.fillStyle = '#3b82f6';
         ctx.beginPath(); ctx.arc(a.x, a.y, capR, 0, Math.PI*2); ctx.fill();
-        ctx.fillStyle = '#22c55e';
+        ctx.fillStyle = '#22d3ee';
         ctx.beginPath(); ctx.arc(b.x, b.y, capR, 0, Math.PI*2); ctx.fill();
+        ctx.font = `${Math.max(9, uiMarkerRadiusPx(9))}px sans-serif`;
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = '#3b82f6';
+        ctx.fillText('KAPALI', a.x + 6, a.y - 4);
+        ctx.fillStyle = '#22d3ee';
+        ctx.fillText('ACIK', b.x + 6, b.y - 4);
 
         // Show edit handles only while editing so the user sees just the line
         // in idle state.
@@ -1284,6 +1716,7 @@
           ctx.arc(rh.x, rh.y, hr, 0, Math.PI*2);
           ctx.fill();
         }
+        updateProminenceHint();
       }
 
       function toNorm(poly){
@@ -1413,15 +1846,23 @@
         q('lenMax').value = m.reflector_len_max ?? '';
         q('thMax').value = m.threshold_max;
         q('thresholdMode').value = normalizeThresholdMode(m.threshold_mode);
-        q('open1d').value = m.open_position_1d;
-        q('closed1d').value = m.closed_position_1d;
-        q('hys').value = m.hysteresis;
-        q('debounceMs').value = m.debounce_ms ?? 80;
-        q('stabilityMs').value = m.stability_confirm_ms ?? 500;
+        q('minProminence').value = m.min_prominence != null ? m.min_prominence : 0.1;
         q('occlusionGraceMs').value = m.occlusion_grace_ms ?? 300;
+        q('idleGapMinutes').value = m.idle_gap_minutes != null ? m.idle_gap_minutes : 3;
         q('machineEnabled').value = String(m.enabled);
+        q('countingMode').value = m.counting_mode || 'peak_trough';
+        q('closedPolarity').value = m.closed_polarity || 'low';
+        q('closedRef').value = m.closed_ref != null ? m.closed_ref : '';
+        q('closedHyst').value = m.closed_hyst != null ? m.closed_hyst : 0.05;
+        q('smoothWin').value = m.smooth_win ?? 5;
+        q('learnEnabled').value = String(m.learn_enabled !== false);
+        updateClosedRefHint(m);
+        fillDiagFromInput(m.diag_from);
+        fillDiagUntilInput(m.diag_until);
         applyMachineRoiToOverlay();
         drawRoi();
+        updateProminenceHint();
+        refreshDiagStatus();
       }
 
       async function refreshSnapshot(){
@@ -1606,13 +2047,16 @@
             reflector_len_min: q('lenMin').value ? Number(q('lenMin').value) : null,
             reflector_len_max: q('lenMax').value ? Number(q('lenMax').value) : null,
             threshold_max: Number(q('thMax').value),
-            open_position_1d: Number(q('open1d').value),
-            closed_position_1d: Number(q('closed1d').value),
-            hysteresis: Number(q('hys').value),
-            debounce_ms: parseMs('debounceMs', 80),
-            stability_confirm_ms: parseMs('stabilityMs', 500),
+            min_prominence: Number(q('minProminence').value || 0.1),
             occlusion_grace_ms: parseMs('occlusionGraceMs', 300),
+            idle_gap_minutes: Math.max(1, Math.min(120, Number(q('idleGapMinutes').value || 3))),
             enabled: q('machineEnabled').value === 'true',
+            counting_mode: q('countingMode').value,
+            closed_polarity: q('closedPolarity').value,
+            closed_ref: q('closedRef').value === '' ? null : Number(q('closedRef').value),
+            closed_hyst: Number(q('closedHyst').value || 0.05),
+            smooth_win: Number(q('smoothWin').value || 5),
+            learn_enabled: q('learnEnabled').value === 'true',
           });
           const idx = machines.findIndex(m=>m.id===id);
           if(idx >= 0) machines[idx] = updated;
@@ -1621,6 +2065,83 @@
           setMsg('machineMsg','Makine parametreleri kaydedildi','good');
           await refreshSnapshot();
         }catch(e){ setMsg('machineMsg',String(e),'bad'); }
+      };
+
+      q('diagUntil')?.addEventListener('input', updateDiagEstimatePreview);
+      q('diagFrom')?.addEventListener('input', updateDiagEstimatePreview);
+      q('diagRefreshBtn').onclick = async ()=>{
+        try{
+          await refreshDiagStatus();
+          setMsg('diagMsg','Durum guncellendi','good');
+        }catch(e){ setMsg('diagMsg',String(e),'bad'); }
+      };
+      q('diagSaveBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          const untilIso = diagUntilIsoFromInput();
+          const fromIso = diagFromIsoFromInput();
+          if(!untilIso){ setMsg('diagMsg','Bitis tarih/saat secin','bad'); return; }
+          const untilMs = new Date(untilIso).getTime();
+          if(untilMs <= Date.now() && !fromIso){
+            setMsg('diagMsg','Bitis zamani gelecekte olmali (veya baslangic da sec)','bad'); return;
+          }
+          if(fromIso){
+            const fromMs = new Date(fromIso).getTime();
+            if(!(fromMs < untilMs)){
+              setMsg('diagMsg','Baslangic, bitisten once olmali','bad'); return;
+            }
+          }
+          const updated = await jpatch(`/api/machines/${id}`, {
+            diag_from: fromIso || null,
+            diag_until: untilIso,
+          });
+          const idx = machines.findIndex(m=>m.id===id);
+          if(idx >= 0) machines[idx] = updated;
+          fillDiagFromInput(updated.diag_from);
+          fillDiagUntilInput(updated.diag_until);
+          await refreshDiagStatus();
+          const pending = fromIso && new Date(fromIso).getTime() > Date.now();
+          setMsg('diagMsg', pending
+            ? 'Pencere kaydedildi — baslangica kadar bekleyecek'
+            : 'Log kaydi baslatildi / guncellendi (8000 ~2 sn icinde uygular)', 'good');
+        }catch(e){ setMsg('diagMsg',String(e),'bad'); }
+      };
+      q('diagStopBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          const updated = await jpatch(`/api/machines/${id}`, { diag_from: null, diag_until: null });
+          const idx = machines.findIndex(m=>m.id===id);
+          if(idx >= 0) machines[idx] = updated;
+          fillDiagFromInput(null);
+          fillDiagUntilInput(null);
+          await refreshDiagStatus();
+          setMsg('diagMsg','Log kaydi durduruldu','good');
+        }catch(e){ setMsg('diagMsg',String(e),'bad'); }
+      };
+      q('diagDownloadBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          setMsg('diagMsg','ZIP hazirlaniyor...','warn');
+          const r = await fetch(location.origin + `/api/machines/${id}/diag/download`, { credentials: 'include' });
+          if(!r.ok){
+            let detail = await r.text();
+            try{ detail = JSON.parse(detail).detail || detail; }catch(_){}
+            throw new Error(detail || `HTTP ${r.status}`);
+          }
+          const blob = await r.blob();
+          const cd = r.headers.get('content-disposition') || '';
+          let name = `diag_machine_${id}.zip`;
+          const m = /filename="?([^";]+)"?/i.exec(cd);
+          if(m) name = m[1];
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(a.href);
+          setMsg('diagMsg',`Indirildi: ${name}`,'good');
+        }catch(e){ setMsg('diagMsg',String(e),'bad'); }
       };
 
       q('reloadSnapBtn').onclick = refreshSnapshot;
@@ -1878,6 +2399,138 @@
       }
       q('auditRefreshBtn').onclick = ()=> refreshAuditLogs().catch(e=>{});
 
+      function fillDiagFaultFilters(codes){
+        const mSel = q('diagFaultMachine');
+        const cSel = q('diagFaultCode');
+        if(!mSel || !cSel) return;
+        const curM = mSel.value;
+        const curC = cSel.value;
+        mSel.innerHTML = '<option value="">Tumu</option>' + (machines || []).map(m =>
+          `<option value="${m.id}">${escapeHtml(m.name || ('#'+m.id))}</option>`
+        ).join('');
+        cSel.innerHTML = '<option value="">Tumu</option>' + (codes || []).map(c =>
+          `<option value="${escapeHtml(c.code)}">${escapeHtml(c.code)} — ${escapeHtml(c.title_tr || c.name)}</option>`
+        ).join('');
+        if(curM) mSel.value = curM;
+        if(curC) cSel.value = curC;
+      }
+
+      function fmtDiagTs(iso){
+        if(!iso) return '—';
+        return String(iso).replace('T',' ').replace('Z','').slice(0,19);
+      }
+
+      function renderSampleRow(s){
+        const d = s.detail || {};
+        const mode = d.threshold_mode || '—';
+        const th = d.threshold_active != null ? `${mode} ≥${d.threshold_active}` : mode;
+        const off = d.threshold_offset != null ? ` (off ${d.threshold_offset >= 0 ? '+' : ''}${d.threshold_offset})` : '';
+        const peakBg = (d.peak != null && d.background != null) ? `${d.peak}/${d.background}` : '—';
+        const delta = d.delta != null ? String(d.delta) : '—';
+        const lenMin = d.len_min != null ? d.len_min : '?';
+        const lenMax = d.len_max != null ? d.len_max : '?';
+        const len = d.segment_len != null ? `${d.segment_len} (${lenMin}-${lenMax})` : '—';
+        return `<tr>
+          <td>${escapeHtml(fmtDiagTs(s.created_at))}</td>
+          <td>${escapeHtml(th + off)}</td>
+          <td>${escapeHtml(peakBg)}</td>
+          <td>${escapeHtml(delta)}</td>
+          <td>${escapeHtml(len)}</td>
+        </tr>`;
+      }
+
+      async function openDiagAlarmDetail(alarmId){
+        const box = q('diagAlarmDetail');
+        if(!box) return;
+        box.style.display = 'block';
+        q('diagDetailTitle').textContent = `Alarm #${alarmId} yukleniyor…`;
+        q('diagDetailMeta').textContent = '';
+        q('diagDetailSuggestions').innerHTML = '';
+        q('diagDetailSamples').innerHTML = '<tr><td colspan="5" class="muted">Yukleniyor…</td></tr>';
+        try{
+          const a = await jgetLocal(`/api/diagnosis/alarms/${alarmId}`);
+          const status = a.active ? 'AKTIF' : 'GECMIS (pasif)';
+          q('diagDetailTitle').textContent =
+            `${a.code || ''} — ${a.title_tr || a.name || ''} · ${status}`;
+          q('diagDetailMeta').innerHTML =
+            `<b>Makine:</b> ${escapeHtml(a.machine_name || ('#'+a.machine_id))} &nbsp;|&nbsp; ` +
+            `<b>Olusma:</b> ${escapeHtml(fmtDiagTs(a.created_at))} &nbsp;|&nbsp; ` +
+            `<b>Duzelme:</b> ${escapeHtml(fmtDiagTs(a.resolved_at))} &nbsp;|&nbsp; ` +
+            `<b>Ornek:</b> ${a.sample_count || 0}`;
+          const tips = a.suggestions || [];
+          q('diagDetailSuggestions').innerHTML = tips.length
+            ? tips.map(t => `<li>${escapeHtml(t)}</li>`).join('')
+            : '<li class="muted">Oneri yok</li>';
+          const samples = a.samples || [];
+          q('diagDetailSamples').innerHTML = samples.length
+            ? samples.map(renderSampleRow).join('')
+            : '<tr><td colspan="5" class="muted">Ornek yok</td></tr>';
+          box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }catch(e){
+          q('diagDetailTitle').textContent = 'Detay yuklenemedi';
+          q('diagDetailMeta').textContent = String(e);
+          q('diagDetailSamples').innerHTML = '<tr><td colspan="5" class="muted">—</td></tr>';
+        }
+      }
+
+      async function refreshDiagnosisPanel(){
+        const codesR = await jgetLocal('/api/diagnosis/codes');
+        const codes = (codesR && codesR.codes) || [];
+        fillDiagFaultFilters(codes);
+        const box = q('diagCodesBox');
+        if(box){
+          const iv = codesR.sample_interval_s || 60;
+          const ret = codesR.retention_days || 7;
+          box.innerHTML = `<b>Ornekleme:</b> ${iv} sn · <b>Saklama:</b> ${ret} gun<br>` +
+            codes.map(c => `<code>${escapeHtml(c.code)}</code> <b>${escapeHtml(c.name)}</b> — ${escapeHtml(c.title_tr || '')}`).join('<br>') ||
+            'Kod tanimi yok.';
+        }
+        const mid = q('diagFaultMachine')?.value || '';
+        const code = q('diagFaultCode')?.value || '';
+        const status = q('diagFaultStatus')?.value || '';
+        let url = `/api/diagnosis/alarms?limit=200`;
+        if(mid) url += `&machine_id=${encodeURIComponent(mid)}`;
+        if(code) url += `&code=${encodeURIComponent(code)}`;
+        if(status) url += `&status=${encodeURIComponent(status)}`;
+        const r = await jgetLocal(url);
+        const alarms = (r && r.alarms) || [];
+        const body = q('diagFaultBody');
+        if(!alarms.length){
+          body.innerHTML = '<tr><td colspan="6" class="muted">Kayit yok.</td></tr>';
+          setMsg('diagFaultMsg', '0 alarm', 'muted');
+          return;
+        }
+        body.innerHTML = alarms.map(a => {
+          const when = fmtDiagTs(a.created_at);
+          const st = a.active
+            ? '<span class="bad">Aktif</span>'
+            : '<span class="muted">Gecmis</span>';
+          return `<tr>
+            <td>${escapeHtml(when)}</td>
+            <td>${escapeHtml(a.machine_name || ('#'+a.machine_id))}</td>
+            <td><code>${escapeHtml(a.code || '')}</code></td>
+            <td>${escapeHtml(a.title_tr || a.name || '')}</td>
+            <td>${st}</td>
+            <td><button type="button" class="btn-gray diag-alarm-detail-btn" data-alarm-id="${a.id}" style="width:auto;padding:4px 10px;">Detay</button></td>
+          </tr>`;
+        }).join('');
+        body.querySelectorAll('.diag-alarm-detail-btn').forEach(btn => {
+          btn.onclick = () => openDiagAlarmDetail(Number(btn.getAttribute('data-alarm-id')));
+        });
+        setMsg('diagFaultMsg', `${alarms.length} alarm`, 'good');
+      }
+      q('diagFaultRefreshBtn').onclick = ()=> refreshDiagnosisPanel().catch(e=>setMsg('diagFaultMsg', String(e), 'bad'));
+      if(q('diagDetailCloseBtn')){
+        q('diagDetailCloseBtn').onclick = ()=>{
+          const box = q('diagAlarmDetail');
+          if(box) box.style.display = 'none';
+        };
+      }
+      ['diagFaultMachine','diagFaultCode','diagFaultStatus'].forEach(id=>{
+        const el = q(id);
+        if(el) el.addEventListener('change', ()=> refreshDiagnosisPanel().catch(()=>{}));
+      });
+
       q('resetProdBtn').onclick = async ()=>{
         const ok = confirm('Tum sayim, olay ve kalip gecmisini sifirlamak istiyor musun? Bu islem geri alinmaz.');
         if(!ok) return;
@@ -1893,8 +2546,36 @@
         }
       };
       q('clearRoiBtn').onclick = ()=>{ roiPoly = null; drawRoi(); };
-      q('axisDir').addEventListener('change', drawRoi);
+      q('swapAxisBtn').onclick = async ()=>{
+        try{
+          const id = Number(machineSelect.value);
+          const m = machineById(id);
+          if(!m) throw new Error('Makine secilmedi');
+          const p0 = JSON.parse(m.axis_p0 || 'null');
+          const p1 = JSON.parse(m.axis_p1 || 'null');
+          if(!Array.isArray(p0) || !Array.isArray(p1)) throw new Error('Once cizgi kaydet');
+          const payload = {
+            axis_p0: JSON.stringify(p1),
+            axis_p1: JSON.stringify(p0),
+          };
+          if(roiPoly && roiPoly.length === 4){
+            const lineLen01 = Math.hypot(roiPoly[1].x-roiPoly[0].x, roiPoly[1].y-roiPoly[0].y);
+            const lineLen03 = Math.hypot(roiPoly[3].x-roiPoly[0].x, roiPoly[3].y-roiPoly[0].y);
+            const p = roiPoly.map(pt => ({x:pt.x, y:pt.y}));
+            roiPoly = lineLen01 >= lineLen03 ? [p[1], p[0], p[3], p[2]] : [p[3], p[2], p[1], p[0]];
+            const roi = toNorm(roiPoly);
+            if(roi) payload.roi_polygon = JSON.stringify(roi);
+          }
+          const updated = await jpatch(`/api/machines/${id}`, payload);
+          const idx = machines.findIndex(x=>x.id===id);
+          if(idx >= 0) machines[idx] = updated;
+          drawRoi();
+          updateProminenceHint();
+          setMsg('roiMsg','Cizgi yonu cevrildi (KAPALI/ACIK uc yer degisti)','good');
+        }catch(e){ setMsg('roiMsg', String(e), 'bad'); }
+      };
       q('lineThickness').addEventListener('input', drawRoi);
+      q('minProminence').addEventListener('input', updateProminenceHint);
       q('saveRoiBtn').onclick = async ()=>{
         try{
           const id = Number(machineSelect.value);
@@ -1926,6 +2607,22 @@
         }
       };
 
+      async function loadVisionSettings(){
+        try{
+          const v = await jget('/api/settings/vision');
+          if(v && v.sample_interval_ms != null) q('visionSampleMs').value = v.sample_interval_ms;
+        }catch(_){}
+      }
+
+      q('saveVisionSampleBtn').onclick = async ()=>{
+        try{
+          const ms = Number(q('visionSampleMs').value || 100);
+          const v = await jpatch('/api/settings/vision', { sample_interval_ms: ms });
+          if(v && v.sample_interval_ms != null) q('visionSampleMs').value = v.sample_interval_ms;
+          setMsg('roiMsg', `Islem araligi ${v.sample_interval_ms} ms kaydedildi (yaklasik ${v.target_fps} Hz)`, 'good');
+        }catch(e){ setMsg('roiMsg', apiErrText(e), 'bad'); }
+      };
+
       let _appStarted = false;
       function startApp(){
         if(_appStarted) return;
@@ -1934,6 +2631,7 @@
         applyFieldTips();
         connectLiveWs();
         refreshLiveSnapshotHttp(); // ilk dolum; sonrasi WS uzerinden gelir
+        loadVisionSettings().catch(()=>{});
         refreshPiTime().catch(e=>setMsg('piTimeMsg', String(e), 'bad'));
         refreshWifiAp().catch(e=>setMsg('wifiApMsg', String(e), 'bad'));
         refreshTelegramSettings().catch(e=>setMsg('tgMsg', apiErrText(e), 'bad'));
@@ -1944,10 +2642,12 @@
         q('liveViewCam').onchange = ()=>{
           liveViewCamId = Number(q('liveViewCam').value);
           liveViewImgMeta = null;
+          liveViewImgBusy = false;
           refreshLiveViewImage();
           updateLiveViewPanel();
         };
         q('liveViewImg').onload = ()=>{
+          liveViewImgBusy = false;
           const el = q('liveViewImg');
           liveViewImgMeta = {
             nw: el.naturalWidth || 1,
@@ -1957,7 +2657,8 @@
           };
           updateLiveViewPanel();
         };
-        setInterval(()=> refreshLiveViewImage(), 1000);
+        q('liveViewImg').onerror = ()=>{ liveViewImgBusy = false; };
+        setInterval(()=> refreshLiveViewImage(), 750);
       }
 
       function showLogin(show){

@@ -1079,6 +1079,7 @@ def _save_cycle_without_mold_matching(
     t_end: datetime,
     confidence: float,
     mold_name_snapshot: str | None,
+    raw_state_trace: str | None = None,
 ) -> None:
     """Persist a counted cycle without auto mold match / post-stop / abnormal filter.
 
@@ -1107,6 +1108,7 @@ def _save_cycle_without_mold_matching(
             t_end=t_end,
             confidence=confidence,
             mold_name_snapshot=name,
+            raw_state_trace=raw_state_trace,
             is_counted=is_counted,
             exclude_reason=exclude_reason,
         )
@@ -1124,6 +1126,7 @@ def handle_cycle_completion(
     mold_name_snapshot: str | None,
     confidence: float,
     post_stop_bufs: dict[int, PostStopState] | None = None,
+    raw_state_trace: str | None = None,
 ) -> None:
     bufs = _post_stop_buffers if post_stop_bufs is None else post_stop_bufs
 
@@ -1137,6 +1140,7 @@ def handle_cycle_completion(
             t_end,
             confidence,
             mold_name_snapshot,
+            raw_state_trace=raw_state_trace,
         )
         return
 
@@ -1206,6 +1210,7 @@ def handle_cycle_completion(
         t_end=t_end,
         confidence=confidence,
         mold_name_snapshot=mold_name_snapshot,
+        raw_state_trace=raw_state_trace,
         is_counted=is_counted,
         exclude_reason=exclude_reason,
     )

@@ -89,6 +89,9 @@ class ConfirmMatchBody(BaseModel):
 
 class AssignMoldBody(BaseModel):
     machine_id: int = Field(..., gt=0)
+    assigned_at: datetime | None = Field(default=None, description="Atama saati (geriye dönük olabilir)")
+    changeover_start: datetime | None = Field(default=None, description="Kalıp değişimi başlangıcı")
+    changeover_end: datetime | None = Field(default=None, description="Kalıp değişimi bitişi")
 
 
 def _assignment_map(db: Session) -> dict[int, Machine]:
@@ -166,6 +169,11 @@ def assign_mold(
     db: Session = Depends(get_db),
     user=Depends(require_mold_assign),
 ):
+    if (body.changeover_start is None) != (body.changeover_end is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Kalıp değişimi için başlangıç ve bitişi birlikte girin",
+        )
     try:
         machine, mold = assign_mold_to_machine(
             db,
@@ -174,6 +182,9 @@ def assign_mold(
             source="web",
             operator_name=user.display_name,
             operator_id=user.telegram_user_id,
+            assigned_at=body.assigned_at,
+            changeover_start=body.changeover_start,
+            changeover_end=body.changeover_end,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

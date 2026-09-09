@@ -42,6 +42,7 @@ type ShiftHourPoint = {
   label: string;
   count: number;
   by_mold: Record<string, number>;
+  is_downtime?: boolean;
 };
 
 type ShiftChart = {
@@ -78,6 +79,7 @@ type TvMachineData = {
     min_cycle_s: number;
     max_cycle_s: number;
   };
+  downtimes?: Array<{ start: string; end: string }>;
   shift_charts?: ShiftChart[];
 };
 
@@ -180,12 +182,15 @@ function ShiftProductionChart({ chart }: { chart: ShiftChart }) {
         hour: h.hour,
         label: h.label,
         count: h.count,
+        is_downtime: !!h.is_downtime,
+        by_mold: h.by_mold,
         ...h.by_mold,
       })),
     [chart.hourly],
   );
   const maxCount = Math.max(1, ...chart.hourly.map((h) => h.count));
   const accent = chart.is_current ? "border-emerald-800" : "border-slate-700";
+  const hasDowntime = chart.hourly.some((h) => h.is_downtime);
   return (
     <div className={`flex min-h-0 flex-1 flex-col rounded-2xl border bg-slate-900/80 px-3 py-2 ${accent}`}>
       <div className="mb-1 flex items-baseline justify-between gap-2">
@@ -193,24 +198,34 @@ function ShiftProductionChart({ chart }: { chart: ShiftChart }) {
         <div className="text-xs text-slate-500">
           {chart.start}–{chart.end}
           {chart.is_current ? " · şimdi" : ""}
+          {hasDowntime ? " · duruş saatleri kırmızı" : ""}
         </div>
       </div>
       <div className="min-h-0 flex-1">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data} margin={{ top: 10, right: 8, bottom: 0, left: 4 }} barCategoryGap="12%">
             <CartesianGrid strokeDasharray="2 4" stroke="#1e293b" vertical={false} />
-            <XAxis dataKey="label" tick={{ fill: "#64748b", fontSize: 10 }} interval={0} />
+            <XAxis
+              dataKey="label"
+              tick={{ fill: "#64748b", fontSize: 10 }}
+              interval={0}
+              tickFormatter={(label: string) => {
+                const row = chart.hourly.find((h) => h.label === label);
+                return row?.is_downtime ? `${label}*` : label;
+              }}
+            />
             <YAxis hide domain={[0, maxCount * 1.15]} />
             <Tooltip
               cursor={{ fill: "#1e293b" }}
               content={({ payload }) => {
-                const d = payload?.[0]?.payload as ShiftHourPoint | undefined;
+                const d = payload?.[0]?.payload as (ShiftHourPoint & { is_downtime?: boolean }) | undefined;
                 if (!d) return null;
                 const parts = Object.entries(d.by_mold ?? {}).filter(([, v]) => v > 0);
                 return (
                   <div className="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-xs text-slate-200">
                     <div className="font-semibold">{d.label}</div>
                     <div>{d.count} döngü</div>
+                    {d.is_downtime && <div className="text-rose-300">Duruş saati (döngüler düşüldü)</div>}
                     {parts.length > 1 &&
                       parts.map(([name, v]) => (
                         <div key={name} className="flex items-center gap-1 text-slate-400">
@@ -235,6 +250,17 @@ function ShiftProductionChart({ chart }: { chart: ShiftChart }) {
                   isAnimationActive={false}
                   radius={idx === moldNames.length - 1 ? [3, 3, 0, 0] : undefined}
                 >
+                  {chart.hourly.map((entry) => (
+                    <Cell
+                      key={`${chart.date}-${chart.id}-${entry.label}-${name}`}
+                      fill={
+                        entry.is_downtime
+                          ? "#fb7185"
+                          : moldBarColor(colorMap, name)
+                      }
+                      fillOpacity={entry.is_downtime ? 0.55 : 1}
+                    />
+                  ))}
                   {idx === moldNames.length - 1 && (
                     <LabelList
                       dataKey="count"
@@ -250,8 +276,8 @@ function ShiftProductionChart({ chart }: { chart: ShiftChart }) {
                 {chart.hourly.map((entry) => (
                   <Cell
                     key={`${chart.date}-${chart.id}-${entry.label}`}
-                    fill="#1e293b"
-                    opacity={0.35}
+                    fill={entry.is_downtime ? "#fb7185" : "#1e293b"}
+                    opacity={entry.is_downtime ? 0.55 : 0.35}
                   />
                 ))}
               </Bar>
@@ -310,6 +336,7 @@ function TvMachineScreen({
       : [fallbackShiftChart()];
   const moldDefined = data.active_mold != null;
   const moldName = data.active_mold_name || live?.mold_name || UNDEFINED_MOLD;
+  const downtimeCount = data.downtimes?.length ?? 0;
 
   return (
     <div className="flex h-full flex-col gap-4 p-6">
@@ -321,6 +348,11 @@ function TvMachineScreen({
             <span className={`rounded-full px-3 py-1 text-sm font-semibold ${st.color} bg-slate-800`}>
               {st.label}
             </span>
+            {downtimeCount > 0 && (
+              <span className="rounded-full bg-rose-950 px-3 py-1 text-sm font-semibold text-rose-300">
+                {downtimeCount} duruş (verime yansıtıldı)
+              </span>
+            )}
           </div>
           <p className="mt-1 text-sm text-slate-500">
             Aktif kalıp: <span className="text-amber-300">{moldName}</span>

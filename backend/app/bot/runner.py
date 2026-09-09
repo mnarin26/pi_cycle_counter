@@ -79,9 +79,18 @@ def _session(user_id: str) -> UserSession:
 _runtime = BotRuntime()
 
 
+def _http_client() -> httpx.Client:
+    # Pi often has AAAA for api.telegram.org but no working global IPv6 route
+    # → ConnectError [Errno 101] Network is unreachable. Force IPv4.
+    return httpx.Client(
+        timeout=60.0,
+        transport=httpx.HTTPTransport(local_address="0.0.0.0"),
+    )
+
+
 def _api(token: str, method: str, **payload) -> dict[str, Any]:
     url = API_BASE.format(token=token, method=method)
-    with httpx.Client(timeout=60.0) as client:
+    with _http_client() as client:
         r = client.post(url, json=payload)
         r.raise_for_status()
         data = r.json()
@@ -183,16 +192,34 @@ def handle_password_request(token: str, chat_id: int, user_id: str, operator) ->
         )
     finally:
         db.close()
-    send_message(
-        token,
-        chat_id,
-        (
-            f"🔑 Bugünkü giriş şifreniz:\n\n{plain}\n\n"
-            "Bu şifre bugün geçerlidir. Panele kendi adınız + bu şifre ile "
-            "hem fabrikadan hem uzaktan girebilirsiniz. Yeni şifre isterseniz eskisi geçersiz olur."
-        ),
-        reply_markup=_main_keyboard(operator),
-    )
+    try:
+        send_message(
+            token,
+            chat_id,
+            (
+                f"🔑 Bugünkü giriş şifreniz:\n\n{plain}\n\n"
+                "Bu şifre bugün geçerlidir. Panele kendi adınız + bu şifre ile "
+                "hem fabrikadan hem uzaktan girebilirsiniz. Yeni şifre isterseniz eskisi geçersiz olur."
+            ),
+            reply_markup=_main_keyboard(operator),
+        )
+    except Exception:
+        logger.exception("daily password issued but Telegram send failed uid=%s", user_id)
+        # Best-effort retry once (transient IPv6/route blips)
+        try:
+            time.sleep(1.0)
+            send_message(
+                token,
+                chat_id,
+                (
+                    f"🔑 Bugünkü giriş şifreniz:\n\n{plain}\n\n"
+                    "Bu şifre bugün geçerlidir. Panele kendi adınız + bu şifre ile "
+                    "hem fabrikadan hem uzaktan girebilirsiniz. Yeni şifre isterseniz eskisi geçersiz olur."
+                ),
+                reply_markup=_main_keyboard(operator),
+            )
+        except Exception:
+            logger.exception("daily password send retry failed uid=%s", user_id)
 
 
 def _skip_keyboard() -> dict:

@@ -60,8 +60,26 @@ class Machine(Base):
     stability_confirm_ms: Mapped[int] = mapped_column(Integer, default=500)
     open_position_1d: Mapped[float] = mapped_column(Float, default=0.85)
     closed_position_1d: Mapped[float] = mapped_column(Float, default=0.15)
-    hysteresis: Mapped[float] = mapped_column(Float, default=0.06)
+    hysteresis: Mapped[float] = mapped_column(Float, default=0.06)  # unused by motion path; kept for SQLite compat
+    min_change: Mapped[float] = mapped_column(Float, default=0.008)  # legacy; unused by counting
+    # Stroke-detection swing amplitude (0..1 along the line). A peak/trough only
+    # counts once the signal retraces at least this much. Above idle/park jitter,
+    # below the shortest real stroke. Per machine; default 0.1.
+    min_prominence: Mapped[float] = mapped_column(Float, default=0.1)
+    # ISO datetime (UTC preferred). Process log window: diag_from <= now < diag_until.
+    diag_from: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diag_until: Mapped[str | None] = mapped_column(Text, nullable=True)
     no_movement_timeout_s: Mapped[float] = mapped_column(Float, default=120.0)
+    # Chart: no cycle for this many minutes → zigzag gap + red idle ticks (default 3).
+    idle_gap_minutes: Mapped[int] = mapped_column(Integer, default=3)
+    # --- Schmitt-trigger counting (AF-4/5/6); others stay peak_trough ---
+    counting_mode: Mapped[str] = mapped_column(String(16), default="peak_trough")  # peak_trough | schmitt
+    closed_polarity: Mapped[str] = mapped_column(String(8), default="low")  # low = closed at low pos; high = closed at high pos
+    closed_ref: Mapped[float | None] = mapped_column(Float, nullable=True)  # learned closed level (pos 0..1)
+    closed_hyst: Mapped[float] = mapped_column(Float, default=0.05)
+    smooth_win: Mapped[int] = mapped_column(Integer, default=5)
+    learn_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    learned_at: Mapped[str | None] = mapped_column(Text, nullable=True)  # ISO datetime of last closed_ref learn
     learning_session: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
     current_mold_id: Mapped[int | None] = mapped_column(ForeignKey("molds.id"), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -133,6 +151,20 @@ class Event(Base):
     type: Mapped[str] = mapped_column(String(64), nullable=False)
     machine_id: Mapped[int | None] = mapped_column(ForeignKey("machines.id"), nullable=True)
     payload: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MachineDowntime(Base):
+    """Operator-entered downtime interval; efficiency treats it as stopped even if cycles ran."""
+
+    __tablename__ = "machine_downtimes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"), nullable=False)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    note: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

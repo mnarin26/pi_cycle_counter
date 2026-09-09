@@ -17,6 +17,7 @@ export function Layout() {
   const cameras = snapshot.cameras ?? [];
   const fps = cameras.map((c) => c.fps || 0).reduce((a, b) => a + b, 0);
   const cpu = Number(snapshot.cpu_proxy ?? 0);
+  const wsClients = Number(snapshot.ws_clients ?? 0);
   const [pwOpen, setPwOpen] = useState(false);
   const [pwCurrent, setPwCurrent] = useState("");
   const [pwNew, setPwNew] = useState("");
@@ -73,6 +74,7 @@ export function Layout() {
         </nav>
         <div className="ml-auto flex items-center gap-4 text-xs text-slate-400">
           <span>WS: {connected ? <span className="text-ok">bağlı</span> : <span className="text-alarm">kopuk</span>}</span>
+          <span>Ekran~ {wsClients > 0 ? wsClients : "—"}</span>
           <span>FPS~ {fps > 0 ? fps.toFixed(1) : "—"}</span>
           <span>İşlem ms~ {cpu > 0 ? cpu.toFixed(1) : "—"}</span>
           {user && (

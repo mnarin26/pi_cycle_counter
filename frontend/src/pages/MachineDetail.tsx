@@ -8,15 +8,17 @@ import {
   ComposedChart,
   Legend,
   Line,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { apiDownloadCsv, apiGet, apiPost } from "../api/client";
+import { apiDelete, apiDownloadCsv, apiGet, apiPost } from "../api/client";
 import {
   buildZigzagSeries,
   buildZigzagLineSegments,
+  buildIdleLineSegments,
   buildMoldColorMap,
   moldColorFromMap,
   chartScrollWidth,
@@ -30,6 +32,7 @@ import {
   zigzagXDomain,
   ZIGZAG_RESOLUTION_LABELS,
   ZIGZAG_RESOLUTION_MS,
+  IDLE_LINE_COLOR,
   type ZigzagResolution,
   zigzagChartWidth,
   zigzagTimelineMs,
@@ -72,6 +75,17 @@ type EventRow = {
   created_at: string | null;
 };
 
+type DowntimeRow = {
+  id: number;
+  machine_id: number;
+  start_at: string;
+  end_at: string;
+  note: string;
+  created_by?: string | null;
+};
+
+type IntervalWindow = { start: string; end: string };
+
 type TrendMoldSlice = { mold_name: string; count: number };
 
 type TrendBucket = {
@@ -102,6 +116,7 @@ type DashboardPayload = {
   active_mold: {
     mold_id: number;
     mold_name: string;
+    work_mode?: string;
     cycle_count: number;
     avg_cycle_s: number;
     min_cycle_s: number;
@@ -132,6 +147,10 @@ type DashboardPayload = {
   series_truncated?: boolean;
   series_lazy?: boolean;
   events: EventRow[];
+  downtimes?: IntervalWindow[];
+  changeovers?: IntervalWindow[];
+  break_windows?: IntervalWindow[];
+  idle_gap_minutes?: number;
 };
 
 type RangeKey = "daily" | "weekly" | "monthly" | "yearly";
@@ -240,9 +259,11 @@ function BucketTooltipContent({
 function ChartLegend({
   molds,
   zigzag = false,
+  showBreaks = false,
 }: {
   molds: { name: string; color: string }[];
   zigzag?: boolean;
+  showBreaks?: boolean;
 }) {
   return (
     <div className="mt-3 flex flex-wrap gap-4 text-xs">
@@ -256,9 +277,23 @@ function ChartLegend({
                 Döngü süresi (renk = kalıp)
               </span>
               <span className="inline-flex items-center gap-1">
-                <span className="inline-block h-0.5 w-4 border-t border-dashed border-amber-400" />
-                Duruş boşluğu (çizgi kopuk)
+                <span className="inline-block h-0.5 w-4 bg-rose-400" />
+                Otomatik duruş (dk işaretleri)
               </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-3 w-4 rounded-sm bg-rose-400/25 ring-1 ring-rose-400/50" />
+                Girilen duruş
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-3 w-4 rounded-sm bg-sky-400/20 ring-1 ring-sky-400/40" />
+                Kalıp değişimi
+              </span>
+              {showBreaks && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="inline-block h-3 w-4 rounded-sm bg-amber-400/20 ring-1 ring-amber-400/50" />
+                  Mola saati
+                </span>
+              )}
             </>
           ) : (
             <>
@@ -308,6 +343,12 @@ export function MachineDetailPage() {
   const [loading, setLoading] = useState(false);
   const [idleStoppedSeconds, setIdleStoppedSeconds] = useState(DEFAULT_IDLE_STOPPED_S);
   const [zigzagResolution, setZigzagResolution] = useState<ZigzagResolution>("24h");
+  const [downtimeList, setDowntimeList] = useState<DowntimeRow[]>([]);
+  const [dtStart, setDtStart] = useState("");
+  const [dtEnd, setDtEnd] = useState("");
+  const [dtNote, setDtNote] = useState("");
+  const [dtBusy, setDtBusy] = useState(false);
+  const [dtErr, setDtErr] = useState<string | null>(null);
   const lastLiveEmitRef = useRef<number>(-1);
   const liveDashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadGenRef = useRef(0);
@@ -380,6 +421,62 @@ export function MachineDetailPage() {
     }
   }, [machineId, buildWindowQuery, range]);
 
+  const loadDowntimes = useCallback(async () => {
+    if (!machineId) return;
+    try {
+      const rows = await apiGet<DowntimeRow[]>(`/api/machines/${machineId}/downtimes`);
+      setDowntimeList(rows);
+    } catch {
+      /* non-fatal */
+    }
+  }, [machineId]);
+
+  useEffect(() => {
+    void loadDowntimes();
+  }, [loadDowntimes]);
+
+  const submitDowntime = useCallback(async () => {
+    if (!machineId) return;
+    if (!dtStart || !dtEnd) {
+      setDtErr("Başlangıç ve bitiş girin");
+      return;
+    }
+    if (!dtNote.trim()) {
+      setDtErr("Açıklama zorunlu");
+      return;
+    }
+    setDtBusy(true);
+    setDtErr(null);
+    try {
+      await apiPost(`/api/machines/${machineId}/downtimes`, {
+        start_at: datetimeLocalInputToUtcIso(dtStart),
+        end_at: datetimeLocalInputToUtcIso(dtEnd),
+        note: dtNote.trim(),
+      });
+      setDtStart("");
+      setDtEnd("");
+      setDtNote("");
+      await Promise.all([loadDowntimes(), loadDash()]);
+    } catch (e) {
+      setDtErr(String(e));
+    } finally {
+      setDtBusy(false);
+    }
+  }, [machineId, dtStart, dtEnd, dtNote, loadDowntimes, loadDash]);
+
+  const removeDowntime = useCallback(
+    async (id: number) => {
+      if (!machineId) return;
+      try {
+        await apiDelete(`/api/machines/${machineId}/downtimes/${id}`);
+        await Promise.all([loadDowntimes(), loadDash()]);
+      } catch (e) {
+        setDtErr(String(e));
+      }
+    },
+    [machineId, loadDowntimes, loadDash],
+  );
+
   const downloadExport = useCallback(
     async (kind: "summary" | "cycles") => {
       if (!machineId) return;
@@ -431,7 +528,7 @@ export function MachineDetailPage() {
   const chartMode = dash?.chart_mode ?? "cycles";
   const seriesLazy = chartMode === "cycles" && (dash?.series_lazy ?? true);
   const trendMoldNames = dash?.trend_mold_names ?? [];
-  const gapMs = (dash?.gap_threshold_s ?? 1200) * 1000;
+  const gapMs = (dash?.gap_threshold_s ?? 180) * 1000;
   const totalCycles = dash?.series_total ?? dash?.summary?.cycle_count ?? 0;
   const filterFromMs = fromInput ? parseApiTime(datetimeLocalInputToUtcIso(fromInput)) : NaN;
   const filterToMs = toInput ? parseApiTime(datetimeLocalInputToUtcIso(toInput)) : NaN;
@@ -482,8 +579,20 @@ export function MachineDetailPage() {
 
   const zigzagDataRaw = useMemo(() => {
     if (chartMode !== "cycles") return [];
-    return buildZigzagSeries(zigzagSource, gapMs, moldColorMap);
-  }, [chartMode, zigzagSource, gapMs, moldColorMap]);
+    const windowEndMs = Number.isFinite(filterToMs)
+      ? filterToMs
+      : Number.isFinite(viewport.windowToMs)
+        ? Math.min(viewport.windowToMs, Date.now())
+        : Date.now();
+    return buildZigzagSeries(zigzagSource, gapMs, moldColorMap, { windowEndMs });
+  }, [
+    chartMode,
+    zigzagSource,
+    gapMs,
+    moldColorMap,
+    filterToMs,
+    viewport.windowToMs,
+  ]);
 
   const moldStatsForScale = dash?.active_mold ?? dash?.summary;
 
@@ -513,8 +622,16 @@ export function MachineDetailPage() {
     [chartMode, zigzagData],
   );
 
+  const idleLineSegments = useMemo(
+    () => (chartMode === "cycles" ? buildIdleLineSegments(zigzagData) : []),
+    [chartMode, zigzagData],
+  );
+
   const zigzagPlotPoints = useMemo(
-    () => zigzagData.filter((p) => p.cycle_time_s != null && !p.is_gap),
+    () =>
+      zigzagData.filter(
+        (p) => p.cycle_time_s != null && !p.is_gap && !p.is_idle_tick,
+      ),
     [zigzagData],
   );
 
@@ -584,6 +701,33 @@ export function MachineDetailPage() {
   const zigzagXTicks = useMemo(
     () => (chartMode === "cycles" ? zigzagXAxisTicks(xDomain, zigzagResolution) : []),
     [chartMode, xDomain, zigzagResolution],
+  );
+
+  const downtimeBands = useMemo(
+    () =>
+      (dash?.downtimes ?? []).map((w) => ({
+        x1: parseApiTime(w.start),
+        x2: parseApiTime(w.end),
+      })),
+    [dash?.downtimes],
+  );
+
+  const changeoverBands = useMemo(
+    () =>
+      (dash?.changeovers ?? []).map((w) => ({
+        x1: parseApiTime(w.start),
+        x2: parseApiTime(w.end),
+      })),
+    [dash?.changeovers],
+  );
+
+  const breakBands = useMemo(
+    () =>
+      (dash?.break_windows ?? []).map((w) => ({
+        x1: parseApiTime(w.start),
+        x2: parseApiTime(w.end),
+      })),
+    [dash?.break_windows],
   );
 
   if (!machineId) {
@@ -810,6 +954,42 @@ export function MachineDetailPage() {
                   shared={false}
                   filterNull={false}
                 />
+                {changeoverBands.map((b, i) => (
+                  <ReferenceArea
+                    key={`co-${b.x1}-${i}`}
+                    x1={b.x1}
+                    x2={b.x2}
+                    ifOverflow="hidden"
+                    fill="#38bdf8"
+                    fillOpacity={0.12}
+                    stroke="#38bdf8"
+                    strokeOpacity={0.3}
+                  />
+                ))}
+                {breakBands.map((b, i) => (
+                  <ReferenceArea
+                    key={`brk-${b.x1}-${i}`}
+                    x1={b.x1}
+                    x2={b.x2}
+                    ifOverflow="hidden"
+                    fill="#fbbf24"
+                    fillOpacity={0.14}
+                    stroke="#fbbf24"
+                    strokeOpacity={0.35}
+                  />
+                ))}
+                {downtimeBands.map((b, i) => (
+                  <ReferenceArea
+                    key={`dt-${b.x1}-${i}`}
+                    x1={b.x1}
+                    x2={b.x2}
+                    ifOverflow="hidden"
+                    fill="#f87171"
+                    fillOpacity={0.16}
+                    stroke="#f87171"
+                    strokeOpacity={0.4}
+                  />
+                ))}
                 {zigzagLineSegments.map((seg, i) => (
                   <Line
                     key={`${seg.mold}-${i}`}
@@ -819,6 +999,21 @@ export function MachineDetailPage() {
                     stroke={seg.color}
                     strokeWidth={2}
                     dot={false}
+                    activeDot={false}
+                    connectNulls={false}
+                    isAnimationActive={false}
+                    tooltipType="none"
+                  />
+                ))}
+                {idleLineSegments.map((seg, i) => (
+                  <Line
+                    key={`idle-${i}`}
+                    type="linear"
+                    data={seg.points}
+                    dataKey="cycle_time_s"
+                    stroke={IDLE_LINE_COLOR}
+                    strokeWidth={2}
+                    dot={{ r: 2.5, fill: IDLE_LINE_COLOR, strokeWidth: 0 }}
                     activeDot={false}
                     connectNulls={false}
                     isAnimationActive={false}
@@ -882,7 +1077,100 @@ export function MachineDetailPage() {
         <ChartLegend
           molds={moldLegend}
           zigzag={chartMode === "cycles"}
+          showBreaks={breakBands.length > 0}
         />
+      </div>
+
+      <div className="rounded border border-slate-700 bg-panel2 p-3">
+        <h3 className="mb-1 text-sm font-semibold">Duruş Girişi</h3>
+        <p className="mb-3 text-xs text-slate-400">
+          Girilen aralık, makine çalışmış olsa bile duruş sayılır: o aralıktaki döngüler
+          verimliliğe eklenmez ve süre affedilmez. Mola ve kalıp değişimine denk gelen kısım
+          önceliklidir.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-sm">
+            <span className="mb-1 block text-xs text-slate-400">Başlangıç</span>
+            <input
+              type="datetime-local"
+              className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
+              value={dtStart}
+              onChange={(e) => setDtStart(e.target.value)}
+            />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-xs text-slate-400">Bitiş</span>
+            <input
+              type="datetime-local"
+              className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
+              value={dtEnd}
+              onChange={(e) => setDtEnd(e.target.value)}
+            />
+          </label>
+          <label className="text-sm flex-1 min-w-[200px]">
+            <span className="mb-1 block text-xs text-slate-400">Açıklama</span>
+            <input
+              type="text"
+              maxLength={256}
+              placeholder="Örn. kalıp arızası, malzeme bekleme"
+              className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+              value={dtNote}
+              onChange={(e) => setDtNote(e.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="rounded bg-rose-800 px-3 py-2 text-sm font-medium disabled:opacity-50"
+            disabled={dtBusy}
+            onClick={() => void submitDowntime()}
+          >
+            {dtBusy ? "Kaydediliyor…" : "Duruş ekle"}
+          </button>
+        </div>
+        {dtErr && <p className="mt-2 text-sm text-rose-300">{dtErr}</p>}
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-left text-slate-400">
+              <tr>
+                <th className="py-1 pr-3">Başlangıç</th>
+                <th className="py-1 pr-3">Bitiş</th>
+                <th className="py-1 pr-3">Açıklama</th>
+                <th className="py-1 pr-3">Ekleyen</th>
+                <th className="py-1 pr-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {downtimeList.map((d) => (
+                <tr key={d.id} className="border-t border-slate-800">
+                  <td className="py-1 pr-3 whitespace-nowrap">
+                    {new Date(parseApiTime(d.start_at)).toLocaleString("tr-TR")}
+                  </td>
+                  <td className="py-1 pr-3 whitespace-nowrap">
+                    {new Date(parseApiTime(d.end_at)).toLocaleString("tr-TR")}
+                  </td>
+                  <td className="py-1 pr-3">{d.note}</td>
+                  <td className="py-1 pr-3 text-slate-500">{d.created_by || "—"}</td>
+                  <td className="py-1 pr-3 text-right">
+                    <button
+                      type="button"
+                      className="rounded bg-slate-700 px-2 py-1 text-xs hover:bg-slate-600"
+                      onClick={() => void removeDowntime(d.id)}
+                    >
+                      Sil
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {downtimeList.length === 0 && (
+                <tr>
+                  <td className="py-2 text-slate-500" colSpan={5}>
+                    Kayıtlı duruş yok
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="rounded border border-slate-700 bg-panel2 p-3">

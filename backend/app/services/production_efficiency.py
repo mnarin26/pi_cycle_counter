@@ -16,6 +16,11 @@ target is set (daily-first) - derived from it:
 
 Non-productive time is only deducted after it has fully elapsed, so efficiency
 does not look artificially high mid-break.
+
+Operator-entered downtime works the opposite way: its cycles are not counted and
+its time is *not* removed from the denominator, so efficiency drops. When downtime
+overlaps a break or a mold change, those excused portions win (mola > değişim >
+duruş) and only the remaining downtime hurts efficiency.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from datetime import datetime, time, timedelta, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import Cycle, Event, Machine, Mold
+from app.db.models import Cycle, Event, Machine, MachineDowntime, Mold
 from app.services.shifts import (
     ShiftDef,
     current_shift,
@@ -195,6 +200,115 @@ def _changeover_seconds(db: Session, machine_id: int, at: datetime) -> float:
     return seconds
 
 
+Interval = tuple[datetime, datetime]
+
+
+def _clip(intervals: list[Interval], a: datetime, e: datetime) -> list[Interval]:
+    out: list[Interval] = []
+    for s, x in intervals:
+        lo = max(s, a)
+        hi = min(x, e)
+        if hi > lo:
+            out.append((lo, hi))
+    return out
+
+
+def _merge(intervals: list[Interval]) -> list[Interval]:
+    if not intervals:
+        return []
+    ordered = sorted(intervals)
+    out: list[Interval] = [ordered[0]]
+    for s, x in ordered[1:]:
+        last_s, last_e = out[-1]
+        if s <= last_e:
+            out[-1] = (last_s, max(last_e, x))
+        else:
+            out.append((s, x))
+    return out
+
+
+def _subtract(base: list[Interval], cut: list[Interval]) -> list[Interval]:
+    """base minus cut (both lists of intervals)."""
+    cuts = _merge(cut)
+    result: list[Interval] = []
+    for s, x in base:
+        segs: list[Interval] = [(s, x)]
+        for cs, ce in cuts:
+            nxt: list[Interval] = []
+            for bs, be in segs:
+                if ce <= bs or cs >= be:
+                    nxt.append((bs, be))
+                    continue
+                if cs > bs:
+                    nxt.append((bs, cs))
+                if ce < be:
+                    nxt.append((ce, be))
+            segs = nxt
+        result.extend(segs)
+    return result
+
+
+def _total_seconds(intervals: list[Interval]) -> float:
+    return sum((x - s).total_seconds() for s, x in intervals)
+
+
+def _changeover_windows(
+    db: Session, machine_id: int, start: datetime, end: datetime
+) -> list[Interval]:
+    """Changeover intervals (removal+mount) that overlap (start, end].
+
+    Window is explicit when the assignment payload carries changeover_start/end,
+    otherwise the standard removal+mount duration ending at the assignment time.
+    """
+    rows = (
+        db.query(Event.created_at, Event.payload)
+        .filter(
+            Event.machine_id == machine_id,
+            Event.type == "mold_assigned",
+            Event.created_at > start,
+            Event.created_at <= end,
+        )
+        .order_by(Event.created_at)
+        .all()
+    )
+    windows: list[Interval] = []
+    for created_at, payload in rows:
+        at = _as_utc(created_at)
+        cs = ce = None
+        if payload:
+            try:
+                data = json.loads(payload)
+                cs_raw = data.get("changeover_start")
+                ce_raw = data.get("changeover_end")
+                if cs_raw and ce_raw:
+                    cs = _as_utc(datetime.fromisoformat(cs_raw))
+                    ce = _as_utc(datetime.fromisoformat(ce_raw))
+            except (ValueError, TypeError):
+                cs = ce = None
+        if cs is None or ce is None or ce <= cs:
+            co = _changeover_seconds(db, machine_id, at)
+            if co <= 0:
+                continue
+            cs, ce = at - timedelta(seconds=co), at
+        windows.append((cs, ce))
+    return windows
+
+
+def _downtime_windows(
+    db: Session, machine_id: int, start: datetime, end: datetime
+) -> list[Interval]:
+    rows = (
+        db.query(MachineDowntime.start_at, MachineDowntime.end_at)
+        .filter(
+            MachineDowntime.machine_id == machine_id,
+            MachineDowntime.end_at > start,
+            MachineDowntime.start_at < end,
+        )
+        .all()
+    )
+    return [(_as_utc(s), _as_utc(x)) for s, x in rows]
+
+
 def _block(
     actual: int, expected: float, avg_cycle_s: float, target_cycle_s: float | None, available: bool
 ) -> dict:
@@ -228,6 +342,8 @@ def _compute(
     event_times = [t for (t, _mid) in events if seg_start <= t < cap]
     boundaries = [seg_start] + [t for t in event_times if t > seg_start] + [cap]
     breaks = shift_break_windows(shift, sw_start, sw_end)
+    co_windows = _changeover_windows(db, machine_id, seg_start, cap)
+    dt_windows = _downtime_windows(db, machine_id, seg_start, cap)
 
     total_actual = 0
     total_expected = 0.0
@@ -246,25 +362,35 @@ def _compute(
             available = True
 
         raw_s = (e - a).total_seconds()
-        nonprod = 0.0
 
-        # Changeover deduction at a mold-change boundary (only once fully passed).
-        if any(abs((a - t).total_seconds()) < 1.0 for t in event_times):
-            co = _changeover_seconds(db, machine_id, a)
-            if co > 0 and (a + timedelta(seconds=co)) <= e:
-                nonprod += min(co, raw_s)
-
-        # Break deduction for manual molds (only fully-passed breaks).
+        # Forgiven (non-productive but excused) time = breaks + changeover.
+        # Priority: mola > kalıp değişimi > duruş. Forgiven time is deducted from
+        # the target denominator; downtime is NOT (so efficiency drops).
+        forgiven: list[Interval] = []
         mold = db.get(Mold, mid) if mid else None
         if mold and mold.work_mode == "manual":
             for bs, be in breaks:
-                lo = max(bs, a)
-                hi = min(be, e)
-                if be <= e and hi > lo:
-                    nonprod += (hi - lo).total_seconds()
+                if be <= e:  # only fully-passed breaks
+                    lo, hi = max(bs, a), min(be, e)
+                    if hi > lo:
+                        forgiven.append((lo, hi))
+        for cs, ce in co_windows:
+            if ce <= e:  # only fully-passed changeover
+                lo, hi = max(cs, a), min(ce, e)
+                if hi > lo:
+                    forgiven.append((lo, hi))
+        forgiven = _merge(forgiven)
+        nonprod = _total_seconds(forgiven)
+
+        # Downtime not already excused as break/changeover hurts efficiency: its
+        # cycles are not counted and its time stays in the denominator.
+        hurt = _merge(_subtract(_clip(dt_windows, a, e), forgiven))
 
         working = max(0.0, raw_s - nonprod)
-        total_actual += _count_cycles(db, machine_id, a, e)
+        seg_actual = _count_cycles(db, machine_id, a, e)
+        for hs, he in hurt:
+            seg_actual -= _count_cycles(db, machine_id, hs, he)
+        total_actual += max(0, seg_actual)
         if eff_c:
             total_expected += working / eff_c
 
@@ -317,6 +443,61 @@ def shift_target_plan(
         db, machine_id, shift, sw_start, sw_end, sw_start, sw_end
     )
     return int(round(expected)), available
+
+
+def changeover_windows(
+    db: Session, machine_id: int, start: datetime, end: datetime
+) -> list[dict]:
+    """Public changeover intervals clipped to [start, end] for chart overlays."""
+    out = []
+    for cs, ce in _clip(_changeover_windows(db, machine_id, start, end), _as_utc(start), _as_utc(end)):
+        out.append({"start": cs.isoformat(), "end": ce.isoformat()})
+    return out
+
+
+def downtime_windows(
+    db: Session, machine_id: int, start: datetime, end: datetime
+) -> list[dict]:
+    """Public downtime intervals clipped to [start, end] for chart overlays."""
+    out = []
+    for ds, de in _clip(_downtime_windows(db, machine_id, start, end), _as_utc(start), _as_utc(end)):
+        out.append({"start": ds.isoformat(), "end": de.isoformat()})
+    return out
+
+
+def hurt_downtime_windows(
+    db: Session, machine_id: int, start: datetime, end: datetime
+) -> list[Interval]:
+    """Downtime that lowers efficiency in [start, end]: downtime − changeover − breaks.
+
+    Used by TV charts / summaries so excluded cycles match the efficiency engine.
+    Breaks are subtracted for all molds here (manual-only nuance is applied inside
+    `_compute` for the denominator; excluding those minutes from chart counts is safe).
+    """
+    start_u = _as_utc(start)
+    end_u = _as_utc(end)
+    if not start_u or not end_u or end_u <= start_u:
+        return []
+    dts = _clip(_downtime_windows(db, machine_id, start_u, end_u), start_u, end_u)
+    if not dts:
+        return []
+    # Look back so changeovers that end at an assignment near the window start are included.
+    lookback = start_u - timedelta(hours=6)
+    forgiven: list[Interval] = list(
+        _clip(_changeover_windows(db, machine_id, lookback, end_u), start_u, end_u)
+    )
+    cursor = start_u
+    guard = 0
+    while cursor < end_u and guard < 400:
+        guard += 1
+        sh = current_shift(db, cursor)
+        sw_start, sw_end = shift_window(sh, cursor, cap_now=False)
+        for bs, be in shift_break_windows(sh, sw_start, sw_end):
+            lo, hi = max(bs, start_u), min(be, end_u)
+            if hi > lo:
+                forgiven.append((lo, hi))
+        cursor = sw_end + timedelta(seconds=1)
+    return _merge(_subtract(dts, _merge(forgiven)))
 
 
 def range_efficiency(db: Session, machine_id: int, start: datetime, end: datetime, now: datetime) -> dict:

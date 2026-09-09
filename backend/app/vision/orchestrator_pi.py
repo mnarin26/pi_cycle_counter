@@ -33,7 +33,6 @@ from app.db.models import Camera, Cycle, Event, Machine
 import app.db.session as db_session
 from app.services.cycle_daily_log import append_cycle_to_daily_csv
 from app.services.cycle_tracker import CycleTracker
-from app.services import fault_log
 from app.services.process_log import ProcessLog
 from app.services.mold_matcher import handle_cycle_completion
 from app.services.playback_buffer import PlaybackBuffer
@@ -65,6 +64,7 @@ class MachineRuntime:
     dbg_cycle_emit_count: int = 0
     dbg_last_confirmed: str = "UNKNOWN"
     last_frame_mono: float = 0.0
+
 
 class CameraProcessWorker(threading.Thread):
     """Per-camera process thread: 1x gray, then N line probes for that camera's machines."""
@@ -114,9 +114,7 @@ class CameraProcessWorker(threading.Thread):
             return
         for m in machines:
             rt = orch.machine_rt.get(m.id)
-            if rt is None:
-                continue
-            if abs(frame_mono - rt.last_frame_mono) < 1e-9:
+            if rt is not None and abs(frame_mono - rt.last_frame_mono) < 1e-9:
                 continue
             t_m = time.monotonic()
             orch._process_machine_gray(m, gray, w, frame_mono=frame_mono, frame_age_ms=age_ms)
@@ -125,17 +123,9 @@ class CameraProcessWorker(threading.Thread):
 
 
 class VisionOrchestrator(threading.Thread):
-    def __init__(
-        self,
-        out_queue: queue.Queue,
-        daemon: bool = True,
-        pos_tick_hub=None,
-        anomaly=None,
-    ):
+    def __init__(self, out_queue: queue.Queue, daemon: bool = True):
         super().__init__(daemon=daemon)
         self.out_queue = out_queue
-        self.pos_tick_hub = pos_tick_hub
-        self.anomaly = anomaly
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self.workers: dict[int, RtspWorker] = {}
@@ -153,29 +143,11 @@ class VisionOrchestrator(threading.Thread):
         self._cameras_cache: list[Camera] = []
         self._machines_cache: list[Machine] = []
         self._mold_names: dict[int, str] = {}
-        # Per-stage EMA ms (camera process path) — exposed on snapshot for diagnosis.
-        self._stage_ms: dict[str, float] = {
-            "probe": 0.0,
-            "state": 0.0,
-            "plog": 0.0,
-            "anomaly": 0.0,
-            "snap": 0.0,
-        }
-
-    def _note_stage(self, name: str, elapsed_s: float) -> None:
-        ms = elapsed_s * 1000.0
-        prev = self._stage_ms.get(name, 0.0)
-        self._stage_ms[name] = prev * 0.92 + ms * 0.08
 
     def stop(self) -> None:
         self._stop.set()
         try:
             self.plog.close()
-        except Exception:
-            pass
-        try:
-            if self.anomaly is not None:
-                self.anomaly.close()
         except Exception:
             pass
         for pw in list(self.process_workers.values()):
@@ -307,7 +279,7 @@ class VisionOrchestrator(threading.Thread):
             try:
                 now = t_iter
                 if now >= self._reload_at or not self._machines_cache:
-                    self._reload_at = now + 5.0
+                    self._reload_at = now + 2.0
                     self._reload_config_from_db()
                 # cpu_proxy = max per-camera process-worker loop EMA (parallel paths).
                 proc_emas = [pw.loop_ms_ema for pw in self.process_workers.values() if pw.is_alive()]
@@ -341,10 +313,8 @@ class VisionOrchestrator(threading.Thread):
         }
 
     def _sync_machine_config(self, m: Machine, rt: MachineRuntime) -> None:
-        # Zigzag peak/trough + jump hold. jump_abs is global (0.30); prominence
-        # may come from machine row but defaults to the same global 0.10.
+        # Zigzag peak/trough + jump hold. jump_abs is global (0.30).
         # Global zigzag defaults (shadow-validated): prominence 0.12, jump 0.30.
-        # Ignore per-machine DB prominence so all machines share one gate.
         rt.sm.cfg = StateMachineConfig(
             min_prominence=0.12,
             jump_abs=0.30,
@@ -369,7 +339,6 @@ class VisionOrchestrator(threading.Thread):
         rt = self.machine_rt[m.id]
         rt.last_frame_mono = float(frame_mono)
 
-        t0 = time.monotonic()
         result = line_peak_position_gray(
             gray=gray,
             axis_p0_json=m.axis_p0,
@@ -381,7 +350,6 @@ class VisionOrchestrator(threading.Thread):
             reflector_len_min=m.reflector_len_min,
             reflector_len_max=m.reflector_len_max,
         )
-        self._note_stage("probe", time.monotonic() - t0)
 
         # Extra guard: line_pipeline can still accept a single-sample glitch as "found";
         # that keeps last_found_mono fresh and locks OPEN/CLOSED. Real stripe is wider post-blur.
@@ -441,34 +409,7 @@ class VisionOrchestrator(threading.Thread):
             pos = None
             centroid_xy = None
 
-        # E001: true reflector loss (not occlusion hold, not "UNKNOWN with pos").
-        # Resolve is code-specific: E001 closes as soon as reflector is found again.
-        # Other fault codes will use their own resolve conditions later.
-        reflector_lost = bool(not effective_found and not occlusion_hold)
-        if reflector_lost:
-            fault_log.note_active(
-                machine_id=m.id,
-                machine_name=m.name,
-                code="E001",
-                now_mono=now_mono,
-                detail={
-                    "threshold_mode": (m.threshold_mode or "fixed").lower(),
-                    "threshold_active": int(result.active_threshold),
-                    "threshold_offset": int(m.threshold_offset or 0),
-                    "peak": int(result.peak),
-                    "background": int(result.background),
-                    "delta": int(result.prominence),
-                    "segment_len": int(result.segment_len),
-                    "len_min": m.reflector_len_min,
-                    "len_max": m.reflector_len_max,
-                    "line_thickness": int(m.line_thickness or 7),
-                },
-            )
-        elif effective_found:
-            fault_log.resolve(machine_id=m.id, code="E001")
-
         now_ms = time.monotonic() * 1000.0
-        t_state = time.monotonic()
         prev_pos = rt.last_pos
         confirmed = rt.sm.step(pos, now_ms)
         if confirmed.value == "MOVING":
@@ -518,11 +459,6 @@ class VisionOrchestrator(threading.Thread):
             t_end = datetime.now(timezone.utc)
             t_start = t_end
             try:
-                if self.anomaly is not None:
-                    self.anomaly.on_cycle(m.id, float(cycle_s), t_end.isoformat())
-            except Exception:
-                logger.exception("anomaly on_cycle failed mid=%s", m.id)
-            try:
                 self.out_queue.put_nowait(
                     {
                         "type": "cycle_completed",
@@ -545,17 +481,14 @@ class VisionOrchestrator(threading.Thread):
                 # #endregion
             except queue.Full:
                 logger.warning("vision queue full, dropping cycle")
-        self._note_stage("state", time.monotonic() - t_state)
 
-        age = float(frame_age_ms) if frame_age_ms >= 0 else -1.0
-        if age < 0:
-            try:
-                age = float(worker.latest_age_ms())
-            except Exception:
-                age = -1.0
-
-        t_plog = time.monotonic()
         try:
+            age = float(frame_age_ms) if frame_age_ms >= 0 else -1.0
+            if age < 0:
+                try:
+                    age = float(worker.latest_age_ms())
+                except Exception:
+                    age = -1.0
             self.plog.on_frame(
                 m.id,
                 state=confirmed.value,
@@ -570,83 +503,42 @@ class VisionOrchestrator(threading.Thread):
             )
         except Exception:
             pass
-        self._note_stage("plog", time.monotonic() - t_plog)
-
-        # Shadow wagon ticks: only when a PC client is subscribed (near-zero idle cost).
-        hub = self.pos_tick_hub
-        tick_pos = pos if pos is not None else rt.hold_pos_01
-        tick_iso = datetime.now(timezone.utc).isoformat()
-        t_anom = time.monotonic()
-        if self.anomaly is not None:
-            try:
-                self.anomaly.on_tick(
-                    m.id,
-                    t_iso=tick_iso,
-                    mono=float(now_mono),
-                    pos=float(tick_pos) if tick_pos is not None else None,
-                )
-            except Exception:
-                logger.exception("anomaly on_tick failed mid=%s", m.id)
-        self._note_stage("anomaly", time.monotonic() - t_anom)
-        if hub is not None:
-            try:
-                if hub.wants(m.id):
-                    hub.emit(
-                        {
-                            "t_iso": tick_iso,
-                            "mono": float(now_mono),
-                            "machine_id": int(m.id),
-                            "pos": float(tick_pos) if tick_pos is not None else None,
-                            "found": bool(effective_found or occlusion_hold),
-                            "age_ms": float(age),
-                        }
-                    )
-            except Exception:
-                pass
 
         mold_name = self._mold_names.get(m.current_mold_id) if m.current_mold_id else None
 
         confidence = min(1.0, result.prominence / 100.0) if effective_found else 0.0
 
-        t_snap = time.monotonic()
-        # CPython dict single-key insert is atomic under the GIL; avoid lock so
-        # cam1/cam2/supervisor don't serialize on snapshot updates.
-        cache = getattr(self, "_machine_snapshot_cache", None)
-        if cache is None:
-            with self._lock:
-                if getattr(self, "_machine_snapshot_cache", None) is None:
-                    self._machine_snapshot_cache = {}
-                cache = self._machine_snapshot_cache
-        cache[m.id] = {
-            "id": m.id,
-            "name": m.name,
-            "camera_id": m.camera_id,
-            "state": confirmed.value,
-            "position_01": pos,
-            "centroid": (
-                {"x": float(centroid_xy[0]), "y": float(centroid_xy[1])} if centroid_xy is not None else None
-            ),
-            "roi_bbox": None,
-            "cycle_time_last": rt.last_cycle_s,
-            "mold_name": mold_name,
-            "confidence": confidence,
-            "fps": worker.fps,
-            "process_ms": rt.perf.process_ms_ema,
-            "threshold_mode": (m.threshold_mode or "fixed").lower(),
-            "threshold_active_min": int(result.active_threshold),
-            "threshold_active_max": 255,
-            "threshold_offset": int(m.threshold_offset or 0),
-            "peak": int(result.peak),
-            "background": int(result.background),
-            "prominence": int(result.prominence),
-            "segment_len": int(result.segment_len),
-            "line_thickness": int(m.line_thickness or 7),
-            "reflector_len_min": m.reflector_len_min,
-            "reflector_len_max": m.reflector_len_max,
-            "occlusion_hold": occlusion_hold,
-            "dbg_cycle_emit_count": int(rt.dbg_cycle_emit_count),
-        }
-        self._note_stage("snap", time.monotonic() - t_snap)
+        with self._lock:
+            self._machine_snapshot_cache = getattr(self, "_machine_snapshot_cache", {})
+            self._machine_snapshot_cache[m.id] = {
+                "id": m.id,
+                "name": m.name,
+                "camera_id": m.camera_id,
+                "state": confirmed.value,
+                "position_01": pos,
+                "centroid": (
+                    {"x": float(centroid_xy[0]), "y": float(centroid_xy[1])} if centroid_xy is not None else None
+                ),
+                "roi_bbox": None,
+                "cycle_time_last": rt.last_cycle_s,
+                "mold_name": mold_name,
+                "confidence": confidence,
+                "fps": worker.fps,
+                "process_ms": rt.perf.process_ms_ema,
+                "threshold_mode": (m.threshold_mode or "fixed").lower(),
+                "threshold_active_min": int(result.active_threshold),
+                "threshold_active_max": 255,
+                "threshold_offset": int(m.threshold_offset or 0),
+                "peak": int(result.peak),
+                "background": int(result.background),
+                "prominence": int(result.prominence),
+                "segment_len": int(result.segment_len),
+                "line_thickness": int(m.line_thickness or 7),
+                "reflector_len_min": m.reflector_len_min,
+                "reflector_len_max": m.reflector_len_max,
+                "occlusion_hold": occlusion_hold,
+                "dbg_cycle_emit_count": int(rt.dbg_cycle_emit_count),
+            }
 
     def _publish_snapshot(self) -> None:
         cache = getattr(self, "_machine_snapshot_cache", {})
@@ -662,8 +554,7 @@ class VisionOrchestrator(threading.Thread):
             for m in self._machines_cache:
                 if m.enabled and m.id not in cache:
                     cache[m.id] = self._stub_machine_snap(m)
-            # Copy rows so UI mutation / idle_s doesn't race with cam writers.
-            machines = [dict(v) for v in sorted(cache.values(), key=lambda x: x["id"])]
+            machines = sorted(cache.values(), key=lambda x: x["id"])
             db_by_id = {m.id: m for m in self._machines_cache}
             for row in machines:
                 dbm = db_by_id.get(int(row["id"]))
@@ -681,7 +572,6 @@ class VisionOrchestrator(threading.Thread):
                 "cameras": cams,
                 # Max per-camera process-worker loop time (parallel Cam1/Cam2).
                 "cpu_proxy": round(self._loop_ms_ema, 1),
-                "stage_ms": {k: round(v, 2) for k, v in self._stage_ms.items()},
             }
 
 

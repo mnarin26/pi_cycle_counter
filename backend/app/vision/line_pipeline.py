@@ -54,14 +54,14 @@ def _parse_xy(s: str) -> tuple[float, float]:
     return float(arr[0]), float(arr[1])
 
 
-def sample_line_profile(
-    frame_bgr: np.ndarray,
+def sample_line_profile_gray(
+    gray: np.ndarray,
     p0_xy: tuple[float, float],
     p1_xy: tuple[float, float],
     thickness_px: int = 7,
     num_samples: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Sample a 1D brightness profile along the line p0 -> p1.
+    """Sample a 1D brightness profile from a precomputed grayscale frame.
 
     For each of N points along the line, we max-pool the grayscale values in
     a perpendicular window of `thickness_px` total pixels (clamped to frame).
@@ -71,8 +71,7 @@ def sample_line_profile(
         sample_xs: shape (N,) float32  -- x pixel coord of each sample center
         sample_ys: shape (N,) float32  -- y pixel coord of each sample center
     """
-    h, w = frame_bgr.shape[:2]
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
 
     ax, ay = p0_xy
     bx, by = p1_xy
@@ -110,6 +109,18 @@ def sample_line_profile(
     # sampled shape == (len(offsets), n); collapse perpendicular axis via max-pool.
     profile = sampled.max(axis=0).astype(np.uint8)
     return profile, cx.astype(np.float32), cy.astype(np.float32)
+
+
+def sample_line_profile(
+    frame_bgr: np.ndarray,
+    p0_xy: tuple[float, float],
+    p1_xy: tuple[float, float],
+    thickness_px: int = 7,
+    num_samples: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sample a 1D brightness profile along the line p0 -> p1 (BGR input)."""
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    return sample_line_profile_gray(gray, p0_xy, p1_xy, thickness_px, num_samples)
 
 
 def _parabolic_subpixel(profile: np.ndarray, idx: int) -> float:
@@ -192,8 +203,8 @@ _ADAPTIVE_RATIO = 0.5  # require at least 50% of (max - median) — guarantees t
 _MIN_MAX_MEDIAN_SPREAD = 16.0
 
 
-def line_peak_position(
-    frame_bgr: np.ndarray,
+def line_peak_position_gray(
+    gray: np.ndarray,
     axis_p0_json: str,
     axis_p1_json: str,
     thickness_px: int,
@@ -203,7 +214,7 @@ def line_peak_position(
     reflector_len_min: int | None = None,
     reflector_len_max: int | None = None,
 ) -> LineProbeResult:
-    """Top-level call used by the orchestrator.
+    """Top-level call on a shared grayscale frame (preferred hot path).
 
     Threshold semantics:
     - mode == "fixed":
@@ -216,13 +227,13 @@ def line_peak_position(
     A hard `max-median` spread check also rejects nearly flat profiles so random
     argmax does not synthesize a reflector.
     """
-    h, w = frame_bgr.shape[:2]
+    h, w = gray.shape[:2]
     p0n = _parse_xy(axis_p0_json)
     p1n = _parse_xy(axis_p1_json)
     p0 = (p0n[0] * w, p0n[1] * h)
     p1 = (p1n[0] * w, p1n[1] * h)
 
-    profile, sx, sy = sample_line_profile(frame_bgr, p0, p1, thickness_px=max(1, int(thickness_px)))
+    profile, sx, sy = sample_line_profile_gray(gray, p0, p1, thickness_px=max(1, int(thickness_px)))
     if profile.size < 4:
         return LineProbeResult(False, None, None, 0, 0, 0, 0, 0)
 
@@ -254,4 +265,30 @@ def line_peak_position(
         prominence_min=prom_min,
         reflector_len_min=len_min,
         reflector_len_max=len_max,
+    )
+
+
+def line_peak_position(
+    frame_bgr: np.ndarray,
+    axis_p0_json: str,
+    axis_p1_json: str,
+    thickness_px: int,
+    threshold_mode: str,
+    prominence_min_fixed: int,
+    prominence_offset: int = 0,
+    reflector_len_min: int | None = None,
+    reflector_len_max: int | None = None,
+) -> LineProbeResult:
+    """BGR convenience wrapper — converts to gray then calls line_peak_position_gray."""
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    return line_peak_position_gray(
+        gray,
+        axis_p0_json,
+        axis_p1_json,
+        thickness_px,
+        threshold_mode,
+        prominence_min_fixed,
+        prominence_offset=prominence_offset,
+        reflector_len_min=reflector_len_min,
+        reflector_len_max=reflector_len_max,
     )

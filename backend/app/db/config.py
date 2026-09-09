@@ -27,8 +27,8 @@ class Settings(BaseSettings):
     cycle_unknown_grace_s: float = 3.0
     # After axis endpoint visit, tolerate longer signal loss (reflector under panel).
     cycle_unknown_grace_after_extreme_s: float = 12.0
-    cycle_endpoint_margin: float = 0.15
     cycle_min_travel_range: float = 0.18
+    cycle_min_prominence: float = 0.1
 
     @property
     def database_url(self) -> str:

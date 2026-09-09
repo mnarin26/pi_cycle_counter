@@ -110,18 +110,19 @@ def _dedupe_mold_machine_links(conn) -> int:
     return removed
 
 
-def _add_column_if_missing(conn, table: str, existing: set[str], name: str, ddl: str) -> None:
+def _add_column_if_missing(conn, table: str, existing: set[str], name: str, ddl: str) -> bool:
     if name in existing:
-        return
+        return False
     try:
         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
         existing.add(name)
+        return True
     except Exception as e:
         # Two processes (8000 + 8080) can race the same ALTER on SQLite.
         msg = str(e).lower()
         if "duplicate column" in msg or "already exists" in msg:
             existing.add(name)
-            return
+            return False
         raise
 
 
@@ -138,6 +139,58 @@ def init_db() -> None:
         _add_column_if_missing(conn, "machines", machine_cols, "reflector_len_max", "reflector_len_max INTEGER")
         _add_column_if_missing(conn, "machines", machine_cols, "occlusion_grace_ms", "occlusion_grace_ms INTEGER NOT NULL DEFAULT 300")
         _add_column_if_missing(conn, "machines", machine_cols, "qr_code", "qr_code VARCHAR(64)")
+        # Optional legacy column from brief move_eps experiment (unused by ORM).
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "move_eps", "move_eps REAL NOT NULL DEFAULT 0.007"
+        )
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "hysteresis", "hysteresis REAL NOT NULL DEFAULT 0.06"
+        )
+        added_min_change = _add_column_if_missing(
+            conn, "machines", machine_cols, "min_change", "min_change REAL NOT NULL DEFAULT 0.008"
+        )
+        if added_min_change:
+            conn.execute(
+                text(
+                    "UPDATE machines SET min_change = MAX(0.0015, COALESCE(hysteresis, 0.06) * 0.12)"
+                )
+            )
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "min_prominence", "min_prominence REAL NOT NULL DEFAULT 0.1"
+        )
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "diag_until", "diag_until TEXT"
+        )
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "diag_from", "diag_from TEXT"
+        )
+        # Schmitt-trigger counting (AF-4/5/6). Others stay 'peak_trough'.
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "counting_mode",
+            "counting_mode VARCHAR(16) NOT NULL DEFAULT 'peak_trough'",
+        )
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "closed_polarity",
+            "closed_polarity VARCHAR(8) NOT NULL DEFAULT 'low'",
+        )
+        _add_column_if_missing(conn, "machines", machine_cols, "closed_ref", "closed_ref REAL")
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "closed_hyst", "closed_hyst REAL NOT NULL DEFAULT 0.05"
+        )
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "smooth_win", "smooth_win INTEGER NOT NULL DEFAULT 5"
+        )
+        _add_column_if_missing(
+            conn, "machines", machine_cols, "learn_enabled", "learn_enabled INTEGER NOT NULL DEFAULT 1"
+        )
+        _add_column_if_missing(conn, "machines", machine_cols, "learned_at", "learned_at TEXT")
+        _add_column_if_missing(
+            conn,
+            "machines",
+            machine_cols,
+            "idle_gap_minutes",
+            "idle_gap_minutes INTEGER NOT NULL DEFAULT 3",
+        )
         cycle_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(cycles)")).fetchall()}
         _add_column_if_missing(conn, "cycles", cycle_cols, "is_counted", "is_counted INTEGER NOT NULL DEFAULT 1")
         _add_column_if_missing(conn, "cycles", cycle_cols, "exclude_reason", "exclude_reason VARCHAR(64)")
@@ -171,8 +224,6 @@ def init_db() -> None:
                 "ON cycles (is_counted, t_end, mold_id, machine_id)"
             )
         )
-        conn.execute(text("ANALYZE cycles"))
-        conn.execute(text("ANALYZE events"))
         _dedupe_mold_machine_links(conn)
         conn.execute(
             text(
@@ -189,6 +240,20 @@ def init_db() -> None:
         conn.execute(
             text("CREATE INDEX IF NOT EXISTS ix_audit_logs_created ON audit_logs (created_at)")
         )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_machine_downtimes_machine_span "
+                "ON machine_downtimes (machine_id, start_at, end_at)"
+            )
+        )
+    # Outside the migration txn — never block startup if SQLite is busy (bot/WAL).
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ANALYZE cycles"))
+            conn.execute(text("ANALYZE events"))
+            conn.commit()
+    except Exception:
+        pass
     db = SessionLocal()
     try:
         changed = False

@@ -20,6 +20,8 @@ from app.services.auth_service import get_session_user
 from app.api.routers import activity, analytics, auth, calibration, cameras, events, machines, molds, settings as settings_router
 from app.vision.orchestrator import VisionOrchestrator, drain_cycle_queue_item
 from app.ws.hub import Hub
+from app.ws.pos_tick_hub import PosTickHub
+from app.services.anomaly_window import AnomalyWindowRecorder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,8 +35,11 @@ async def lifespan(app: FastAPI):
     q: queue.Queue = queue.Queue(maxsize=settings.vision_queue_max)
     app.state.vision_queue = q
     app.state.rolling_cycles = {}
-    orch = VisionOrchestrator(q)
-    orch.start()
+    pos_tick_hub = PosTickHub()
+    app.state.pos_tick_hub = pos_tick_hub
+    anomaly = AnomalyWindowRecorder(settings.logs_dir)
+    app.state.anomaly = anomaly
+    orch = VisionOrchestrator(q, pos_tick_hub=pos_tick_hub, anomaly=anomaly)
     app.state.vision = orch
     app.state.ws_hub = Hub()
     # #region agent log
@@ -50,6 +55,14 @@ async def lifespan(app: FastAPI):
     # #endregion
 
     stop_drain = asyncio.Event()
+
+    async def start_vision_after_bind() -> None:
+        """Defer RTSP/vision thread until after uvicorn binds (avoids startup hang)."""
+        await asyncio.sleep(0.05)
+        if not orch.is_alive():
+            orch.start()
+
+    vision_boot = asyncio.create_task(start_vision_after_bind())
 
     async def drain_loop():
         while not stop_drain.is_set():
@@ -92,17 +105,20 @@ async def lifespan(app: FastAPI):
     async def broadcast_loop():
         interval = 1.0 / max(1.0, settings.ws_broadcast_hz)
         while not stop_drain.is_set():
-            snap = app.state.vision.snapshot
+            snap = _enrich_live_snapshot(app.state.vision.snapshot, app.state.ws_hub)
             msg = json.dumps({"type": "snapshot", "data": snap})
             await app.state.ws_hub.broadcast(msg)
             await asyncio.sleep(interval)
 
     drain_task = asyncio.create_task(drain_loop())
     bcast_task = asyncio.create_task(broadcast_loop())
+    pos_tick_task = asyncio.create_task(pos_tick_hub.pump_forever())
 
     async def retention_loop():
         from app.services.data_retention import run_data_retention
 
+        # Never block lifespan startup — retention can scan a large DB synchronously.
+        await asyncio.sleep(30)
         while not stop_drain.is_set():
             db = db_session.SessionLocal()
             try:
@@ -121,8 +137,10 @@ async def lifespan(app: FastAPI):
     retention_task = asyncio.create_task(retention_loop())
     yield
     stop_drain.set()
+    vision_boot.cancel()
     drain_task.cancel()
     bcast_task.cancel()
+    pos_tick_task.cancel()
     retention_task.cancel()
     orch.stop()
     orch.join(timeout=3.0)
@@ -205,10 +223,46 @@ def health():
     return {"ok": True}
 
 
+def _load_warn(ws_clients: int, cpu_proxy: float) -> dict | None:
+    """Load banner disabled — cpu_proxy flicker kept shifting the UI."""
+    _ = (ws_clients, cpu_proxy)
+    return None
+
+
+def _enrich_live_snapshot(snap: dict, hub: Hub) -> dict:
+    out = dict(snap or {})
+    n = int(getattr(hub, "client_count", 0) or 0)
+    cpu = float(out.get("cpu_proxy") or 0.0)
+    out["ws_clients"] = n
+    warn = _load_warn(n, cpu)
+    if warn is None:
+        out.pop("load_warn", None)
+    else:
+        out["load_warn"] = warn
+    return out
+
+
 @app.get("/api/live/snapshot")
 def live_snapshot():
     """Current vision snapshot (same payload as WebSocket)."""
-    return app.state.vision.snapshot
+    return _enrich_live_snapshot(app.state.vision.snapshot, app.state.ws_hub)
+
+
+@app.post("/api/debug/agent-log")
+async def debug_agent_log(request: Request):
+    """Temporary debug ingest (NDJSON) for agent sessions — no auth, local only."""
+    # #region agent log
+    try:
+        payload = await request.json()
+        line = json.dumps(payload, ensure_ascii=False, default=str)
+        path = Path("/tmp/debug-3a2fad.log")
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        logger.warning("debug agent-log failed: %s", e)
+        return {"ok": False}
+    return {"ok": True}
+    # #endregion
 
 
 @app.post("/api/debug/fake_cycle")
@@ -246,8 +300,35 @@ async def websocket_endpoint(ws: WebSocket):
     hub: Hub = ws.app.state.ws_hub
     hub.add(ws)
     try:
-        snap = ws.app.state.vision.snapshot
+        snap = _enrich_live_snapshot(ws.app.state.vision.snapshot, hub)
         await ws.send_text(json.dumps({"type": "snapshot", "data": snap}))
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        hub.remove(ws)
+
+
+@app.websocket("/ws/pos-ticks")
+async def websocket_pos_ticks(ws: WebSocket, machine_id: int | None = Query(None)):
+    """Shadow stream: per-processed-line pos ticks (no images). Idle = no emit on Pi."""
+    await ws.accept()
+    hub: PosTickHub = ws.app.state.pos_tick_hub
+    filt: set[int] | None = None
+    if machine_id is not None and int(machine_id) > 0:
+        filt = {int(machine_id)}
+    hub.add(ws, filt)
+    try:
+        await ws.send_text(
+            json.dumps(
+                {
+                    "type": "hello",
+                    "machine_id": machine_id,
+                    "msg": "pos-ticks subscribed",
+                }
+            )
+        )
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:

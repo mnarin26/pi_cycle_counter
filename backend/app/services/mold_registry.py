@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -46,6 +46,16 @@ def find_mold_by_qr_code(db: Session, code: str) -> Mold | None:
     return db.query(Mold).filter(Mold.qr_code == code.strip()).first()
 
 
+def _standard_changeover_seconds(prev: Mold | None, new: Mold | None) -> float:
+    """(prev removal + new mount) minutes -> seconds; skips removal when mold unchanged."""
+    seconds = 0.0
+    if prev and new and prev.id != new.id and prev.removal_minutes:
+        seconds += float(prev.removal_minutes) * 60.0
+    if new and new.mount_minutes:
+        seconds += float(new.mount_minutes) * 60.0
+    return seconds
+
+
 def assign_mold_to_machine(
     db: Session,
     *,
@@ -54,6 +64,9 @@ def assign_mold_to_machine(
     source: str = "telegram",
     operator_name: str | None = None,
     operator_id: str | None = None,
+    assigned_at: datetime | None = None,
+    changeover_start: datetime | None = None,
+    changeover_end: datetime | None = None,
 ) -> tuple[Machine, Mold]:
     machine = db.get(Machine, machine_id)
     mold = db.get(Mold, mold_id)
@@ -61,6 +74,33 @@ def assign_mold_to_machine(
         raise ValueError("Makine bulunamadi")
     if not mold:
         raise ValueError("Kalip bulunamadi")
+
+    when = assigned_at or datetime.now(timezone.utc)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if when > now + timedelta(minutes=5):
+        raise ValueError("Atama saati gelecekte olamaz")
+    if when < now - timedelta(days=14):
+        raise ValueError("Atama saati en fazla 14 gun geriye alinabilir")
+
+    prev_mold = machine.current_mold_id and db.get(Mold, machine.current_mold_id) or None
+
+    # Changeover window: explicit if provided, else standard removal+mount ending at assignment.
+    co_start: datetime | None = None
+    co_end: datetime | None = None
+    if changeover_start and changeover_end:
+        cs = changeover_start if changeover_start.tzinfo else changeover_start.replace(tzinfo=timezone.utc)
+        ce = changeover_end if changeover_end.tzinfo else changeover_end.replace(tzinfo=timezone.utc)
+        if ce <= cs:
+            raise ValueError("Kalip degisimi bitisi baslangictan sonra olmali")
+        co_start, co_end = cs, ce
+    else:
+        std = _standard_changeover_seconds(prev_mold, mold)
+        if std > 0:
+            co_end = when
+            co_start = when - timedelta(seconds=std)
+
     # Bir kalip ayni anda yalnizca bir makinede calisabilir.
     db.query(Machine).filter(Machine.current_mold_id == mold.id, Machine.id != machine.id).update(
         {Machine.current_mold_id: None},
@@ -68,21 +108,23 @@ def assign_mold_to_machine(
     )
     machine.current_mold_id = mold.id
     link_mold_machine(db, mold.id, machine.id)
+    payload: dict = {
+        "source": source,
+        "mold_id": mold.id,
+        "mold_name": mold.name,
+        "mold_qr_code": mold.qr_code,
+        "operator_name": operator_name,
+        "operator_id": operator_id,
+    }
+    if co_start and co_end:
+        payload["changeover_start"] = co_start.astimezone(timezone.utc).isoformat()
+        payload["changeover_end"] = co_end.astimezone(timezone.utc).isoformat()
     db.add(
         Event(
             type="mold_assigned",
             machine_id=machine.id,
-            payload=json_dumps(
-                {
-                    "source": source,
-                    "mold_id": mold.id,
-                    "mold_name": mold.name,
-                    "mold_qr_code": mold.qr_code,
-                    "operator_name": operator_name,
-                    "operator_id": operator_id,
-                }
-            ),
-            created_at=datetime.now(timezone.utc),
+            payload=json_dumps(payload),
+            created_at=when,
         )
     )
     db.commit()

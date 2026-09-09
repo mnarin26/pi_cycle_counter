@@ -1,16 +1,25 @@
-"""Motion + dwell based state machine with jitter tolerance.
+"""Peak / trough (zig-zag) motion state machine.
 
-This revision intentionally avoids fixed OPEN/CLOSED position thresholds.
-Instead, it models the clamp as a sequence of:
+Human-perception model, identical for every machine:
 
-    moving -> waiting -> reverse moving -> waiting
+- The reflector position (0..1) rides between two ends. p0 is the CLOSED end
+  (low), p1 is the OPEN end (high). So a signal *peak* means OPEN and a
+  *trough* means CLOSED.
+- A swing is only real if it is at least `min_prominence` tall. Anything
+  smaller (light flicker, park jitter ~0.03) never flips direction, so it is
+  ignored the same way a person ignores it by eye.
+- Teleports (steep vertical jumps, e.g. light glints) are held: if |Δpos|
+  >= `jump_abs` the previous position is kept (global; not per-machine).
+- No absolute OPEN/CLOSED thresholds and no learning: the detector follows
+  whatever peak / trough levels the signal actually reaches. When a mold change
+  shifts the max, the min, or both, the next peaks/troughs are simply taken at
+  the new levels.
 
-and labels waiting zones by *last movement direction*:
-- wait after +direction movement => CLOSED wait
-- wait after -direction movement => OPEN wait
-
-This matches molds where absolute end positions drift by product size, but the
-two-direction movement pattern remains stable.
+The confirmed peaks/troughs are emitted as OPEN / CLOSED to the existing
+CycleTracker, which counts a full cycle as A -> B -> A. A peak/trough is only
+confirmed once the signal has retraced `min_prominence` away from it, so a
+count may land one retrace late -- that is intentional (accuracy over
+immediacy).
 """
 
 from __future__ import annotations
@@ -27,11 +36,21 @@ class ConfirmedZone(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+# Frame-to-frame move (on the median-filtered signal) above which the live
+# dot shows MOVING. Display only; never affects the cycle count.
+_DISPLAY_MOVE_EPS = 0.012
+
+
 @dataclass
 class StateMachineConfig:
-    open_1d: float = 0.85
-    closed_1d: float = 0.15
-    hysteresis: float = 0.06
+    # Legacy/vestigial: kept for config + admin UI compat. Not used by counting.
+    min_change: float = 0.006
+    # Swing amplitude a peak/trough must have to be counted. Global default.
+    min_prominence: float = 0.12
+    # Absolute teleport gate (global). Matches shadow zigzag_counter.
+    jump_abs: float = 0.30
+    # Kept for config/wiring backward-compat; unused by the peak/trough core.
+    min_travel: float = 0.18
     debounce_ms: int = 80
     stability_confirm_ms: int = 500
 
@@ -39,94 +58,118 @@ class StateMachineConfig:
 @dataclass
 class ClampStateMachine:
     cfg: StateMachineConfig = field(default_factory=StateMachineConfig)
-    _last_pos: float | None = None
-    _last_ms: float = 0.0
-    _moving_raw: bool = False
-    _moving_since_ms: float = 0.0
-    _still_since_ms: float = 0.0
-    _last_move_dir: int = 0  # +1 or -1 (last meaningful movement direction)
-    _filtered_pos: float | None = None
-    _confirmed: ConfirmedZone = ConfirmedZone.UNKNOWN
-    _last_wait_zone: ConfirmedZone = ConfirmedZone.UNKNOWN
+
+    _win: list[float] = field(default_factory=list)  # last raw samples for median-3
+    _dir: int = 0  # 0 unknown, +1 rising (toward OPEN), -1 falling (toward CLOSED)
+    _ext: float | None = None  # running extreme of the current leg
+    _hi: float | None = None  # unknown-phase running max
+    _lo: float | None = None  # unknown-phase running min
+    _prev_f: float | None = None  # previous filtered sample (display motion)
+    _last_held: float | None = None  # jump-hold latch
+    _peak_level: float | None = None  # last confirmed peak (OPEN) level
+    _trough_level: float | None = None  # last confirmed trough (CLOSED) level
+    _confirmed: ConfirmedZone = ConfirmedZone.UNKNOWN  # last counting zone
+    display_zone: ConfirmedZone = ConfirmedZone.UNKNOWN  # lag-free UI hint
 
     def reset(self) -> None:
-        self._last_pos = None
-        self._last_ms = 0.0
-        self._moving_raw = False
-        self._moving_since_ms = 0.0
-        self._still_since_ms = 0.0
-        self._last_move_dir = 0
-        self._filtered_pos = None
+        self._win = []
+        self._dir = 0
+        self._ext = None
+        self._hi = None
+        self._lo = None
+        self._prev_f = None
+        self._last_held = None
+        self._peak_level = None
+        self._trough_level = None
         self._confirmed = ConfirmedZone.UNKNOWN
-        self._last_wait_zone = ConfirmedZone.UNKNOWN
+        self.display_zone = ConfirmedZone.UNKNOWN
 
-    def _classify_wait_zone(self) -> ConfirmedZone:
-        # No fixed absolute endpoints: zone is inferred from the last movement direction.
-        # +dir wait => CLOSED, -dir wait => OPEN.
-        if self._last_move_dir > 0:
-            zone = ConfirmedZone.CLOSED
-        elif self._last_move_dir < 0:
-            zone = ConfirmedZone.OPEN
-        elif self._last_wait_zone in (ConfirmedZone.OPEN, ConfirmedZone.CLOSED):
-            zone = self._last_wait_zone
+    def _prominence(self) -> float:
+        return max(0.02, float(self.cfg.min_prominence or 0.06))
+
+    def _jump_abs(self) -> float:
+        return max(0.05, float(getattr(self.cfg, "jump_abs", 0.30) or 0.30))
+
+    def _hold_jumps(self, pos: float) -> float:
+        if self._last_held is None:
+            self._last_held = pos
+            return pos
+        if abs(pos - self._last_held) >= self._jump_abs():
+            return self._last_held
+        self._last_held = pos
+        return pos
+
+    def _median3(self, pos: float) -> float:
+        self._win.append(pos)
+        if len(self._win) > 3:
+            self._win.pop(0)
+        return sorted(self._win)[len(self._win) // 2]
+
+    def _update_display(self, f: float) -> None:
+        moving = self._prev_f is not None and abs(f - self._prev_f) >= _DISPLAY_MOVE_EPS
+        if moving:
+            self.display_zone = ConfirmedZone.MOVING
+        elif self._peak_level is not None and self._trough_level is not None:
+            mid = 0.5 * (self._peak_level + self._trough_level)
+            self.display_zone = ConfirmedZone.OPEN if f >= mid else ConfirmedZone.CLOSED
         elif self._confirmed in (ConfirmedZone.OPEN, ConfirmedZone.CLOSED):
-            zone = self._confirmed
+            self.display_zone = self._confirmed
         else:
-            zone = ConfirmedZone.UNKNOWN
-        if zone in (ConfirmedZone.OPEN, ConfirmedZone.CLOSED):
-            self._last_wait_zone = zone
-        return zone
+            self.display_zone = ConfirmedZone.UNKNOWN
 
     def step(self, position_01: float | None, now_ms: float | None = None) -> ConfirmedZone:
-        if now_ms is None:
-            now_ms = time.monotonic() * 1000.0
-
         if position_01 is None:
-            self._last_pos = None
-            self._filtered_pos = None
-            return self._confirmed
+            # Signal lost: report UNKNOWN so the tracker's grace/reset applies.
+            # Internal peak/trough state is kept (orchestrator resets on long loss).
+            return ConfirmedZone.UNKNOWN
 
         pos = max(0.0, min(1.0, float(position_01)))
-        if self._filtered_pos is None:
-            self._filtered_pos = pos
-        else:
-            # Low-pass to avoid jitter, but keep latency low for OPEN/CLOSED
-            # confirmation in fast molds.
-            self._filtered_pos = self._filtered_pos * 0.45 + pos * 0.55
-        fpos = self._filtered_pos
+        pos = self._hold_jumps(pos)
+        f = self._median3(pos)
+        prom = self._prominence()
 
-        if self._last_pos is None:
-            self._last_pos = fpos
-            self._last_ms = now_ms
-            self._still_since_ms = now_ms
-            self._moving_since_ms = now_ms
-            return self._confirmed
+        emitted: ConfirmedZone | None = None
 
-        dt = max(1.0, now_ms - self._last_ms)
-        delta = fpos - self._last_pos
-        dpos = abs(delta)
-        # Movement epsilon is tied to hysteresis so jitter does not trigger MOVING.
-        move_eps = max(0.0015, self.cfg.hysteresis * 0.12)
-        is_moving_now = dpos > move_eps
+        if self._dir == 0:
+            self._hi = f if self._hi is None else max(self._hi, f)
+            self._lo = f if self._lo is None else min(self._lo, f)
+            if self._hi is not None and f <= self._hi - prom:
+                # Fell from a high -> that high was a peak (OPEN).
+                self._peak_level = self._hi
+                self._dir = -1
+                self._ext = f
+                emitted = ConfirmedZone.OPEN
+            elif self._lo is not None and f >= self._lo + prom:
+                # Rose from a low -> that low was a trough (CLOSED).
+                self._trough_level = self._lo
+                self._dir = 1
+                self._ext = f
+                emitted = ConfirmedZone.CLOSED
+        elif self._dir > 0:
+            if self._ext is None or f > self._ext:
+                self._ext = f
+            if f <= self._ext - prom:
+                self._peak_level = self._ext
+                self._dir = -1
+                self._ext = f
+                emitted = ConfirmedZone.OPEN
+        else:  # self._dir < 0
+            if self._ext is None or f < self._ext:
+                self._ext = f
+            if f >= self._ext + prom:
+                self._trough_level = self._ext
+                self._dir = 1
+                self._ext = f
+                emitted = ConfirmedZone.CLOSED
 
-        self._last_pos = fpos
-        self._last_ms = now_ms
+        self._update_display(f)
+        self._prev_f = f
 
-        if is_moving_now:
-            dir_now = 1 if delta > 0 else -1
-            self._last_move_dir = dir_now
-            if not self._moving_raw:
-                self._moving_raw = True
-                self._moving_since_ms = now_ms
-            if now_ms - self._moving_since_ms >= self.cfg.debounce_ms:
-                self._confirmed = ConfirmedZone.MOVING
-            self._still_since_ms = now_ms
-            return self._confirmed
+        if emitted is not None:
+            self._confirmed = emitted
 
-        if self._moving_raw:
-            self._moving_raw = False
-            self._still_since_ms = now_ms
-
-        if now_ms - self._still_since_ms >= self.cfg.stability_confirm_ms:
-            self._confirmed = self._classify_wait_zone()
+        # Counting signal is confirmation-only: a fresh OPEN/CLOSED at each
+        # confirmed peak/trough, otherwise the held zone. It never returns
+        # MOVING, so the cycle count is fully independent of min_change / the
+        # display path (MOVING lives only in display_zone for the UI).
         return self._confirmed
