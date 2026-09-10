@@ -1,0 +1,49 @@
+---
+description: Vision hot-path invariants — keep process_ms low; live-verify after changes
+globs: backend/app/vision/**/*.py,backend/app/services/fault_log.py,backend/admin_static/index.html
+alwaysApply: false
+---
+
+# Vision hot-path performance (do not regress)
+
+Incident: adding per-frame SQLite (`fault_log`) + idle gray conversion pushed Cam1 work ~200 ms and 8000 "İşlem ms" from ~15–20 to 150–200+. Fixes below are **project law** for the vision path.
+
+## 1. fault_log — never on every found frame
+
+- `resolve()` only on **lost → found** (`reflector_was_lost`), never every found frame.
+- `note_active()`: memory check **before** any DB connect; if active alarm and sample interval not due → return with **0 SQL**.
+- One persistent SQLite connection; `_ensure_schema` **once** per process. No connect+CREATE per call.
+
+```python
+# ❌ BAD — ~9–20 ms/machine/frame
+if effective_found:
+    fault_log.resolve(...)
+
+# ✅ GOOD
+if effective_found and rt.reflector_was_lost:
+    rt.reflector_was_lost = False
+    fault_log.resolve(...)
+```
+
+## 2. CameraProcessWorker — frame-driven only
+
+- No gray/`cvtColor` unless `latest_mono()` shows a **new** frame.
+- Idle: sleep ~12 ms; do not pace a fixed “always process” loop that re-works the same frame.
+- `sample_interval_ms` = **minimum** spacing between processed frames, not a busy poll schedule.
+- EMAs (`loop_ms` / `cpu_proxy` / gray/probe/total) update **only** on ticks that processed a frame (idle must not dilute or inflate).
+
+## 3. line_pipeline — reuse probe geometry
+
+- Cache `map_x`/`map_y` (and axis parse) by `(axis, thickness, frame size)`; per frame = `remap` + max only.
+- Do not rebuild linspace/offsets/clip every frame for a static line.
+
+## After any change touching these files — live verify on Pi
+
+Deploy/restart `injection-monitor` (8000), then confirm:
+
+1. Snapshot: `cpu_proxy` / `vision.loop_ms` roughly **&lt; ~50 ms** Cam1 load; per-machine `process_ms` roughly **&lt; ~15 ms** (not 30–50+).
+2. `cameras[].keeping_up == true` when streams are healthy; `gray_ms` / `probe_ms` present and sane.
+3. E001 still opens on reflector loss and closes on found (transition-only resolve still works).
+4. `loadavg` / uvicorn CPU not spiked vs pre-change baseline.
+
+If metrics regress toward 100–200 ms process times, **revert the hot-path change** before shipping other features.
