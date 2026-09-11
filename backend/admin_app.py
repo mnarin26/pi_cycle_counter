@@ -147,6 +147,14 @@ class OperatorPermissions(BaseModel):
     panel_8080: bool = False
     bot_mold_create: bool = False
     bot_mold_assign: bool = False
+    alert_messages: bool = False
+
+
+class OperatorAlertPrefs(BaseModel):
+    include_details: bool = False
+    time_start: str = "08:00"
+    time_end: str = "18:00"
+    weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
 
 
 class TelegramOperatorAdd(BaseModel):
@@ -154,6 +162,7 @@ class TelegramOperatorAdd(BaseModel):
     telegram_user_id: str | None = Field(default="", max_length=32)
     role: str = Field(default="user")
     permissions: OperatorPermissions | None = None
+    alert_prefs: OperatorAlertPrefs | None = None
     password: str | None = Field(default=None, max_length=64)
 
 
@@ -161,6 +170,7 @@ class TelegramOperatorUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=128)
     role: str | None = None
     permissions: OperatorPermissions | None = None
+    alert_prefs: OperatorAlertPrefs | None = None
     password: str | None = Field(default=None, max_length=64)
     telegram_user_id: str | None = Field(default=None, max_length=32)
 
@@ -574,12 +584,14 @@ def add_telegram_operator_admin(
     try:
         try:
             perms = body.permissions.model_dump() if body.permissions else None
+            prefs = body.alert_prefs.model_dump() if body.alert_prefs else None
             result = add_operator(
                 db,
                 name=body.name,
                 telegram_user_id=body.telegram_user_id,
                 role=role,
                 permissions=perms,
+                alert_prefs=prefs,
                 password=body.password,
             )
         except ValueError as e:
@@ -613,12 +625,14 @@ def update_telegram_operator_admin(
     try:
         try:
             perms = body.permissions.model_dump() if body.permissions else None
+            prefs = body.alert_prefs.model_dump() if body.alert_prefs else None
             result = update_operator(
                 db,
                 telegram_user_id=user_id,
                 name=body.name,
                 role=role,
                 permissions=perms,
+                alert_prefs=prefs,
                 password=body.password,
                 new_telegram_user_id=body.telegram_user_id,
             )

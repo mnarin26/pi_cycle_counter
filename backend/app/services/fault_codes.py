@@ -30,6 +30,8 @@ FAULT_CATALOG: dict[str, FaultDef] = {
 FAULT_SAMPLE_INTERVAL_S = 60.0
 # Auto-delete rows older than this.
 FAULT_RETENTION_DAYS = 7
+# Min gap between Telegram alerts for the same (machine, code), including flaps.
+FAULT_ALERT_MIN_INTERVAL_S = 1800.0
 
 
 def get_fault(code: str) -> FaultDef | None:

@@ -645,6 +645,9 @@ def process_update(token: str, update: dict[str, Any]) -> None:
 def run_forever() -> None:
     logging.basicConfig(level=logging.INFO)
     db_session.init_db()
+    from app.bot.alerts import start_alert_thread
+
+    start_alert_thread(send_message)
     logger.info("Telegram bot baslatiliyor...")
     while True:
         db = db_session.SessionLocal()
