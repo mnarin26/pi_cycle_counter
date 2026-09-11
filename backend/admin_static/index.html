@@ -46,6 +46,12 @@
       input[title]:hover, select[title]:hover { border-color: #64748b; }
       .chk { display:inline-flex; align-items:center; gap:6px; color:#cbd5e1; font-size:13px; }
       .chk input { width:auto; }
+      .alert-prefs { margin-top:8px; padding:10px 12px; border:1px solid #334155; border-radius:8px; background:#0f172a; }
+      .alert-prefs .alert-sub { margin-top:8px; padding-top:8px; border-top:1px solid #1e293b; }
+      .alert-days { display:flex; flex-wrap:wrap; gap:10px; margin-top:6px; }
+      .alert-time-row { display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin-top:8px; }
+      .alert-time-row label { margin:0; }
+      .alert-time-row input[type="time"] { width:110px; }
       .live-view-wrap { position:relative; border:1px solid #334155; border-radius:10px; overflow:hidden; background:#000; max-width:100%; }
       .live-view-wrap img { display:block; width:100%; height:auto; opacity:0.92; }
       .live-view-dots { position:absolute; inset:0; pointer-events:none; }
@@ -466,6 +472,27 @@
               <label class="chk"><input type="checkbox" id="tgPermPanel8080" /> 8080 paneli</label>
               <label class="chk"><input type="checkbox" id="tgPermMoldCreate" /> Kalıp üretme</label>
               <label class="chk"><input type="checkbox" id="tgPermMoldAssign" /> Kalıp atama</label>
+            </div>
+          </div>
+          <div class="col-12">
+            <div class="alert-prefs" id="tgAlertBox">
+              <label class="chk"><input type="checkbox" id="tgAlertEnabled" class="alert-enabled" /> Uyarı mesajları</label>
+              <p class="muted" style="margin:6px 0 0;">Diagnosis alarmı açılınca Telegram’dan <code>makine adı hata ismi</code> gider. Yönetici dahil varsayılan kapalıdır. Telegram ID gerekir.</p>
+              <div class="alert-sub" id="tgAlertSub" style="display:none;">
+                <label class="chk"><input type="checkbox" id="tgAlertDetails" class="alert-details" /> Detayları dahil et (ayrı mesaj)</label>
+                <div class="alert-time-row">
+                  <div>
+                    <label>Başlangıç</label>
+                    <input type="time" id="tgAlertStart" class="alert-start" value="08:00" />
+                  </div>
+                  <div>
+                    <label>Bitiş</label>
+                    <input type="time" id="tgAlertEnd" class="alert-end" value="18:00" />
+                  </div>
+                </div>
+                <label style="margin-top:8px;">Günler</label>
+                <div class="alert-days" id="tgAlertDays"></div>
+              </div>
             </div>
           </div>
           <div class="col-3">
@@ -2294,18 +2321,117 @@
         renderTelegramOperators(t.operators || []);
       }
 
+      const WEEKDAY_LABELS = ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'];
+
+      function fillDayChecks(container, selected){
+        if(!container) return;
+        const set = new Set((selected || [0,1,2,3,4,5,6]).map(Number));
+        container.innerHTML = WEEKDAY_LABELS.map((lab, i) =>
+          `<label class="chk"><input type="checkbox" class="alert-day" data-day="${i}" ${set.has(i)?'checked':''}/> ${lab}</label>`
+        ).join('');
+      }
+
+      function collectAlertPrefsFrom(root){
+        const weekdays = [];
+        (root ? root.querySelectorAll('input.alert-day:checked') : []).forEach(el => {
+          weekdays.push(Number(el.getAttribute('data-day')));
+        });
+        const details = root && root.querySelector('input.alert-details, #tgAlertDetails');
+        const start = root && root.querySelector('input.alert-start, #tgAlertStart');
+        const end = root && root.querySelector('input.alert-end, #tgAlertEnd');
+        return {
+          include_details: !!(details && details.checked),
+          time_start: (start && start.value) || '08:00',
+          time_end: (end && end.value) || '18:00',
+          weekdays,
+        };
+      }
+
+      function toggleAlertSub(box){
+        if(!box) return;
+        const on = !!(box.querySelector('#tgAlertEnabled, input.alert-enabled') || {}).checked;
+        const sub = box.querySelector('#tgAlertSub, .alert-sub');
+        if(sub) sub.style.display = on ? '' : 'none';
+      }
+
+      fillDayChecks(q('tgAlertDays'), [0,1,2,3,4,5,6]);
+      if(q('tgAlertEnabled')){
+        q('tgAlertEnabled').onchange = ()=> toggleAlertSub(q('tgAlertBox'));
+      }
+
       function permsLabel(op){
-        if(op.role === 'admin') return 'Tüm yetkiler';
         const p = op.permissions || {};
         const names = [];
-        if(p.panel_8000) names.push('8000');
-        if(p.panel_8080) names.push('8080');
-        if(p.bot_mold_create) names.push('Üret');
-        if(p.bot_mold_assign) names.push('Ata');
+        if(op.role === 'admin') names.push('Tüm yetkiler');
+        else {
+          if(p.panel_8000) names.push('8000');
+          if(p.panel_8080) names.push('8080');
+          if(p.bot_mold_create) names.push('Üret');
+          if(p.bot_mold_assign) names.push('Ata');
+        }
+        if(p.alert_messages) names.push('Uyarı');
         return names.length ? names.join(', ') : '—';
       }
 
+      function alertPrefsEditorHtml(op){
+        const p = op.permissions || {};
+        const prefs = op.alert_prefs || {};
+        const days = Array.isArray(prefs.weekdays) ? prefs.weekdays : [0,1,2,3,4,5,6];
+        const daySet = new Set(days.map(Number));
+        const on = !!p.alert_messages;
+        const details = !!prefs.include_details;
+        const start = prefs.time_start || '08:00';
+        const end = prefs.time_end || '18:00';
+        const daysHtml = WEEKDAY_LABELS.map((lab, i) =>
+          `<label class="chk"><input type="checkbox" class="alert-day" data-day="${i}" ${daySet.has(i)?'checked':''}/> ${lab}</label>`
+        ).join('');
+        return `
+          <div class="alert-prefs tg-op-alert" data-id="${escapeHtml(op.id)}">
+            <label class="chk"><input type="checkbox" class="alert-enabled" ${on?'checked':''}/> Uyarı mesajları</label>
+            <div class="alert-sub" style="display:${on?'':'none'};">
+              <label class="chk"><input type="checkbox" class="alert-details" ${details?'checked':''}/> Detayları dahil et</label>
+              <div class="alert-time-row">
+                <div><label>Başlangıç</label><input type="time" class="alert-start" value="${escapeHtml(start)}" /></div>
+                <div><label>Bitiş</label><input type="time" class="alert-end" value="${escapeHtml(end)}" /></div>
+              </div>
+              <div class="alert-days">${daysHtml}</div>
+            </div>
+            <button type="button" class="btn-gray tg-op-alert-save" data-id="${escapeHtml(op.id)}" style="width:auto;margin-top:8px;padding:6px 12px;">Uyarı ayarını kaydet</button>
+          </div>`;
+      }
+
+      function bindAlertEditors(root){
+        root.querySelectorAll('.tg-op-alert').forEach(box => {
+          const en = box.querySelector('input.alert-enabled');
+          if(en) en.onchange = ()=> toggleAlertSub(box);
+        });
+        root.querySelectorAll('.tg-op-alert-save').forEach(btn => {
+          btn.onclick = async ()=>{
+            const id = btn.getAttribute('data-id');
+            const row = btn.closest('tr');
+            const box = row && row.querySelector('.tg-op-alert');
+            const op = (window._tgOperators || []).find(o => String(o.id) === String(id));
+            if(!box || !op){
+              setMsg('tgOpMsg', 'Kullanıcı bulunamadı.', 'bad');
+              return;
+            }
+            const enabled = !!(box.querySelector('input.alert-enabled') && box.querySelector('input.alert-enabled').checked);
+            const perms = Object.assign({}, op.permissions || {});
+            perms.alert_messages = enabled;
+            try{
+              const t = await jpatchLocal('/api/settings/telegram/operators/' + encodeURIComponent(id), {
+                permissions: perms,
+                alert_prefs: collectAlertPrefsFrom(box),
+              });
+              applyTelegramForm(t);
+              setMsg('tgOpMsg', (op.name || id) + ' uyarı ayarı kaydedildi.', 'good');
+            }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
+          };
+        });
+      }
+
       function renderTelegramOperators(ops){
+        window._tgOperators = ops || [];
         const body = q('tgOpBody');
         if(!ops.length){
           body.innerHTML = '<tr><td colspan="6" class="muted">Henuz kullanici yok.</td></tr>';
@@ -2326,10 +2452,11 @@
               </div>
             </td>
             <td>${op.role === 'admin' ? 'Yönetici' : 'Kullanıcı'}</td>
-            <td>${escapeHtml(permsLabel(op))}</td>
+            <td>${escapeHtml(permsLabel(op))}${alertPrefsEditorHtml(op)}</td>
             <td><button type="button" class="btn-gray tg-op-del" data-id="${escapeHtml(op.id)}" data-name="${escapeHtml(op.name || '')}">Sil</button></td>
           </tr>`;
         }).join('');
+        bindAlertEditors(body);
         body.querySelectorAll('.tg-op-del').forEach(btn=>{
           btn.onclick = async ()=>{
             const id = btn.getAttribute('data-id');
@@ -2398,19 +2525,23 @@
           const payload = { name, role };
           if(telegram_user_id) payload.telegram_user_id = telegram_user_id;
           if(password) payload.password = password;
-          if(role === 'user'){
-            payload.permissions = {
-              panel_8000: q('tgPermPanel8000').checked,
-              panel_8080: q('tgPermPanel8080').checked,
-              bot_mold_create: q('tgPermMoldCreate').checked,
-              bot_mold_assign: q('tgPermMoldAssign').checked,
-            };
-          }
+          payload.permissions = {
+            panel_8000: role === 'user' ? q('tgPermPanel8000').checked : true,
+            panel_8080: role === 'user' ? q('tgPermPanel8080').checked : true,
+            bot_mold_create: role === 'user' ? q('tgPermMoldCreate').checked : true,
+            bot_mold_assign: role === 'user' ? q('tgPermMoldAssign').checked : true,
+            alert_messages: q('tgAlertEnabled').checked,
+          };
+          payload.alert_prefs = collectAlertPrefsFrom(q('tgAlertBox'));
           const t = await jpostLocalOp('/api/settings/telegram/operators', payload);
           q('tgOpName').value = '';
           q('tgOpId').value = '';
           q('tgOpPassword').value = '';
-          ['tgPermPanel8000','tgPermPanel8080','tgPermMoldCreate','tgPermMoldAssign'].forEach(id=>{ q(id).checked = false; });
+          ['tgPermPanel8000','tgPermPanel8080','tgPermMoldCreate','tgPermMoldAssign','tgAlertEnabled','tgAlertDetails'].forEach(id=>{ if(q(id)) q(id).checked = false; });
+          if(q('tgAlertStart')) q('tgAlertStart').value = '08:00';
+          if(q('tgAlertEnd')) q('tgAlertEnd').value = '18:00';
+          fillDayChecks(q('tgAlertDays'), [0,1,2,3,4,5,6]);
+          toggleAlertSub(q('tgAlertBox'));
           applyTelegramForm(t);
           setMsg('tgOpMsg', name + ' eklendi.', 'good');
         }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }

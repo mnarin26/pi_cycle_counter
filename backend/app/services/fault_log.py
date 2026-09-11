@@ -34,6 +34,7 @@ from typing import Any
 
 from app.config import settings
 from app.services.fault_codes import (
+    FAULT_ALERT_MIN_INTERVAL_S,
     FAULT_CATALOG,
     FAULT_RETENTION_DAYS,
     FAULT_SAMPLE_INTERVAL_S,
@@ -48,6 +49,9 @@ _lock = threading.Lock()
 _last_sample_mono: dict[tuple[int, str], float] = {}
 # (machine_id, code) -> active alarm id
 _active_alarm_id: dict[tuple[int, str], int] = {}
+# (machine_id, code) -> unix ts of last Telegram enqueue (flap debounce)
+_last_alert_sent_ts: dict[tuple[int, str], float] = {}
+_alert_sent_loaded = False
 # True once _active_alarm_id has been (re)built from the DB in this process.
 _cache_loaded = False
 _writes_since_prune = 0
@@ -85,12 +89,13 @@ def _get_conn_locked() -> sqlite3.Connection:
 
 def _drop_conn() -> None:
     """Close the shared connection after an error so the next call reconnects."""
-    global _conn, _schema_ready, _cache_loaded
+    global _conn, _schema_ready, _cache_loaded, _alert_sent_loaded
     with _lock:
         c = _conn
         _conn = None
         _schema_ready = False
         _cache_loaded = False
+        _alert_sent_loaded = False
     if c is not None:
         try:
             c.close()
@@ -100,6 +105,41 @@ def _drop_conn() -> None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _iso_to_epoch(value: str | None) -> float | None:
+    if not value:
+        return None
+    s = str(value).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def reset_runtime_for_tests() -> None:
+    """Close the shared DB and clear in-memory caches. Tests only."""
+    global _conn, _schema_ready, _cache_loaded, _alert_sent_loaded, _writes_since_prune
+    with _lock:
+        c = _conn
+        _conn = None
+        _schema_ready = False
+        _cache_loaded = False
+        _alert_sent_loaded = False
+        _writes_since_prune = 0
+        _active_alarm_id.clear()
+        _last_sample_mono.clear()
+        _last_alert_sent_ts.clear()
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -138,6 +178,36 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS ix_fault_samples_alarm "
         "ON fault_alarm_samples(alarm_id, created_at)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fault_alert_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            alarm_id INTEGER NOT NULL,
+            machine_id INTEGER NOT NULL,
+            machine_name TEXT,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            title_tr TEXT,
+            detail_json TEXT,
+            sent_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_fault_alert_queue_pending "
+        "ON fault_alert_queue(sent_at, id)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fault_alert_last_sent (
+            machine_id INTEGER NOT NULL,
+            code TEXT NOT NULL,
+            sent_at TEXT NOT NULL,
+            PRIMARY KEY (machine_id, code)
+        )
+        """
+    )
     conn.commit()
 
 
@@ -153,6 +223,9 @@ def _prune_locked(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM fault_alarms WHERE created_at < ?", (cutoff,))
     # Also drop orphan samples older than retention by sample time
     conn.execute("DELETE FROM fault_alarm_samples WHERE created_at < ?", (cutoff,))
+    conn.execute(
+        "DELETE FROM fault_alert_queue WHERE created_at < ?", (cutoff,)
+    )
     conn.commit()
 
 
@@ -180,6 +253,70 @@ def _reload_active_cache_locked(conn: sqlite3.Connection) -> None:
     for aid, mid, code in rows:
         _active_alarm_id[(int(mid), str(code))] = int(aid)
     _cache_loaded = True
+
+
+def _reload_alert_sent_locked(conn: sqlite3.Connection) -> None:
+    global _alert_sent_loaded
+    _last_alert_sent_ts.clear()
+    rows = conn.execute(
+        "SELECT machine_id, code, sent_at FROM fault_alert_last_sent"
+    ).fetchall()
+    for mid, code, sent_at in rows:
+        ts = _iso_to_epoch(sent_at)
+        if ts is not None:
+            _last_alert_sent_ts[(int(mid), str(code))] = ts
+    _alert_sent_loaded = True
+
+
+def _maybe_enqueue_alert_locked(
+    conn: sqlite3.Connection,
+    *,
+    alarm_id: int,
+    machine_id: int,
+    machine_name: str,
+    fault: dict[str, Any],
+    detail: dict[str, Any] | None,
+    created: str,
+) -> None:
+    """Queue a Telegram notify for a newly opened alarm (caller holds _lock).
+
+    Vision-thread safe: only runs on the already-slow new-alarm INSERT path.
+    30-minute debounce is memory-first after the last-sent table is loaded once.
+    """
+    global _alert_sent_loaded
+    key = (int(machine_id), str(fault["code"]))
+    if not _alert_sent_loaded:
+        _reload_alert_sent_locked(conn)
+    now_ts = time.time()
+    last = _last_alert_sent_ts.get(key)
+    if last is not None and (now_ts - last) < FAULT_ALERT_MIN_INTERVAL_S:
+        return
+    conn.execute(
+        """
+        INSERT INTO fault_alert_queue
+        (created_at, alarm_id, machine_id, machine_name, code, name, title_tr, detail_json, sent_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        """,
+        (
+            created,
+            int(alarm_id),
+            int(machine_id),
+            (machine_name or "")[:128],
+            fault["code"],
+            fault["name"],
+            fault.get("title_tr") or fault["name"],
+            json.dumps(detail or {}, ensure_ascii=False),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO fault_alert_last_sent (machine_id, code, sent_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(machine_id, code) DO UPDATE SET sent_at=excluded.sent_at
+        """,
+        (int(machine_id), str(fault["code"]), created),
+    )
+    _last_alert_sent_ts[key] = now_ts
 
 
 def _ensure_cache_locked(conn: sqlite3.Connection) -> None:
@@ -244,6 +381,7 @@ def note_active(
                     alarm_id = None
 
             created = _utc_now_iso()
+            opened_new = False
             if alarm_id is None:
                 cur = conn.execute(
                     """
@@ -261,6 +399,7 @@ def note_active(
                 )
                 alarm_id = int(cur.lastrowid)
                 _active_alarm_id[key] = alarm_id
+                opened_new = True
             conn.execute(
                 """
                 INSERT INTO fault_alarm_samples (alarm_id, created_at, detail_json)
@@ -272,6 +411,16 @@ def note_active(
                     json.dumps(detail or {}, ensure_ascii=False),
                 ),
             )
+            if opened_new:
+                _maybe_enqueue_alert_locked(
+                    conn,
+                    alarm_id=alarm_id,
+                    machine_id=machine_id,
+                    machine_name=machine_name,
+                    fault=fault,
+                    detail=detail,
+                    created=created,
+                )
             _last_sample_mono[key] = mono
             conn.commit()
             _maybe_prune_locked(conn)
@@ -516,6 +665,71 @@ def delete_alarms(
             return len(ids)
     except Exception:
         logger.exception("fault_log.delete_alarms failed")
+        _drop_conn()
+        return 0
+
+
+def list_pending_alerts(*, limit: int = 20) -> list[dict[str, Any]]:
+    """Pending Telegram notify jobs. Called from the bot process, not vision."""
+    limit = max(1, min(int(limit), 100))
+    try:
+        with _lock:
+            conn = _get_conn_locked()
+            rows = conn.execute(
+                """
+                SELECT id, created_at, alarm_id, machine_id, machine_name,
+                       code, name, title_tr, detail_json
+                FROM fault_alert_queue
+                WHERE sent_at IS NULL
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    except Exception:
+        logger.exception("fault_log.list_pending_alerts failed")
+        _drop_conn()
+        return []
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            detail = json.loads(r[8]) if r[8] else {}
+        except json.JSONDecodeError:
+            detail = {}
+        out.append(
+            {
+                "id": r[0],
+                "created_at": r[1],
+                "alarm_id": r[2],
+                "machine_id": r[3],
+                "machine_name": r[4],
+                "code": r[5],
+                "name": r[6],
+                "title_tr": r[7] or r[6],
+                "detail": detail if isinstance(detail, dict) else {},
+            }
+        )
+    return out
+
+
+def mark_alerts_done(alert_ids: list[int]) -> int:
+    """Mark queue rows as sent/processed. Returns count updated."""
+    ids = [int(x) for x in alert_ids if x is not None]
+    if not ids:
+        return 0
+    try:
+        with _lock:
+            conn = _get_conn_locked()
+            now = _utc_now_iso()
+            conn.executemany(
+                "UPDATE fault_alert_queue SET sent_at=? WHERE id=? AND sent_at IS NULL",
+                [(now, aid) for aid in ids],
+            )
+            conn.commit()
+            return len(ids)
+    except Exception:
+        logger.exception("fault_log.mark_alerts_done failed")
         _drop_conn()
         return 0
 
