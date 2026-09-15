@@ -24,12 +24,46 @@ FAULT_CATALOG: dict[str, FaultDef] = {
             "Alarm reflektör tekrar bulununca kapanır; örnekler 1 dk aralıkla alınır."
         ),
     },
+    "E002": {
+        "code": "E002",
+        "name": "BRIGHTNESS_ANOMALY",
+        "title_tr": "Parlaklık sinyali anormal",
+        "description_tr": (
+            "Takip bandında peak/bg birbirine yaklaştı, ikisi birden çok yükseldi "
+            "veya ikisi birden çok alçaldı. Detayda ham parlaklık ızgarası (uzunluk×kalınlık) vardır. "
+            "Sinyal normale dönünce alarm kapanır; örnekler 1 dk aralıkla alınır."
+        ),
+    },
 }
 
 # Interval between samples for the same active alarm.
 FAULT_SAMPLE_INTERVAL_S = 60.0
 # Auto-delete rows older than this.
 FAULT_RETENTION_DAYS = 7
+# Min gap between Telegram alerts for the same (machine, code), including flaps.
+FAULT_ALERT_MIN_INTERVAL_S = 1800.0
+
+# E002 brightness gates (0–255). Any match opens/keeps the anomaly alarm.
+E002_DELTA_CLOSE = 20  # peak - bg below this → "yakın"
+E002_BOTH_HIGH = 220  # peak and bg both >= → "çok yüksek"
+E002_BOTH_LOW = 45  # peak and bg both <= → "çok alçak"
+
+
+def brightness_anomaly_reasons(peak: int, background: int) -> list[str]:
+    """Return reason tags for E002, or [] if signal looks normal."""
+    try:
+        pk = int(peak)
+        bg = int(background)
+    except (TypeError, ValueError):
+        return []
+    reasons: list[str] = []
+    if (pk - bg) < int(E002_DELTA_CLOSE):
+        reasons.append("close")
+    if pk >= int(E002_BOTH_HIGH) and bg >= int(E002_BOTH_HIGH):
+        reasons.append("high")
+    if pk <= int(E002_BOTH_LOW) and bg <= int(E002_BOTH_LOW):
+        reasons.append("low")
+    return reasons
 
 
 def get_fault(code: str) -> FaultDef | None:
@@ -97,10 +131,52 @@ def suggest_for_code(code: str, detail: dict[str, Any] | None) -> list[str]:
                 "Işık, ROI hizası veya çizgi kalınlığını kontrol edin."
             )
 
+        if d.get("brightness_band"):
+            along = d.get("band_along")
+            thick = d.get("band_thickness")
+            tips.append(
+                f"Detaydaki parlaklık ızgarası ham banttır"
+                + (f" ({along}×{thick})" if along and thick else "")
+                + ". Satırlar çizgi boyunca, sütunlar kalınlık (dik) yönüdür."
+            )
+
         if not tips:
             tips.append(
                 "Reflektör görünmüyor. Takip çizgisi hizası, ışık ve eşik ayarlarını kontrol edin."
             )
+    elif code == "E002":
+        reasons = d.get("anomaly_reasons") or []
+        if isinstance(reasons, str):
+            reasons = [r for r in reasons.split(",") if r]
+        reason_set = {str(r) for r in reasons}
+        peak = d.get("peak")
+        bg = d.get("background")
+        delta = d.get("delta")
+        if "close" in reason_set:
+            tips.append(
+                f"Peak/bg birbirine yakın (Δ={delta}, eşik <{E002_DELTA_CLOSE}). "
+                "Işık, çizgi hizası veya kir/yansıma kontrol edin."
+            )
+        if "high" in reason_set:
+            tips.append(
+                f"Peak ve bg ikisi de çok yüksek ({peak}/{bg} ≥ {E002_BOTH_HIGH}). "
+                "Aşırı ışık / doygunluk; pozlama veya ROI’yi kontrol edin."
+            )
+        if "low" in reason_set:
+            tips.append(
+                f"Peak ve bg ikisi de çok düşük ({peak}/{bg} ≤ {E002_BOTH_LOW}). "
+                "Karanlık sahne veya reflektör/ışık kaybı."
+            )
+        if d.get("brightness_band"):
+            along = d.get("band_along")
+            thick = d.get("band_thickness")
+            tips.append(
+                f"Detaydaki parlaklık ızgarası ham banttır"
+                + (f" ({along}×{thick})" if along and thick else "")
+                + ". Satırlar çizgi boyunca, sütunlar kalınlık (dik) yönüdür."
+            )
+        if not tips:
+            tips.append("Parlaklık sinyali anormal. Takip bandı ve ışığı kontrol edin.")
     else:
         tips.append("Bu hata kodu için özel öneri yok. ROI / kamera / eşik ayarlarını kontrol edin.")
     return tips

@@ -24,6 +24,21 @@
       .row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 10px; }
       .col-3 { grid-column: span 3; } .col-4 { grid-column: span 4; } .col-6 { grid-column: span 6; } .col-8 { grid-column: span 8; } .col-12 { grid-column: span 12; }
       .muted { color: #94a3b8; font-size: 12px; }
+      .diag-band-wrap { overflow-x: auto; max-width: 100%; }
+      .diag-band-side { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+      .diag-band-grid { display: inline-block; font-family: ui-monospace, Consolas, monospace; font-size: 10px; line-height: 1; }
+      .diag-band-row { white-space: nowrap; }
+      .diag-band-cell {
+        display: inline-block; width: 28px; min-width: 28px; height: 18px; padding: 0;
+        line-height: 18px; text-align: center; vertical-align: top;
+        border: 1px solid #1e293b; box-sizing: border-box; overflow: hidden;
+      }
+      .diag-band-preview {
+        display: block; border: 1px solid #1e293b; border-radius: 0; background: #000;
+        image-rendering: pixelated; image-rendering: crisp-edges;
+        flex-shrink: 0;
+      }
+      .diag-band-tr td { padding-top: 0; border-top: none; }
       .good { color: #22c55e; } .warn { color: #f59e0b; } .bad { color: #ef4444; }
       .canvas-wrap { position: relative; border: 1px solid #334155; border-radius: 10px; overflow: hidden; width: fit-content; max-width: 100%; }
       .canvas-viewport { overflow: auto; border: 1px solid #1e293b; border-radius: 10px; max-height: 70vh; }
@@ -46,7 +61,24 @@
       input[title]:hover, select[title]:hover { border-color: #64748b; }
       .chk { display:inline-flex; align-items:center; gap:6px; color:#cbd5e1; font-size:13px; }
       .chk input { width:auto; }
-      .live-view-wrap { position:relative; border:1px solid #334155; border-radius:10px; overflow:hidden; background:#000; max-width:100%; }
+      .alert-prefs { margin-top:8px; padding:10px 12px; border:1px solid #334155; border-radius:8px; background:#0f172a; }
+      .alert-prefs .alert-sub { margin-top:8px; padding-top:8px; border-top:1px solid #1e293b; }
+      .alert-days { display:flex; flex-wrap:wrap; gap:10px; margin-top:6px; }
+      .alert-time-row { display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin-top:8px; }
+      .alert-time-row label { margin:0; }
+      .alert-time-row input[type="time"] { width:110px; }
+      .live-view-layout {
+        display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; margin-top: 10px;
+      }
+      .live-view-main { flex: 1 1 420px; min-width: 0; max-width: 100%; }
+      .live-view-side {
+        flex: 0 1 340px; width: 340px; max-width: 100%;
+        border: 1px solid #334155; border-radius: 10px; padding: 10px 12px; background: #0f172a;
+      }
+      .live-view-side select, .live-view-side button { margin-bottom: 8px; }
+      .live-info-vals { font-size: 12px; line-height: 1.5; color: #cbd5e1; margin: 8px 0; }
+      .live-info-vals b { color: #93c5fd; }
+      .live-view-wrap { position:relative; border: 1px solid #334155; border-radius:10px; overflow:hidden; background:#000; max-width:100%; }
       .live-view-wrap img { display:block; width:100%; height:auto; opacity:0.92; }
       .live-view-dots { position:absolute; inset:0; pointer-events:none; }
       .live-view-dot { position:absolute; width:7px; height:7px; margin:-3.5px 0 0 -3.5px; border-radius:999px; background:#94a3b8; box-shadow:0 0 0 1px rgba(2,6,23,0.9); }
@@ -61,6 +93,24 @@
 
       .full-stack { display: block !important; width: 100% !important; max-width: 100% !important; clear: both !important; float: none !important; }
       .full-stack .row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 10px; width: 100%; }
+      .line-nudge {
+        display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start;
+        margin: 10px 0; padding: 10px 12px; border: 1px solid #334155; border-radius: 10px; background: #0f172a;
+      }
+      .line-nudge-block { display: flex; flex-direction: column; gap: 6px; }
+      .line-nudge-block > span { font-size: 12px; color: #93c5fd; }
+      .line-nudge-pad {
+        display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 36px);
+        gap: 4px; justify-items: center; align-items: center;
+      }
+      .line-nudge-pad button {
+        width: 44px; height: 36px; margin: 0; padding: 0; font-size: 14px; line-height: 1;
+      }
+      .line-nudge-pad .nudge-empty { visibility: hidden; }
+      .line-nudge-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+      .line-nudge-row button { margin: 0; min-width: 44px; }
+      .line-nudge-row input[type="number"] { width: 72px; margin: 0; }
+      .line-nudge-hint { font-size: 12px; color: #94a3b8; align-self: center; }
     </style>
   </head>
   <body>
@@ -124,17 +174,31 @@
           </div>
         </div>
         <div id="visionPerfBar" class="muted" style="margin-top:6px;font-size:12px;">Islem: —</div>
-        <div class="live-view-wrap" id="liveViewWrap" style="margin-top:10px;">
-          <img id="liveViewImg" alt="Canli kamera" />
-          <div class="live-view-dots" id="liveViewDots"></div>
-          <div class="live-view-bar" id="liveViewBar">Kamera —</div>
-        </div>
-        <div class="live-view-machines" id="liveViewMachines"></div>
-        <div class="live-view-legend">
-          <span><i style="background:#22d3ee"></i>OPEN</span>
-          <span><i style="background:#3b82f6"></i>CLOSED</span>
-          <span><i style="background:#fbbf24"></i>MOVING</span>
-          <span><i style="background:#94a3b8"></i>UNKNOWN</span>
+        <div class="live-view-layout">
+          <div class="live-view-main">
+            <div class="live-view-wrap" id="liveViewWrap">
+              <img id="liveViewImg" alt="Canli kamera" />
+              <div class="live-view-dots" id="liveViewDots"></div>
+              <div class="live-view-bar" id="liveViewBar">Kamera —</div>
+            </div>
+            <div class="live-view-machines" id="liveViewMachines"></div>
+            <div class="live-view-legend">
+              <span><i style="background:#22d3ee"></i>OPEN</span>
+              <span><i style="background:#3b82f6"></i>CLOSED</span>
+              <span><i style="background:#fbbf24"></i>MOVING</span>
+              <span><i style="background:#94a3b8"></i>UNKNOWN</span>
+            </div>
+          </div>
+          <aside class="live-view-side" id="liveInfoSide">
+            <h4 style="margin:0 0 8px;font-size:13px;color:#93c5fd;">Info snapshot</h4>
+            <p class="muted" style="margin:0 0 8px;">Makine secip butona basin; alarmdaki gibi matris + bant + anlik degerler.</p>
+            <label>Makine</label>
+            <select id="liveInfoMachine"><option value="">—</option></select>
+            <button type="button" id="liveInfoSnapBtn" class="btn-green">Info snapshot</button>
+            <div id="liveInfoMsg" class="muted"></div>
+            <div id="liveInfoVals" class="live-info-vals" style="display:none;"></div>
+            <div id="liveInfoBand"></div>
+          </aside>
         </div>
       </div>
       </section>
@@ -301,6 +365,42 @@
             <div class="col-3"><button id="zoomResetBtn" class="btn-gray">Zoom Sifirla</button></div>
             <div class="col-3"><label>Zoom <span id="zoomLabel">100%</span></label><input id="zoomSlider" type="range" min="50" max="400" step="10" value="100" /></div>
           </div>
+          <div class="line-nudge" id="lineNudgePad">
+            <div class="line-nudge-block">
+              <span>Kaydir (cizgi eksenine gore)</span>
+              <div class="line-nudge-pad">
+                <span class="nudge-empty"></span>
+                <button type="button" id="nudgeIleriBtn" class="btn-gray" title="Cizgi boyunca ileri">▲</button>
+                <span class="nudge-empty"></span>
+                <button type="button" id="nudgeSolBtn" class="btn-gray" title="Cizgiye dik sol">◀</button>
+                <button type="button" id="nudgeGeriBtn" class="btn-gray" title="Cizgi boyunca geri">▼</button>
+                <button type="button" id="nudgeSagBtn" class="btn-gray" title="Cizgiye dik sag">▶</button>
+              </div>
+            </div>
+            <div class="line-nudge-block">
+              <span>Dondur</span>
+              <div class="line-nudge-row">
+                <button type="button" id="nudgeRotLeftBtn" class="btn-gray" title="Saat tersi">⟲</button>
+                <button type="button" id="nudgeRotRightBtn" class="btn-gray" title="Saat yonu">⟳</button>
+              </div>
+            </div>
+            <div class="line-nudge-block">
+              <span>Cizgi boyu (px)</span>
+              <div class="line-nudge-row">
+                <button type="button" id="nudgeLenMinusBtn" class="btn-gray" title="Kisalt">−</button>
+                <input id="nudgeLenInput" type="number" min="8" max="4000" step="1" title="Takip cizgisi uzunlugu (px)" />
+                <button type="button" id="nudgeLenPlusBtn" class="btn-gray" title="Uzat">+</button>
+              </div>
+            </div>
+            <div class="line-nudge-block">
+              <span>Adim (px / derece)</span>
+              <div class="line-nudge-row">
+                <input id="nudgeStepPx" type="number" min="1" max="50" step="1" value="1" title="Kaydirma ve boy adimi (px)" />
+                <input id="nudgeStepDeg" type="number" min="0.1" max="45" step="0.1" value="1" title="Dondurme adimi (derece)" />
+              </div>
+            </div>
+            <div class="line-nudge-hint" id="lineNudgeHint">Boy: — · Aci: —</div>
+          </div>
           <div class="canvas-viewport" id="canvasViewport" style="display:block;width:100%;max-width:100%;clear:both;">
             <div class="canvas-wrap canvas-inner" id="canvasInner">
               <img id="snap" />
@@ -466,6 +566,27 @@
               <label class="chk"><input type="checkbox" id="tgPermPanel8080" /> 8080 paneli</label>
               <label class="chk"><input type="checkbox" id="tgPermMoldCreate" /> Kalıp üretme</label>
               <label class="chk"><input type="checkbox" id="tgPermMoldAssign" /> Kalıp atama</label>
+            </div>
+          </div>
+          <div class="col-12">
+            <div class="alert-prefs" id="tgAlertBox">
+              <label class="chk"><input type="checkbox" id="tgAlertEnabled" class="alert-enabled" /> Uyarı mesajları</label>
+              <p class="muted" style="margin:6px 0 0;">Diagnosis alarmı açılınca Telegram’dan <code>makine adı hata ismi</code> gider. Yönetici dahil varsayılan kapalıdır. Telegram ID gerekir.</p>
+              <div class="alert-sub" id="tgAlertSub" style="display:none;">
+                <label class="chk"><input type="checkbox" id="tgAlertDetails" class="alert-details" /> Detayları dahil et (ayrı mesaj)</label>
+                <div class="alert-time-row">
+                  <div>
+                    <label>Başlangıç</label>
+                    <input type="time" id="tgAlertStart" class="alert-start" value="08:00" />
+                  </div>
+                  <div>
+                    <label>Bitiş</label>
+                    <input type="time" id="tgAlertEnd" class="alert-end" value="18:00" />
+                  </div>
+                </div>
+                <label style="margin-top:8px;">Günler</label>
+                <div class="alert-days" id="tgAlertDays"></div>
+              </div>
             </div>
           </div>
           <div class="col-3">
@@ -1213,6 +1334,80 @@
         if(sel.value !== String(liveViewCamId)) sel.value = String(liveViewCamId);
       }
 
+      let liveInfoMachSig = '';
+      function populateLiveInfoMachineSelect(){
+        const sel = q('liveInfoMachine');
+        if(!sel) return;
+        const list = (Array.isArray(liveSnapshot.machines) && liveSnapshot.machines.length)
+          ? liveSnapshot.machines
+          : (machines || []);
+        const enabled = list.filter(m => m && (m.enabled !== false));
+        const ids = enabled.map(m => Number(m.id));
+        const sig = ids.join(',');
+        if(sig !== liveInfoMachSig){
+          const prev = sel.value;
+          sel.innerHTML = '<option value="">— makine sec —</option>' + enabled.map(m => {
+            const label = m.name || (`Makine ${m.id}`);
+            return `<option value="${m.id}">${escapeHtml(label)} (#${m.id})</option>`;
+          }).join('');
+          liveInfoMachSig = sig;
+          if(prev && ids.includes(Number(prev))) sel.value = prev;
+        }
+      }
+
+      function renderLiveInfoVals(d){
+        if(!d) return '';
+        const mode = d.threshold_mode || '—';
+        const th = d.threshold_active != null ? `${mode} ≥${d.threshold_active}` : mode;
+        const off = d.threshold_offset != null ? ` (off ${d.threshold_offset >= 0 ? '+' : ''}${d.threshold_offset})` : '';
+        const peakBg = (d.peak != null && d.background != null) ? `${d.peak}/${d.background}` : '—';
+        const delta = d.delta != null ? String(d.delta) : '—';
+        const lenMin = d.len_min != null ? d.len_min : '?';
+        const lenMax = d.len_max != null ? d.len_max : '?';
+        const len = d.segment_len != null ? `${d.segment_len} (${lenMin}-${lenMax})` : '—';
+        const pos = d.position_01 != null ? Number(d.position_01).toFixed(3) : '—';
+        const found = d.found != null ? (d.found ? 'evet' : 'hayir') : '—';
+        const age = d.frame_age_ms != null ? `${Math.round(Number(d.frame_age_ms))} ms` : '—';
+        const reasons = Array.isArray(d.anomaly_reasons) ? d.anomaly_reasons.join(',') : (d.anomaly_reasons || '');
+        return `<div><b>Eşik:</b> ${escapeHtml(th + off)}</div>
+          <div><b>Peak/bg:</b> ${escapeHtml(peakBg)} &nbsp; <b>Δ:</b> ${escapeHtml(delta)}</div>
+          <div><b>Len:</b> ${escapeHtml(len)} &nbsp; <b>Found:</b> ${escapeHtml(found)} &nbsp; <b>pos:</b> ${escapeHtml(pos)}</div>
+          <div><b>Kare yaşı:</b> ${escapeHtml(age)}${reasons ? ` &nbsp; <b>Anomali:</b> ${escapeHtml(String(reasons))}` : ''}</div>`;
+      }
+
+      async function takeLiveInfoSnapshot(){
+        const sel = q('liveInfoMachine');
+        const btn = q('liveInfoSnapBtn');
+        const msg = q('liveInfoMsg');
+        const vals = q('liveInfoVals');
+        const band = q('liveInfoBand');
+        const mid = sel && sel.value ? Number(sel.value) : 0;
+        if(!mid){
+          if(msg){ msg.className = 'bad'; msg.textContent = 'Once makine secin.'; }
+          return;
+        }
+        if(btn) btn.disabled = true;
+        if(msg){ msg.className = 'muted'; msg.textContent = 'Aliniyor…'; }
+        if(vals){ vals.style.display = 'none'; vals.innerHTML = ''; }
+        if(band) band.innerHTML = '';
+        try{
+          const d = await jgetLocal(`/api/machines/${mid}/probe-info`);
+          if(msg){
+            msg.className = 'ok';
+            msg.textContent = `${d.machine_name || ('#'+mid)} · anlik probe`;
+          }
+          if(vals){
+            vals.style.display = 'block';
+            vals.innerHTML = renderLiveInfoVals(d);
+          }
+          if(band) band.innerHTML = renderBrightnessBand(d);
+        }catch(e){
+          if(msg){ msg.className = 'bad'; msg.textContent = apiErrText(e); }
+        }finally{
+          if(btn) btn.disabled = false;
+        }
+      }
+
       let liveViewImgBusy = false;
       function refreshLiveViewImage(){
         if(activePanelId !== 'panel-live') return; // gizli panelde goruntu cekme
@@ -1228,6 +1423,7 @@
 
       function updateLiveViewPanel(){
         populateLiveViewCamSelect();
+        populateLiveInfoMachineSelect();
         if(activePanelId !== 'panel-live') return;
         const camId = Number(liveViewCamId);
         if(!camId) return;
@@ -1655,7 +1851,10 @@
 
       function drawRoi(){
         ctx.clearRect(0,0,overlay.width,overlay.height);
-        if(!roiPoly || roiPoly.length !== 4) return;
+        if(!roiPoly || roiPoly.length !== 4){
+          updateLineNudgeHint();
+          return;
+        }
 
         // ROI polygon is hidden by default to avoid confusion:
         // detector uses only the yellow tracking line + thickness band.
@@ -1672,7 +1871,10 @@
         }
 
         const axis = axisForDraw(roiPoly);
-        if(!axis) return;
+        if(!axis){
+          updateLineNudgeHint();
+          return;
+        }
         const a = axis.a;
         const b = axis.b;
 
@@ -1736,6 +1938,7 @@
           ctx.fill();
         }
         updateProminenceHint();
+        updateLineNudgeHint();
       }
 
       function toNorm(poly){
@@ -1763,6 +1966,158 @@
         const c = polyCenter(roiPoly);
         roiPoly = rotatePoly(roiPoly, c, d);
         drawRoi();
+      }
+
+      function polyFromAxis(a, b, widthPx){
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const ux = dx / len, uy = dy / len;
+        const nx = -uy, ny = ux;
+        const hw = Math.max(1, Number(widthPx) || 3) / 2;
+        return [
+          { x: a.x + nx * hw, y: a.y + ny * hw },
+          { x: b.x + nx * hw, y: b.y + ny * hw },
+          { x: b.x - nx * hw, y: b.y - ny * hw },
+          { x: a.x - nx * hw, y: a.y - ny * hw },
+        ];
+      }
+
+      function polyWidthPx(poly){
+        if(!poly || poly.length !== 4) return 7;
+        const len01 = Math.hypot(poly[1].x - poly[0].x, poly[1].y - poly[0].y);
+        const len03 = Math.hypot(poly[3].x - poly[0].x, poly[3].y - poly[0].y);
+        return Math.max(2, Math.min(len01, len03));
+      }
+
+      function lineAxisUnit(poly){
+        const ax = axisFromPoly(poly);
+        if(!ax) return null;
+        const dx = ax.b.x - ax.a.x, dy = ax.b.y - ax.a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        return {
+          ux: dx / len, uy: dy / len,
+          nx: -dy / len, ny: dx / len,
+          len, a: ax.a, b: ax.b,
+        };
+      }
+
+      function ensureEditablePoly(){
+        if(roiPoly && roiPoly.length === 4) return true;
+        if(overlay.width <= 0 || overlay.height <= 0) return false;
+        const saved = axisFromSavedMachine();
+        if(!saved) return false;
+        const thick = Math.max(3, Number(q('lineThickness')?.value || 7));
+        roiPoly = polyFromAxis(saved.a, saved.b, thick);
+        axisPreferPoly = true;
+        syncAngleInputFromPoly();
+        return true;
+      }
+
+      function getNudgeStepPx(){
+        return Math.max(1, Number(q('nudgeStepPx')?.value || 1) || 1);
+      }
+      function getNudgeStepDeg(){
+        return Math.max(0.1, Number(q('nudgeStepDeg')?.value || 1) || 1);
+      }
+
+      function updateLineNudgeHint(){
+        const hint = q('lineNudgeHint');
+        const lenIn = q('nudgeLenInput');
+        const axis = axisForDraw(roiPoly) || axisFromSavedMachine();
+        if(!axis){
+          if(hint) hint.textContent = 'Boy: — · Aci: —';
+          if(lenIn && document.activeElement !== lenIn) lenIn.value = '';
+          return;
+        }
+        const len = Math.hypot(axis.b.x - axis.a.x, axis.b.y - axis.a.y);
+        const ang = Math.atan2(axis.b.y - axis.a.y, axis.b.x - axis.a.x) * 180 / Math.PI;
+        if(hint) hint.textContent = `Boy: ${len.toFixed(1)} px · Aci: ${ang.toFixed(1)}°`;
+        if(lenIn && document.activeElement !== lenIn) lenIn.value = String(Math.round(len));
+      }
+
+      function markPolyDirty(){
+        axisPreferPoly = true;
+        syncAngleInputFromPoly();
+        drawRoi();
+        updateLineNudgeHint();
+        updateProminenceHint();
+      }
+
+      function nudgeLine(kind){
+        if(!ensureEditablePoly()){
+          setMsg('roiMsg', 'Once takip cizgisi / ROI olusturun', 'warn');
+          return;
+        }
+        const u = lineAxisUnit(roiPoly);
+        if(!u) return;
+        const step = getNudgeStepPx();
+        let dx = 0, dy = 0;
+        if(kind === 'ileri'){ dx = u.ux * step; dy = u.uy * step; }
+        else if(kind === 'geri'){ dx = -u.ux * step; dy = -u.uy * step; }
+        else if(kind === 'sag'){ dx = u.nx * step; dy = u.ny * step; }
+        else if(kind === 'sol'){ dx = -u.nx * step; dy = -u.ny * step; }
+        else return;
+        roiPoly = roiPoly.map(p => ({ x: p.x + dx, y: p.y + dy }));
+        markPolyDirty();
+        setMsg('roiMsg', `Kaydirildi (${kind} ${step}px). Kaydetmeyi unutma.`, 'warn');
+      }
+
+      function nudgeRotate(sign){
+        if(!ensureEditablePoly()){
+          setMsg('roiMsg', 'Once takip cizgisi / ROI olusturun', 'warn');
+          return;
+        }
+        const deg = getNudgeStepDeg() * (sign < 0 ? -1 : 1);
+        const c = polyCenter(roiPoly);
+        roiPoly = rotatePoly(roiPoly, c, deg);
+        markPolyDirty();
+        setMsg('roiMsg', `Donduruldu (${deg > 0 ? '+' : ''}${deg.toFixed(1)}°). Kaydetmeyi unutma.`, 'warn');
+      }
+
+      function setLineLengthPx(targetLen){
+        if(!ensureEditablePoly()){
+          setMsg('roiMsg', 'Once takip cizgisi / ROI olusturun', 'warn');
+          return;
+        }
+        const u = lineAxisUnit(roiPoly);
+        if(!u) return;
+        const newLen = clamp(Number(targetLen) || u.len, 8, 4000);
+        const c = polyCenter(roiPoly);
+        const width = polyWidthPx(roiPoly);
+        const a = { x: c.x - u.ux * newLen / 2, y: c.y - u.uy * newLen / 2 };
+        const b = { x: c.x + u.ux * newLen / 2, y: c.y + u.uy * newLen / 2 };
+        roiPoly = polyFromAxis(a, b, width);
+        markPolyDirty();
+        setMsg('roiMsg', `Cizgi boyu ${newLen.toFixed(0)} px. Kaydetmeyi unutma.`, 'warn');
+      }
+
+      function nudgeLineLength(deltaSign){
+        if(!ensureEditablePoly()){
+          setMsg('roiMsg', 'Once takip cizgisi / ROI olusturun', 'warn');
+          return;
+        }
+        const u = lineAxisUnit(roiPoly);
+        if(!u) return;
+        setLineLengthPx(u.len + deltaSign * getNudgeStepPx());
+      }
+
+      /** Hold-to-repeat for nudge buttons. */
+      function bindHoldRepeat(btn, fn){
+        if(!btn) return;
+        let timer = null, delayTimer = null;
+        const clear = ()=>{
+          if(delayTimer){ clearTimeout(delayTimer); delayTimer = null; }
+          if(timer){ clearInterval(timer); timer = null; }
+        };
+        const start = (e)=>{
+          e.preventDefault();
+          fn();
+          clear();
+          delayTimer = setTimeout(()=>{ timer = setInterval(fn, 60); }, 320);
+        };
+        btn.addEventListener('mousedown', start);
+        btn.addEventListener('touchstart', start, { passive: false });
+        ['mouseup','mouseleave','blur','touchend','touchcancel'].forEach(ev => btn.addEventListener(ev, clear));
       }
 
       function newRectPoly(a,b){
@@ -2294,18 +2649,117 @@
         renderTelegramOperators(t.operators || []);
       }
 
+      const WEEKDAY_LABELS = ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'];
+
+      function fillDayChecks(container, selected){
+        if(!container) return;
+        const set = new Set((selected || [0,1,2,3,4,5,6]).map(Number));
+        container.innerHTML = WEEKDAY_LABELS.map((lab, i) =>
+          `<label class="chk"><input type="checkbox" class="alert-day" data-day="${i}" ${set.has(i)?'checked':''}/> ${lab}</label>`
+        ).join('');
+      }
+
+      function collectAlertPrefsFrom(root){
+        const weekdays = [];
+        (root ? root.querySelectorAll('input.alert-day:checked') : []).forEach(el => {
+          weekdays.push(Number(el.getAttribute('data-day')));
+        });
+        const details = root && root.querySelector('input.alert-details, #tgAlertDetails');
+        const start = root && root.querySelector('input.alert-start, #tgAlertStart');
+        const end = root && root.querySelector('input.alert-end, #tgAlertEnd');
+        return {
+          include_details: !!(details && details.checked),
+          time_start: (start && start.value) || '08:00',
+          time_end: (end && end.value) || '18:00',
+          weekdays,
+        };
+      }
+
+      function toggleAlertSub(box){
+        if(!box) return;
+        const on = !!(box.querySelector('#tgAlertEnabled, input.alert-enabled') || {}).checked;
+        const sub = box.querySelector('#tgAlertSub, .alert-sub');
+        if(sub) sub.style.display = on ? '' : 'none';
+      }
+
+      fillDayChecks(q('tgAlertDays'), [0,1,2,3,4,5,6]);
+      if(q('tgAlertEnabled')){
+        q('tgAlertEnabled').onchange = ()=> toggleAlertSub(q('tgAlertBox'));
+      }
+
       function permsLabel(op){
-        if(op.role === 'admin') return 'Tüm yetkiler';
         const p = op.permissions || {};
         const names = [];
-        if(p.panel_8000) names.push('8000');
-        if(p.panel_8080) names.push('8080');
-        if(p.bot_mold_create) names.push('Üret');
-        if(p.bot_mold_assign) names.push('Ata');
+        if(op.role === 'admin') names.push('Tüm yetkiler');
+        else {
+          if(p.panel_8000) names.push('8000');
+          if(p.panel_8080) names.push('8080');
+          if(p.bot_mold_create) names.push('Üret');
+          if(p.bot_mold_assign) names.push('Ata');
+        }
+        if(p.alert_messages) names.push('Uyarı');
         return names.length ? names.join(', ') : '—';
       }
 
+      function alertPrefsEditorHtml(op){
+        const p = op.permissions || {};
+        const prefs = op.alert_prefs || {};
+        const days = Array.isArray(prefs.weekdays) ? prefs.weekdays : [0,1,2,3,4,5,6];
+        const daySet = new Set(days.map(Number));
+        const on = !!p.alert_messages;
+        const details = !!prefs.include_details;
+        const start = prefs.time_start || '08:00';
+        const end = prefs.time_end || '18:00';
+        const daysHtml = WEEKDAY_LABELS.map((lab, i) =>
+          `<label class="chk"><input type="checkbox" class="alert-day" data-day="${i}" ${daySet.has(i)?'checked':''}/> ${lab}</label>`
+        ).join('');
+        return `
+          <div class="alert-prefs tg-op-alert" data-id="${escapeHtml(op.id)}">
+            <label class="chk"><input type="checkbox" class="alert-enabled" ${on?'checked':''}/> Uyarı mesajları</label>
+            <div class="alert-sub" style="display:${on?'':'none'};">
+              <label class="chk"><input type="checkbox" class="alert-details" ${details?'checked':''}/> Detayları dahil et</label>
+              <div class="alert-time-row">
+                <div><label>Başlangıç</label><input type="time" class="alert-start" value="${escapeHtml(start)}" /></div>
+                <div><label>Bitiş</label><input type="time" class="alert-end" value="${escapeHtml(end)}" /></div>
+              </div>
+              <div class="alert-days">${daysHtml}</div>
+            </div>
+            <button type="button" class="btn-gray tg-op-alert-save" data-id="${escapeHtml(op.id)}" style="width:auto;margin-top:8px;padding:6px 12px;">Uyarı ayarını kaydet</button>
+          </div>`;
+      }
+
+      function bindAlertEditors(root){
+        root.querySelectorAll('.tg-op-alert').forEach(box => {
+          const en = box.querySelector('input.alert-enabled');
+          if(en) en.onchange = ()=> toggleAlertSub(box);
+        });
+        root.querySelectorAll('.tg-op-alert-save').forEach(btn => {
+          btn.onclick = async ()=>{
+            const id = btn.getAttribute('data-id');
+            const row = btn.closest('tr');
+            const box = row && row.querySelector('.tg-op-alert');
+            const op = (window._tgOperators || []).find(o => String(o.id) === String(id));
+            if(!box || !op){
+              setMsg('tgOpMsg', 'Kullanıcı bulunamadı.', 'bad');
+              return;
+            }
+            const enabled = !!(box.querySelector('input.alert-enabled') && box.querySelector('input.alert-enabled').checked);
+            const perms = Object.assign({}, op.permissions || {});
+            perms.alert_messages = enabled;
+            try{
+              const t = await jpatchLocal('/api/settings/telegram/operators/' + encodeURIComponent(id), {
+                permissions: perms,
+                alert_prefs: collectAlertPrefsFrom(box),
+              });
+              applyTelegramForm(t);
+              setMsg('tgOpMsg', (op.name || id) + ' uyarı ayarı kaydedildi.', 'good');
+            }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
+          };
+        });
+      }
+
       function renderTelegramOperators(ops){
+        window._tgOperators = ops || [];
         const body = q('tgOpBody');
         if(!ops.length){
           body.innerHTML = '<tr><td colspan="6" class="muted">Henuz kullanici yok.</td></tr>';
@@ -2326,10 +2780,11 @@
               </div>
             </td>
             <td>${op.role === 'admin' ? 'Yönetici' : 'Kullanıcı'}</td>
-            <td>${escapeHtml(permsLabel(op))}</td>
+            <td>${escapeHtml(permsLabel(op))}${alertPrefsEditorHtml(op)}</td>
             <td><button type="button" class="btn-gray tg-op-del" data-id="${escapeHtml(op.id)}" data-name="${escapeHtml(op.name || '')}">Sil</button></td>
           </tr>`;
         }).join('');
+        bindAlertEditors(body);
         body.querySelectorAll('.tg-op-del').forEach(btn=>{
           btn.onclick = async ()=>{
             const id = btn.getAttribute('data-id');
@@ -2398,19 +2853,23 @@
           const payload = { name, role };
           if(telegram_user_id) payload.telegram_user_id = telegram_user_id;
           if(password) payload.password = password;
-          if(role === 'user'){
-            payload.permissions = {
-              panel_8000: q('tgPermPanel8000').checked,
-              panel_8080: q('tgPermPanel8080').checked,
-              bot_mold_create: q('tgPermMoldCreate').checked,
-              bot_mold_assign: q('tgPermMoldAssign').checked,
-            };
-          }
+          payload.permissions = {
+            panel_8000: role === 'user' ? q('tgPermPanel8000').checked : true,
+            panel_8080: role === 'user' ? q('tgPermPanel8080').checked : true,
+            bot_mold_create: role === 'user' ? q('tgPermMoldCreate').checked : true,
+            bot_mold_assign: role === 'user' ? q('tgPermMoldAssign').checked : true,
+            alert_messages: q('tgAlertEnabled').checked,
+          };
+          payload.alert_prefs = collectAlertPrefsFrom(q('tgAlertBox'));
           const t = await jpostLocalOp('/api/settings/telegram/operators', payload);
           q('tgOpName').value = '';
           q('tgOpId').value = '';
           q('tgOpPassword').value = '';
-          ['tgPermPanel8000','tgPermPanel8080','tgPermMoldCreate','tgPermMoldAssign'].forEach(id=>{ q(id).checked = false; });
+          ['tgPermPanel8000','tgPermPanel8080','tgPermMoldCreate','tgPermMoldAssign','tgAlertEnabled','tgAlertDetails'].forEach(id=>{ if(q(id)) q(id).checked = false; });
+          if(q('tgAlertStart')) q('tgAlertStart').value = '08:00';
+          if(q('tgAlertEnd')) q('tgAlertEnd').value = '18:00';
+          fillDayChecks(q('tgAlertDays'), [0,1,2,3,4,5,6]);
+          toggleAlertSub(q('tgAlertBox'));
           applyTelegramForm(t);
           setMsg('tgOpMsg', name + ' eklendi.', 'good');
         }catch(e){ setMsg('tgOpMsg', apiErrText(e), 'bad'); }
@@ -2457,6 +2916,38 @@
         return String(iso).replace('T',' ').replace('Z','').slice(0,19);
       }
 
+      function renderBrightnessBand(d){
+        const band = d && d.brightness_band;
+        if(!Array.isArray(band) || !band.length) return '';
+        const along = d.band_along != null ? d.band_along : band.length;
+        const thick = d.band_thickness != null ? d.band_thickness : (band[0] && band[0].length) || 0;
+        // Match .diag-band-cell: min-width 28px, padding 2px + ~10px font + borders ≈ 18px row
+        const cellW = 28;
+        const cellH = 18;
+        const rows = band.map(row => {
+          const cells = (Array.isArray(row) ? row : []).map(v => {
+            const n = Math.max(0, Math.min(255, Number(v) || 0));
+            const g = n;
+            const fg = n > 140 ? '#0f172a' : '#e2e8f0';
+            return `<span class="diag-band-cell" style="background:rgb(${g},${g},${g});color:${fg}" title="${n}">${n}</span>`;
+          }).join('');
+          return `<div class="diag-band-row">${cells}</div>`;
+        }).join('');
+        const b64 = d.brightness_preview_jpg_b64;
+        const preview = (typeof b64 === 'string' && b64.length > 32)
+          ? `<img class="diag-band-preview" alt="" width="${thick * cellW}" height="${along * cellH}"
+               style="width:${thick * cellW}px;height:${along * cellH}px"
+               src="data:image/jpeg;base64,${b64}" />`
+          : '';
+        return `<div class="diag-band-wrap">
+          <div class="muted" style="margin:6px 0 4px;">Parlaklık ızgarası (satır=çizgi boyunca ${along}, sütun=kalınlık ${thick})</div>
+          <div class="diag-band-side">
+            <div class="diag-band-grid">${rows}</div>
+            ${preview}
+          </div>
+        </div>`;
+      }
+
       function renderSampleRow(s){
         const d = s.detail || {};
         const mode = d.threshold_mode || '—';
@@ -2467,13 +2958,16 @@
         const lenMin = d.len_min != null ? d.len_min : '?';
         const lenMax = d.len_max != null ? d.len_max : '?';
         const len = d.segment_len != null ? `${d.segment_len} (${lenMin}-${lenMax})` : '—';
+        const reasons = Array.isArray(d.anomaly_reasons) ? d.anomaly_reasons.join(',') : (d.anomaly_reasons || '');
+        const reasonCell = reasons ? ` <span class="muted">[${escapeHtml(String(reasons))}]</span>` : '';
         return `<tr>
           <td>${escapeHtml(fmtDiagTs(s.created_at))}</td>
           <td>${escapeHtml(th + off)}</td>
-          <td>${escapeHtml(peakBg)}</td>
+          <td>${escapeHtml(peakBg)}${reasonCell}</td>
           <td>${escapeHtml(delta)}</td>
           <td>${escapeHtml(len)}</td>
-        </tr>`;
+        </tr>
+        <tr class="diag-band-tr"><td colspan="5">${renderBrightnessBand(d)}</td></tr>`;
       }
 
       async function openDiagAlarmDetail(alarmId){
@@ -2637,6 +3131,27 @@
         }
       };
       q('clearRoiBtn').onclick = ()=>{ roiPoly = null; axisPreferPoly = false; drawRoi(); };
+      bindHoldRepeat(q('nudgeIleriBtn'), ()=> nudgeLine('ileri'));
+      bindHoldRepeat(q('nudgeGeriBtn'), ()=> nudgeLine('geri'));
+      bindHoldRepeat(q('nudgeSolBtn'), ()=> nudgeLine('sol'));
+      bindHoldRepeat(q('nudgeSagBtn'), ()=> nudgeLine('sag'));
+      bindHoldRepeat(q('nudgeRotLeftBtn'), ()=> nudgeRotate(-1));
+      bindHoldRepeat(q('nudgeRotRightBtn'), ()=> nudgeRotate(1));
+      bindHoldRepeat(q('nudgeLenMinusBtn'), ()=> nudgeLineLength(-1));
+      bindHoldRepeat(q('nudgeLenPlusBtn'), ()=> nudgeLineLength(1));
+      if(q('nudgeLenInput')){
+        q('nudgeLenInput').addEventListener('change', ()=>{
+          const v = Number(q('nudgeLenInput').value);
+          if(Number.isFinite(v)) setLineLengthPx(v);
+        });
+        q('nudgeLenInput').addEventListener('keydown', (e)=>{
+          if(e.key === 'Enter'){
+            e.preventDefault();
+            const v = Number(q('nudgeLenInput').value);
+            if(Number.isFinite(v)) setLineLengthPx(v);
+          }
+        });
+      }
       q('swapAxisBtn').onclick = async ()=>{
         try{
           const id = Number(machineSelect.value);
@@ -2752,6 +3267,8 @@
           refreshLiveViewImage();
           updateLiveViewPanel();
         };
+        const snapBtn = q('liveInfoSnapBtn');
+        if(snapBtn) snapBtn.onclick = ()=> takeLiveInfoSnapshot();
         q('liveViewImg').onload = ()=>{
           liveViewImgBusy = false;
           const el = q('liveViewImg');

@@ -34,10 +34,15 @@ import app.db.session as db_session
 from app.services.cycle_daily_log import append_cycle_to_daily_csv
 from app.services.cycle_tracker import CycleTracker
 from app.services import fault_log
+from app.services.fault_codes import brightness_anomaly_reasons
 from app.services.process_log import ProcessLog
 from app.services.mold_matcher import handle_cycle_completion
 from app.services.playback_buffer import PlaybackBuffer
-from app.vision.line_pipeline import line_peak_position_gray
+from app.vision.line_pipeline import (
+    line_peak_position_gray,
+    pack_brightness_band,
+    sample_line_band_gray,
+)
 from app.vision.performance import PerformanceMonitor
 from app.vision.rtsp_worker import RtspWorker
 from app.vision.state_machine import ClampStateMachine, StateMachineConfig
@@ -70,6 +75,8 @@ class MachineRuntime:
     # Starts True so an alarm left open by a previous process run is closed on
     # the first found frame after startup (one cheap resolve() per machine).
     reflector_was_lost: bool = True
+    # E002: brightness anomaly active → resolve once when signal returns to normal.
+    signal_anomaly_was_active: bool = False
 
 # Idle poll when no new frame is available yet (camera ~7-10 FPS => 100-130 ms/frame).
 _IDLE_POLL_S = 0.012
@@ -509,27 +516,82 @@ class VisionOrchestrator(threading.Thread):
         reflector_lost = bool(not effective_found and not occlusion_hold)
         if reflector_lost:
             rt.reflector_was_lost = True
+            detail_e001: dict[str, Any] = {
+                "threshold_mode": (m.threshold_mode or "fixed").lower(),
+                "threshold_active": int(result.active_threshold),
+                "threshold_offset": int(m.threshold_offset or 0),
+                "peak": int(result.peak),
+                "background": int(result.background),
+                "delta": int(result.prominence),
+                "segment_len": int(result.segment_len),
+                "len_min": m.reflector_len_min,
+                "len_max": m.reflector_len_max,
+                "line_thickness": int(m.line_thickness or 7),
+            }
+            # Band/preview only when a DB sample will be written (hot-path safe).
+            if fault_log.would_write(machine_id=m.id, code="E001", now_mono=now_mono):
+                try:
+                    band = sample_line_band_gray(
+                        gray,
+                        m.axis_p0,
+                        m.axis_p1,
+                        thickness_px=int(m.line_thickness or 7),
+                    )
+                    detail_e001.update(pack_brightness_band(band))
+                except Exception:
+                    logger.exception("E001 brightness band capture failed mid=%s", m.id)
             fault_log.note_active(
                 machine_id=m.id,
                 machine_name=m.name,
                 code="E001",
                 now_mono=now_mono,
-                detail={
-                    "threshold_mode": (m.threshold_mode or "fixed").lower(),
-                    "threshold_active": int(result.active_threshold),
-                    "threshold_offset": int(m.threshold_offset or 0),
-                    "peak": int(result.peak),
-                    "background": int(result.background),
-                    "delta": int(result.prominence),
-                    "segment_len": int(result.segment_len),
-                    "len_min": m.reflector_len_min,
-                    "len_max": m.reflector_len_max,
-                    "line_thickness": int(m.line_thickness or 7),
-                },
+                detail=detail_e001,
             )
         elif effective_found and rt.reflector_was_lost:
             rt.reflector_was_lost = False
             fault_log.resolve(machine_id=m.id, code="E001")
+
+        # E002: peak/bg close / both high / both low. Integer checks every frame;
+        # brightness band (remap) only when note_active would actually write.
+        anomaly_reasons = brightness_anomaly_reasons(result.peak, result.background)
+        if anomaly_reasons:
+            rt.signal_anomaly_was_active = True
+            detail_e002: dict[str, Any] = {
+                "threshold_mode": (m.threshold_mode or "fixed").lower(),
+                "threshold_active": int(result.active_threshold),
+                "threshold_offset": int(m.threshold_offset or 0),
+                "peak": int(result.peak),
+                "background": int(result.background),
+                "delta": int(result.prominence),
+                "segment_len": int(result.segment_len),
+                "len_min": m.reflector_len_min,
+                "len_max": m.reflector_len_max,
+                "line_thickness": int(m.line_thickness or 7),
+                "anomaly_reasons": anomaly_reasons,
+                "found": bool(result.found),
+                "effective_found": bool(effective_found),
+            }
+            if fault_log.would_write(machine_id=m.id, code="E002", now_mono=now_mono):
+                try:
+                    band = sample_line_band_gray(
+                        gray,
+                        m.axis_p0,
+                        m.axis_p1,
+                        thickness_px=int(m.line_thickness or 7),
+                    )
+                    detail_e002.update(pack_brightness_band(band))
+                except Exception:
+                    logger.exception("E002 brightness band capture failed mid=%s", m.id)
+            fault_log.note_active(
+                machine_id=m.id,
+                machine_name=m.name,
+                code="E002",
+                now_mono=now_mono,
+                detail=detail_e002,
+            )
+        elif rt.signal_anomaly_was_active:
+            rt.signal_anomaly_was_active = False
+            fault_log.resolve(machine_id=m.id, code="E002")
 
         now_ms = time.monotonic() * 1000.0
         t_state = time.monotonic()
@@ -711,6 +773,64 @@ class VisionOrchestrator(threading.Thread):
             "dbg_cycle_emit_count": int(rt.dbg_cycle_emit_count),
         }
         self._note_stage("snap", time.monotonic() - t_snap)
+
+    def probe_info_snapshot(self, machine_id: int) -> dict[str, Any]:
+        """On-demand probe detail for admin (matrix + preview). Not on the vision hot path.
+
+        Reads the latest gray frame once, runs line_peak + band pack. Safe to call
+        from the API thread; does not touch fault_log.
+        """
+        mid = int(machine_id)
+        m = next((x for x in self._machines_cache if int(x.id) == mid), None)
+        if m is None:
+            raise KeyError(f"machine {mid} not in vision cache")
+        if not m.enabled:
+            raise ValueError("machine disabled")
+        w = self.workers.get(int(m.camera_id))
+        if w is None:
+            raise ValueError("camera worker not running")
+        gray, frame_mono, age_ms = w.read_latest_gray()
+        if gray is None:
+            raise ValueError("no frame")
+        result = line_peak_position_gray(
+            gray=gray,
+            axis_p0_json=m.axis_p0,
+            axis_p1_json=m.axis_p1,
+            thickness_px=int(m.line_thickness or 7),
+            threshold_mode=m.threshold_mode or "fixed",
+            prominence_min_fixed=int(m.threshold_min or 0),
+            prominence_offset=int(m.threshold_offset or 0),
+            reflector_len_min=m.reflector_len_min,
+            reflector_len_max=m.reflector_len_max,
+        )
+        detail: dict[str, Any] = {
+            "machine_id": mid,
+            "machine_name": m.name,
+            "camera_id": int(m.camera_id),
+            "frame_mono": float(frame_mono),
+            "frame_age_ms": float(age_ms),
+            "threshold_mode": (m.threshold_mode or "fixed").lower(),
+            "threshold_active": int(result.active_threshold),
+            "threshold_offset": int(m.threshold_offset or 0),
+            "peak": int(result.peak),
+            "background": int(result.background),
+            "delta": int(result.prominence),
+            "segment_len": int(result.segment_len),
+            "len_min": m.reflector_len_min,
+            "len_max": m.reflector_len_max,
+            "line_thickness": int(m.line_thickness or 7),
+            "found": bool(result.found),
+            "position_01": result.position_01,
+            "anomaly_reasons": brightness_anomaly_reasons(result.peak, result.background),
+        }
+        band = sample_line_band_gray(
+            gray,
+            m.axis_p0,
+            m.axis_p1,
+            thickness_px=int(m.line_thickness or 7),
+        )
+        detail.update(pack_brightness_band(band))
+        return detail
 
     def _publish_snapshot(self) -> None:
         cache = getattr(self, "_machine_snapshot_cache", {})

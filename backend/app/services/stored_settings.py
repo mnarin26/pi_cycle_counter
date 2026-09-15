@@ -65,14 +65,72 @@ def mask_token(token: str | None) -> dict[str, Any]:
     return {"token_set": True, "token_hint": hint}
 
 
-PERMISSION_KEYS = ("panel_8000", "panel_8080", "bot_mold_create", "bot_mold_assign")
+PANEL_PERMISSION_KEYS = ("panel_8000", "panel_8080", "bot_mold_create", "bot_mold_assign")
+ALERT_PERMISSION_KEY = "alert_messages"
+PERMISSION_KEYS = PANEL_PERMISSION_KEYS + (ALERT_PERMISSION_KEY,)
+
+DEFAULT_ALERT_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]  # Mon–Sun
+DEFAULT_ALERT_TIME_START = "08:00"
+DEFAULT_ALERT_TIME_END = "18:00"
 
 
 def _coerce_perms(role: str, raw_perms: Any) -> dict[str, bool]:
-    if role == "admin":
-        return {k: True for k in PERMISSION_KEYS}
+    """Panel/bot ticks are implied for admin. Uyarı mesajları is opt-in for every role."""
     perms = raw_perms if isinstance(raw_perms, dict) else {}
-    return {k: bool(perms.get(k, False)) for k in PERMISSION_KEYS}
+    out: dict[str, bool] = {}
+    for k in PANEL_PERMISSION_KEYS:
+        out[k] = True if role == "admin" else bool(perms.get(k, False))
+    out[ALERT_PERMISSION_KEY] = bool(perms.get(ALERT_PERMISSION_KEY, False))
+    return out
+
+
+def _normalize_hhmm(value: Any, default: str) -> str:
+    s = str(value or "").strip().replace(".", ":")
+    if not s:
+        return default
+    parts = s.split(":")
+    if len(parts) < 2:
+        return default
+    try:
+        h = int(parts[0])
+        m = int(parts[1])
+    except (TypeError, ValueError):
+        return default
+    if h == 24 and m == 0:
+        return "24:00"
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return default
+    return f"{h:02d}:{m:02d}"
+
+
+def _coerce_weekdays(raw: Any, *, missing_default: list[int]) -> list[int]:
+    if raw is None:
+        return list(missing_default)
+    if not isinstance(raw, list):
+        return list(missing_default)
+    out: list[int] = []
+    for x in raw:
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= n <= 6 and n not in out:
+            out.append(n)
+    return sorted(out)
+
+
+def coerce_alert_prefs(raw: Any) -> dict[str, Any]:
+    src = raw if isinstance(raw, dict) else {}
+    weekdays_missing = "weekdays" not in src
+    return {
+        "include_details": bool(src.get("include_details", False)),
+        "time_start": _normalize_hhmm(src.get("time_start"), DEFAULT_ALERT_TIME_START),
+        "time_end": _normalize_hhmm(src.get("time_end"), DEFAULT_ALERT_TIME_END),
+        "weekdays": _coerce_weekdays(
+            src.get("weekdays"),
+            missing_default=DEFAULT_ALERT_WEEKDAYS if weekdays_missing else [],
+        ),
+    }
 
 
 def _migrate_operator(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -107,6 +165,7 @@ def _migrate_operator(item: dict[str, Any]) -> dict[str, Any] | None:
         "name": name,
         "role": role,
         "permissions": _coerce_perms(role, raw_perms),
+        "alert_prefs": coerce_alert_prefs(item.get("alert_prefs")),
         "password_hash": pw_hash,
     }
 
@@ -201,6 +260,7 @@ def operator_public_view(op: dict[str, Any]) -> dict[str, Any]:
         "name": op.get("name") or "",
         "role": op.get("role") or "user",
         "permissions": op.get("permissions") or {},
+        "alert_prefs": coerce_alert_prefs(op.get("alert_prefs")),
         "telegram_user_id": tg,
         "has_telegram": bool(tg),
         "has_password": has_password,
@@ -224,6 +284,7 @@ def normalize_operators(raw: dict[str, Any]) -> list[dict[str, Any]]:
                         "name": "",
                         "role": "user",
                         "permissions": _coerce_perms("user", {"bot_mold_assign": True}),
+                        "alert_prefs": coerce_alert_prefs(None),
                         "password_hash": "",
                     }
                 )
@@ -282,6 +343,7 @@ def add_operator(
     telegram_user_id: str | None = None,
     role: str = "user",
     permissions: dict[str, Any] | None = None,
+    alert_prefs: dict[str, Any] | None = None,
     password: str | None = None,
     level: int | None = None,
 ) -> dict[str, Any]:
@@ -315,6 +377,7 @@ def add_operator(
             "name": nm,
             "role": role,
             "permissions": _coerce_perms(role, permissions),
+            "alert_prefs": coerce_alert_prefs(alert_prefs),
             "password_hash": pw_hash,
         }
     )
@@ -329,6 +392,7 @@ def update_operator(
     name: str | None = None,
     role: str | None = None,
     permissions: dict[str, Any] | None = None,
+    alert_prefs: dict[str, Any] | None = None,
     password: str | None = None,
     new_telegram_user_id: str | None = None,
 ) -> dict[str, Any]:
@@ -354,6 +418,8 @@ def update_operator(
         found["permissions"] = _coerce_perms(
             found["role"], permissions if permissions is not None else found.get("permissions")
         )
+    if alert_prefs is not None:
+        found["alert_prefs"] = coerce_alert_prefs(alert_prefs)
     if new_telegram_user_id is not None:
         tg = _normalize_telegram_id(new_telegram_user_id)
         if tg and _telegram_taken(ops, tg, except_id=uid):

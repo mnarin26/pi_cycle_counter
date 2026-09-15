@@ -30,6 +30,7 @@ Detection is done in two stages:
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from dataclasses import dataclass
@@ -202,6 +203,68 @@ def sample_line_profile_gray(
     profile = sampled.max(axis=0).astype(np.uint8)
     # cx / cy are shared read-only cache entries (writeable=False); callers only read them.
     return profile, cx, cy
+
+
+def sample_line_band_gray(
+    gray: np.ndarray,
+    axis_p0_json: str,
+    axis_p1_json: str,
+    thickness_px: int = 7,
+    num_samples: int | None = None,
+) -> np.ndarray | None:
+    """Raw perpendicular×along brightness band (uint8). Uses the same geometry cache.
+
+    Shape: (n_offsets, n_along). Intended for rare diagnosis snapshots only —
+    do not call on every vision frame.
+    """
+    h, w = gray.shape[:2]
+    p0n = _parse_xy(axis_p0_json)
+    p1n = _parse_xy(axis_p1_json)
+    p0 = (p0n[0] * w, p0n[1] * h)
+    p1 = (p1n[0] * w, p1n[1] * h)
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    if float(np.hypot(dx, dy)) < 2.0:
+        return None
+    map_x, map_y, _cx, _cy = _get_probe_geometry(
+        p0, p1, max(1, int(thickness_px)), num_samples, w, h
+    )
+    sampled = cv2.remap(
+        gray, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+    )
+    return sampled.astype(np.uint8)
+
+
+def pack_brightness_band(band: np.ndarray | None, *, preview_scale: int = 8) -> dict:
+    """JSON-friendly band: rows = along line, cols = thickness (user NxT view).
+
+    Also packs a nearest-neighbor upscaled JPEG of the same pixels (no overlays /
+    no yellow line) for diagnosis UI — only call on rare sample-write path.
+    """
+    if band is None or getattr(band, "size", 0) == 0:
+        return {}
+    # remap layout is (thickness_offsets, along); transpose for display
+    along_major = np.ascontiguousarray(band.T)
+    out: dict = {
+        "brightness_band": along_major.tolist(),
+        "band_along": int(along_major.shape[0]),
+        "band_thickness": int(along_major.shape[1]),
+    }
+    try:
+        scale = max(1, int(preview_scale or 1))
+        vis = along_major
+        if scale > 1:
+            vis = cv2.resize(
+                along_major,
+                (along_major.shape[1] * scale, along_major.shape[0] * scale),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        ok, buf = cv2.imencode(".jpg", vis, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if ok:
+            out["brightness_preview_jpg_b64"] = base64.b64encode(buf.tobytes()).decode("ascii")
+    except Exception:
+        # Preview is optional; numbers still useful.
+        pass
+    return out
 
 
 def sample_line_profile(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -331,3 +331,22 @@ def replay_mold_matching(
     except ValueError as e:
         raise HTTPException(400, detail=str(e)) from e
     return result
+
+
+@router.get("/{machine_id}/probe-info")
+def machine_probe_info(machine_id: int, request: Request, db: Session = Depends(get_db)):
+    """On-demand line-probe matrix + values (admin info snapshot). Not per-frame."""
+    m = db.get(Machine, machine_id)
+    if not m:
+        raise HTTPException(404, detail="machine not found")
+    orch = getattr(request.app.state, "vision", None)
+    if orch is None:
+        raise HTTPException(503, detail="vision not ready")
+    try:
+        return orch.probe_info_snapshot(int(machine_id))
+    except KeyError:
+        raise HTTPException(404, detail="machine not in vision cache") from None
+    except ValueError as e:
+        raise HTTPException(503, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(500, detail=f"probe-info failed: {e}") from e
