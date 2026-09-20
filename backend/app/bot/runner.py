@@ -649,6 +649,7 @@ def run_forever() -> None:
 
     start_alert_thread(send_message)
     logger.info("Telegram bot baslatiliyor...")
+    webhook_cleared_for: str | None = None
     while True:
         db = db_session.SessionLocal()
         try:
@@ -662,6 +663,16 @@ def run_forever() -> None:
                 continue
         finally:
             db.close()
+
+        # Long-polling (getUpdates) conflicts with an active webhook → 409.
+        # Clear once per token so an old webhook (e.g. external host) cannot mute the bot.
+        if webhook_cleared_for != token:
+            try:
+                _api(token, "deleteWebhook", drop_pending_updates=False)
+                logger.info("Telegram webhook temizlendi (getUpdates icin)")
+            except Exception:
+                logger.exception("deleteWebhook basarisiz")
+            webhook_cleared_for = token
 
         try:
             data = _api(token, "getUpdates", offset=_runtime.offset, timeout=30)
