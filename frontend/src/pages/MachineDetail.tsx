@@ -79,9 +79,10 @@ type DowntimeRow = {
   id: number;
   machine_id: number;
   start_at: string;
-  end_at: string;
+  end_at: string | null;
   note: string;
   created_by?: string | null;
+  open?: boolean;
 };
 
 type IntervalWindow = { start: string; end: string };
@@ -437,12 +438,8 @@ export function MachineDetailPage() {
 
   const submitDowntime = useCallback(async () => {
     if (!machineId) return;
-    if (!dtStart || !dtEnd) {
-      setDtErr("Başlangıç ve bitiş girin");
-      return;
-    }
-    if (!dtNote.trim()) {
-      setDtErr("Açıklama zorunlu");
+    if (!dtStart) {
+      setDtErr("Başlangıç girin");
       return;
     }
     setDtBusy(true);
@@ -450,7 +447,7 @@ export function MachineDetailPage() {
     try {
       await apiPost(`/api/machines/${machineId}/downtimes`, {
         start_at: datetimeLocalInputToUtcIso(dtStart),
-        end_at: datetimeLocalInputToUtcIso(dtEnd),
+        end_at: dtEnd ? datetimeLocalInputToUtcIso(dtEnd) : null,
         note: dtNote.trim(),
       });
       setDtStart("");
@@ -463,6 +460,19 @@ export function MachineDetailPage() {
       setDtBusy(false);
     }
   }, [machineId, dtStart, dtEnd, dtNote, loadDowntimes, loadDash]);
+
+  const closeDowntime = useCallback(
+    async (id: number) => {
+      if (!machineId) return;
+      try {
+        await apiPost(`/api/machines/${machineId}/downtimes/${id}/close`, {});
+        await Promise.all([loadDowntimes(), loadDash()]);
+      } catch (e) {
+        setDtErr(String(e));
+      }
+    },
+    [machineId, loadDowntimes, loadDash],
+  );
 
   const removeDowntime = useCallback(
     async (id: number) => {
@@ -1084,9 +1094,8 @@ export function MachineDetailPage() {
       <div className="rounded border border-slate-700 bg-panel2 p-3">
         <h3 className="mb-1 text-sm font-semibold">Duruş Girişi</h3>
         <p className="mb-3 text-xs text-slate-400">
-          Girilen aralık, makine çalışmış olsa bile duruş sayılır: o aralıktaki döngüler
-          verimliliğe eklenmez ve süre affedilmez. Mola ve kalıp değişimine denk gelen kısım
-          önceliklidir.
+          Bitiş boş bırakılırsa makine bitiş girilene kadar duruşta sayılır. Açıklama isteğe bağlıdır;
+          önemli olan makinenin duruyor olmasıdır. Girilen aralık verimliliğe yansır.
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <label className="text-sm">
@@ -1099,7 +1108,7 @@ export function MachineDetailPage() {
             />
           </label>
           <label className="text-sm">
-            <span className="mb-1 block text-xs text-slate-400">Bitiş</span>
+            <span className="mb-1 block text-xs text-slate-400">Bitiş (opsiyonel)</span>
             <input
               type="datetime-local"
               className="rounded border border-slate-600 bg-slate-900 px-2 py-2"
@@ -1108,7 +1117,7 @@ export function MachineDetailPage() {
             />
           </label>
           <label className="text-sm flex-1 min-w-[200px]">
-            <span className="mb-1 block text-xs text-slate-400">Açıklama</span>
+            <span className="mb-1 block text-xs text-slate-400">Açıklama (opsiyonel)</span>
             <input
               type="text"
               maxLength={256}
@@ -1140,27 +1149,43 @@ export function MachineDetailPage() {
               </tr>
             </thead>
             <tbody>
-              {downtimeList.map((d) => (
-                <tr key={d.id} className="border-t border-slate-800">
-                  <td className="py-1 pr-3 whitespace-nowrap">
-                    {new Date(parseApiTime(d.start_at)).toLocaleString("tr-TR")}
-                  </td>
-                  <td className="py-1 pr-3 whitespace-nowrap">
-                    {new Date(parseApiTime(d.end_at)).toLocaleString("tr-TR")}
-                  </td>
-                  <td className="py-1 pr-3">{d.note}</td>
-                  <td className="py-1 pr-3 text-slate-500">{d.created_by || "—"}</td>
-                  <td className="py-1 pr-3 text-right">
-                    <button
-                      type="button"
-                      className="rounded bg-slate-700 px-2 py-1 text-xs hover:bg-slate-600"
-                      onClick={() => void removeDowntime(d.id)}
-                    >
-                      Sil
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {downtimeList.map((d) => {
+                const isOpen = d.open || !d.end_at;
+                return (
+                  <tr key={d.id} className="border-t border-slate-800">
+                    <td className="py-1 pr-3 whitespace-nowrap">
+                      {new Date(parseApiTime(d.start_at)).toLocaleString("tr-TR")}
+                    </td>
+                    <td className="py-1 pr-3 whitespace-nowrap">
+                      {isOpen ? (
+                        <span className="text-amber-300">Devam ediyor</span>
+                      ) : (
+                        new Date(parseApiTime(d.end_at!)).toLocaleString("tr-TR")
+                      )}
+                    </td>
+                    <td className="py-1 pr-3">{d.note || "—"}</td>
+                    <td className="py-1 pr-3 text-slate-500">{d.created_by || "—"}</td>
+                    <td className="py-1 pr-3 text-right space-x-1">
+                      {isOpen && (
+                        <button
+                          type="button"
+                          className="rounded bg-emerald-800 px-2 py-1 text-xs hover:bg-emerald-700"
+                          onClick={() => void closeDowntime(d.id)}
+                        >
+                          Bitir
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="rounded bg-slate-700 px-2 py-1 text-xs hover:bg-slate-600"
+                        onClick={() => void removeDowntime(d.id)}
+                      >
+                        Sil
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
               {downtimeList.length === 0 && (
                 <tr>
                   <td className="py-2 text-slate-500" colSpan={5}>

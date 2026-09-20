@@ -227,6 +227,9 @@ class PlanRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     note: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # active | stale | superseded
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    stale_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -288,14 +291,14 @@ class Event(Base):
 
 
 class MachineDowntime(Base):
-    """Operator-entered downtime interval; efficiency treats it as stopped even if cycles ran."""
+    """Operator-entered downtime; end_at NULL = still down until closed."""
 
     __tablename__ = "machine_downtimes"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"), nullable=False)
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     note: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

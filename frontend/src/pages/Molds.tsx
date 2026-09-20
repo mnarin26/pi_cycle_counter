@@ -693,11 +693,15 @@ export function MoldsPage() {
       const [molds, prods, machs] = await Promise.all([
         apiGet<Mold[]>("/api/molds"),
         apiGet<Product[]>("/api/products"),
-        apiGet<Array<{ id: number; name: string }>>("/api/machines"),
+        apiGet<Array<{ id: number; name: string; enabled?: boolean }>>("/api/machines"),
       ]);
       setRows(molds);
       setProducts(prods);
-      setMachines(machs.map((m) => ({ id: m.id, name: m.name })));
+      setMachines(
+        machs
+          .filter((m) => m.enabled !== false)
+          .map((m) => ({ id: m.id, name: m.name })),
+      );
       setErr(null);
     } catch (e) {
       setErr(String(e));

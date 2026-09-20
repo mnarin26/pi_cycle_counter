@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Event, MachineFault, MoldRun, PlanRun, PlanSlot
+from app.db.models import Event, MachineDowntime, MoldRun, PlanRun, PlanSlot
 from app.db.models import json_dumps  # noqa: F401 — keep import style consistent
 
 
@@ -16,11 +16,11 @@ def _aware(dt: datetime | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _fault_covers(db: Session, machine_id: int, at: datetime) -> bool:
+def _downtime_covers(db: Session, machine_id: int, at: datetime) -> bool:
     at = _aware(at)  # type: ignore[assignment]
     rows = (
-        db.query(MachineFault)
-        .filter(MachineFault.machine_id == int(machine_id), MachineFault.start_at <= at)
+        db.query(MachineDowntime)
+        .filter(MachineDowntime.machine_id == int(machine_id), MachineDowntime.start_at <= at)
         .all()
     )
     for f in rows:
@@ -87,7 +87,7 @@ def compare_plan(db: Session, plan_run_id: int) -> dict:
         )
         suggested_faulted = False
         if slot.machine_id and slot.suggested_start:
-            suggested_faulted = _fault_covers(db, int(slot.machine_id), slot.suggested_start)
+            suggested_faulted = _downtime_covers(db, int(slot.machine_id), slot.suggested_start)
 
         # Estimated earlier finish if suggested machine had been used
         earlier_h = None
@@ -107,7 +107,7 @@ def compare_plan(db: Session, plan_run_id: int) -> dict:
 
         note = None
         if suggested_faulted and not same_machine:
-            note = "Önerilen makine arızalıydı; sapma kayıp sayılmaz"
+            note = "Önerilen makine duruştaydı; sapma kayıp sayılmaz"
         elif same_machine and (delay_h or 0) <= 0.25:
             note = "Öneriye yakın uygulandı"
         elif not same_machine and actual_machine:

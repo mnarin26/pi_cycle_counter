@@ -297,16 +297,28 @@ def _changeover_windows(
 def _downtime_windows(
     db: Session, machine_id: int, start: datetime, end: datetime
 ) -> list[Interval]:
+    """Open downtimes (end_at NULL) count as still down through `end` (or now)."""
+    from sqlalchemy import or_
+
+    now = datetime.now(timezone.utc)
+    effective_cap = end if end <= now else now
     rows = (
         db.query(MachineDowntime.start_at, MachineDowntime.end_at)
         .filter(
             MachineDowntime.machine_id == machine_id,
-            MachineDowntime.end_at > start,
             MachineDowntime.start_at < end,
+            or_(MachineDowntime.end_at.is_(None), MachineDowntime.end_at > start),
         )
         .all()
     )
-    return [(_as_utc(s), _as_utc(x)) for s, x in rows]
+    out: list[Interval] = []
+    for s, x in rows:
+        ds = _as_utc(s)
+        de = _as_utc(x) if x is not None else effective_cap
+        if de <= ds:
+            continue
+        out.append((ds, de))
+    return out
 
 
 def _block(

@@ -15,7 +15,8 @@ from app.db.models import (
     PlanSlot,
 )
 from app.services.planning import effective_cavity
-from app.services.planning.engine import mold_machine_stats, open_fault_machine_ids
+from app.services.planning.engine import mold_machine_stats, open_downtime_machine_ids
+from app.services.planning.plan_state import supersede_open_plans
 from app.services.planning.stock import current_stock
 
 
@@ -38,16 +39,17 @@ def build_plan(db: Session, *, created_by: str | None = None, note: str | None =
     stats = {
         (s["mold_id"], s["machine_id"]): s for s in mold_machine_stats(db, days=45)
     }
-    faulted = open_fault_machine_ids(db)
+    down = open_downtime_machine_ids(db)
     machines = {
         m.id: m
         for m in db.query(Machine).filter(Machine.enabled.is_(True)).all()
-        if m.id not in faulted
+        if m.id not in down
     }
     # machine free-at timeline for packing slots
     free_at: dict[int, datetime] = {mid: now for mid in machines}
 
-    plan = PlanRun(created_by=created_by, note=note)
+    supersede_open_plans(db)
+    plan = PlanRun(created_by=created_by, note=note, status="active", stale_reason=None)
     db.add(plan)
     db.flush()
 
@@ -133,7 +135,7 @@ def build_plan(db: Session, *, created_by: str | None = None, note: str | None =
                     order_line_id=line.id,
                     product_id=line.product_id,
                     qty_planned=0,
-                    reason="Uygun makine yok (arıza veya uyumluluk)",
+                    reason="Uygun makine yok (duruş veya uyumluluk)",
                 )
             )
             continue

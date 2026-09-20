@@ -65,7 +65,13 @@ def mask_token(token: str | None) -> dict[str, Any]:
     return {"token_set": True, "token_hint": hint}
 
 
-PANEL_PERMISSION_KEYS = ("panel_8000", "panel_8080", "bot_mold_create", "bot_mold_assign")
+PANEL_PERMISSION_KEYS = (
+    "panel_8000",
+    "panel_8080",
+    "bot_mold_create",
+    "bot_mold_assign",
+    "planning",
+)
 ALERT_PERMISSION_KEY = "alert_messages"
 PERMISSION_KEYS = PANEL_PERMISSION_KEYS + (ALERT_PERMISSION_KEY,)
 

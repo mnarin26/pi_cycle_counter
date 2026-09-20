@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useLiveSnapshot } from "../hooks/useLiveSnapshot";
 import { useAuth } from "../hooks/useAuth";
 import { apiPost } from "../api/client";
 
-const nav = [
+const navAll = [
   ["/", "Pano"],
   ["/tv", "Bilgi Ekranı"],
   ["/molds", "Kalıplar"],
@@ -26,6 +26,11 @@ export function Layout() {
   const [pwMsg, setPwMsg] = useState<string | null>(null);
   const [pwBusy, setPwBusy] = useState(false);
   const canChangePassword = Boolean(user) && !user?.is_super;
+  const canPlanning = Boolean(user?.is_super || user?.permissions?.planning);
+  const nav = useMemo(
+    () => navAll.filter(([to]) => to !== "/planning" || canPlanning),
+    [canPlanning],
+  );
 
   async function savePassword() {
     setPwMsg(null);

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -32,9 +32,10 @@ class DowntimeOut(BaseModel):
     id: int
     machine_id: int
     start_at: datetime
-    end_at: datetime
+    end_at: datetime | None = None
     note: str
     created_by: str | None = None
+    open: bool = False
 
     class Config:
         from_attributes = True
@@ -42,8 +43,24 @@ class DowntimeOut(BaseModel):
 
 class DowntimeCreate(BaseModel):
     start_at: datetime
-    end_at: datetime
-    note: str = Field(..., min_length=1, max_length=256)
+    end_at: datetime | None = None
+    note: str = Field(default="", max_length=256)
+
+
+class DowntimeClose(BaseModel):
+    end_at: datetime | None = None
+
+
+def _downtime_out(dt: MachineDowntime) -> DowntimeOut:
+    return DowntimeOut(
+        id=dt.id,
+        machine_id=dt.machine_id,
+        start_at=dt.start_at,
+        end_at=dt.end_at,
+        note=dt.note or "",
+        created_by=dt.created_by,
+        open=dt.end_at is None,
+    )
 
 
 class MachineOut(BaseModel):
@@ -237,14 +254,17 @@ def list_downtimes(
     to_ts: datetime | None = Query(None, alias="to"),
     db: Session = Depends(get_db),
 ):
+    from sqlalchemy import or_
+
     if db.get(Machine, machine_id) is None:
         raise HTTPException(404)
     q = db.query(MachineDowntime).filter(MachineDowntime.machine_id == machine_id)
     if from_ts is not None:
-        q = q.filter(MachineDowntime.end_at > _as_utc(from_ts))
+        fs = _as_utc(from_ts)
+        q = q.filter(or_(MachineDowntime.end_at.is_(None), MachineDowntime.end_at > fs))
     if to_ts is not None:
         q = q.filter(MachineDowntime.start_at < _as_utc(to_ts))
-    return q.order_by(MachineDowntime.start_at.desc()).limit(500).all()
+    return [_downtime_out(r) for r in q.order_by(MachineDowntime.start_at.desc()).limit(500).all()]
 
 
 @router.post("/{machine_id}/downtimes", response_model=DowntimeOut)
@@ -257,16 +277,20 @@ def create_downtime(
     if db.get(Machine, machine_id) is None:
         raise HTTPException(404)
     start = _as_utc(body.start_at)
-    end = _as_utc(body.end_at)
-    if end <= start:
-        raise HTTPException(400, detail="Duruş bitişi başlangıçtan sonra olmalı")
-    if end > datetime.now(timezone.utc):
-        raise HTTPException(400, detail="Duruş aralığı gelecekte olamaz")
+    now = datetime.now(timezone.utc)
+    end = _as_utc(body.end_at) if body.end_at is not None else None
+    if end is not None:
+        if end <= start:
+            raise HTTPException(400, detail="Duruş bitişi başlangıçtan sonra olmalı")
+        if end > now + timedelta(minutes=1):
+            raise HTTPException(400, detail="Duruş aralığı gelecekte olamaz")
+    if start > now + timedelta(minutes=1):
+        raise HTTPException(400, detail="Duruş başlangıcı gelecekte olamaz")
     dt = MachineDowntime(
         machine_id=machine_id,
         start_at=start,
         end_at=end,
-        note=body.note.strip(),
+        note=(body.note or "").strip(),
         created_by=user.display_name,
     )
     db.add(dt)
@@ -279,9 +303,43 @@ def create_downtime(
         telegram_user_id=user.telegram_user_id,
         action="machine.downtime.create",
         resource=f"machine:{machine_id}",
-        detail={"start": start.isoformat(), "end": end.isoformat(), "note": dt.note},
+        detail={
+            "start": start.isoformat(),
+            "end": end.isoformat() if end else None,
+            "note": dt.note,
+            "open": end is None,
+        },
     )
-    return dt
+    return _downtime_out(dt)
+
+
+@router.post("/{machine_id}/downtimes/{downtime_id}/close", response_model=DowntimeOut)
+def close_downtime(
+    machine_id: int,
+    downtime_id: int,
+    body: DowntimeClose,
+    db: Session = Depends(get_db),
+    user=Depends(require_panel_8000),
+):
+    dt = db.get(MachineDowntime, downtime_id)
+    if not dt or dt.machine_id != machine_id:
+        raise HTTPException(404)
+    end = _as_utc(body.end_at) if body.end_at is not None else datetime.now(timezone.utc)
+    if end <= _as_utc(dt.start_at):
+        raise HTTPException(400, detail="Duruş bitişi başlangıçtan sonra olmalı")
+    dt.end_at = end
+    db.commit()
+    db.refresh(dt)
+    log_action(
+        db,
+        actor_type=user.actor_type,
+        actor_name=user.display_name,
+        telegram_user_id=user.telegram_user_id,
+        action="machine.downtime.close",
+        resource=f"machine:{machine_id}",
+        detail={"downtime_id": downtime_id, "end": end.isoformat()},
+    )
+    return _downtime_out(dt)
 
 
 @router.delete("/{machine_id}/downtimes/{downtime_id}")

@@ -147,6 +147,7 @@
           <button type="button" class="nav-item" data-panel="panel-tv">6. TV ve vardiya</button>
           <button type="button" class="nav-item" data-panel="panel-audit">7. Islem kayitlari</button>
           <button type="button" class="nav-item" data-panel="panel-diagnosis">8. Diagnosis</button>
+          <button type="button" class="nav-item" data-panel="panel-excel" id="navPlanlama" style="display:none;">9. Planlama</button>
         </nav>
         <main class="admin-main">
 
@@ -566,6 +567,7 @@
               <label class="chk"><input type="checkbox" id="tgPermPanel8080" /> 8080 paneli</label>
               <label class="chk"><input type="checkbox" id="tgPermMoldCreate" /> Kalıp üretme</label>
               <label class="chk"><input type="checkbox" id="tgPermMoldAssign" /> Kalıp atama</label>
+              <label class="chk"><input type="checkbox" id="tgPermPlanning" /> Planlama</label>
             </div>
           </div>
           <div class="col-12">
@@ -804,6 +806,96 @@
       </div>
       </section>
 
+      <section id="panel-excel" class="admin-panel">
+      <div class="card">
+        <h3>Planlama</h3>
+        <h4 style="margin:12px 0 8px;font-size:14px;color:#93c5fd;">Siparis Excel</h4>
+        <div class="row">
+          <div class="col-4">
+            <label>Yerlesim</label>
+            <select id="exOrdersLayout">
+              <option value="matrix">Matris</option>
+              <option value="table">Klasik kolonlar</option>
+            </select>
+          </div>
+          <div class="col-3" id="exOrdersAlongWrap">
+            <label>Terminler</label>
+            <select id="exOrdersAlong">
+              <option value="row">Yatay</option>
+              <option value="column">Dikey</option>
+            </select>
+          </div>
+          <div class="col-2">
+            <label>Urun kolonu</label>
+            <input id="exOrdersProductCol" type="text" maxlength="3" placeholder="B" />
+          </div>
+          <div class="col-2">
+            <label>Veri baslangic satiri</label>
+            <input id="exOrdersDataStart" type="number" min="1" max="999" />
+          </div>
+          <div class="col-2" id="exOrdersCustomerWrap">
+            <label>Musteri kolonu</label>
+            <input id="exOrdersCustomerCol" type="text" maxlength="3" placeholder="C" />
+          </div>
+        </div>
+        <div class="row" id="exOrdersRowOpts">
+          <div class="col-3">
+            <label>Tarih satiri</label>
+            <input id="exOrdersDateRow" type="number" min="1" max="999" />
+          </div>
+          <div class="col-3">
+            <label>Tarih baslangic kolonu</label>
+            <input id="exOrdersDateStartCol" type="text" maxlength="3" placeholder="I" />
+          </div>
+        </div>
+        <div class="row" id="exOrdersColOpts" style="display:none;">
+          <div class="col-3">
+            <label>Tarih kolonu</label>
+            <input id="exOrdersDateCol" type="text" maxlength="3" placeholder="I" />
+          </div>
+          <div class="col-3">
+            <label>Tarih baslangic satiri</label>
+            <input id="exOrdersDateStartRow" type="number" min="1" max="999" />
+          </div>
+          <div class="col-3">
+            <label>Urun satiri</label>
+            <input id="exOrdersProductRow" type="number" min="1" max="999" />
+          </div>
+        </div>
+        <div class="row" id="exOrdersTableOpts" style="display:none;">
+          <div class="col-2"><label>Miktar kolonu</label><input id="exOrdersQtyCol" type="text" maxlength="3" /></div>
+          <div class="col-2"><label>Termin kolonu</label><input id="exOrdersDueCol" type="text" maxlength="3" /></div>
+          <div class="col-2"><label>Not kolonu</label><input id="exOrdersNoteCol" type="text" maxlength="3" /></div>
+        </div>
+        <p id="exOrdersHint" class="muted" style="margin-top:8px;"></p>
+        <div id="exOrdersPreview" style="overflow:auto;margin-top:8px;border:1px solid #334155;border-radius:8px;padding:8px;background:#0f172a;"></div>
+
+        <hr class="section-divider" />
+        <h4 style="margin:0 0 8px;font-size:14px;color:#93c5fd;">Stok Excel</h4>
+        <div class="row">
+          <div class="col-3">
+            <label>Urun kolonu</label>
+            <input id="exStockProductCol" type="text" maxlength="3" placeholder="A" />
+          </div>
+          <div class="col-3">
+            <label>Stok kolonu</label>
+            <input id="exStockQtyCol" type="text" maxlength="3" placeholder="B" />
+          </div>
+          <div class="col-3">
+            <label>Veri baslangic satiri</label>
+            <input id="exStockDataStart" type="number" min="1" max="999" />
+          </div>
+        </div>
+        <p id="exStockHint" class="muted" style="margin-top:8px;"></p>
+        <div id="exStockPreview" style="overflow:auto;margin-top:8px;border:1px solid #334155;border-radius:8px;padding:8px;background:#0f172a;"></div>
+
+        <div class="row" style="margin-top:12px;">
+          <div class="col-3"><button id="exFormatSaveBtn" type="button" class="btn-green">Kaydet</button></div>
+          <div class="col-6"><div id="exFormatMsg" class="muted"></div></div>
+        </div>
+      </div>
+      </section>
+
         </main>
       </div>
     </div>
@@ -882,10 +974,32 @@
         tv: 'panel-tv',
         audit: 'panel-audit',
         diagnosis: 'panel-diagnosis',
+        excel: 'panel-excel',
       };
 
       let activePanelId = 'panel-live';
+      let sessionUser = null;
+
+      function canPlanning(me){
+        if(!me) return false;
+        if(me.is_super) return true;
+        const p = me.permissions || {};
+        return !!p.planning;
+      }
+
+      function applyNavPermissions(me){
+        sessionUser = me || null;
+        const nav = q('navPlanlama');
+        if(nav) nav.style.display = canPlanning(me) ? '' : 'none';
+        if(!canPlanning(me) && activePanelId === 'panel-excel'){
+          showPanel('panel-live');
+        }
+      }
+
       function showPanel(panelId){
+        if(panelId === 'panel-excel' && !canPlanning(sessionUser)){
+          return;
+        }
         document.querySelectorAll('.admin-panel').forEach(p => p.classList.remove('active'));
         document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
         const panel = q(panelId);
@@ -900,6 +1014,9 @@
         }
         if(panelId === 'panel-tv') refreshProductionSettings().catch(e=>setMsg('tvProdMsg', String(e), 'bad'));
         if(panelId === 'panel-diagnosis') refreshDiagnosisPanel().catch(e=>setMsg('diagFaultMsg', String(e), 'bad'));
+        if(panelId === 'panel-excel'){
+          refreshExcelFormat().catch(e=>setMsg('exFormatMsg', String(e), 'bad'));
+        }
       }
 
       document.querySelectorAll('.nav-item').forEach(btn => {
@@ -1220,6 +1337,244 @@
         const data = await jpatchLocal('/api/settings/production', body);
         applyProductionForm(data);
         setMsg('tvProdMsg', 'Kaydedildi.', 'good');
+      }
+
+      const EX_ROLE_COLORS = {
+        date: '#fbbf24',
+        product: '#38bdf8',
+        qty: '#4ade80',
+        header: '#94a3b8',
+        empty: '#1e293b',
+      };
+
+      function renderExcelPreview(elId, preview){
+        const el = q(elId);
+        if(!el || !preview){ if(el) el.innerHTML = ''; return; }
+        const rows = preview.rows || 0;
+        const cols = preview.cols || 0;
+        const byKey = new Map((preview.cells || []).map(c => [`${c.r},${c.c}`, c]));
+        let html = '<table style="border-collapse:collapse;font-size:11px;font-family:ui-monospace,monospace;">';
+        html += '<tr><th></th>';
+        for(let c=1;c<=cols;c++){
+          const letter = byKey.get(`1,${c}`)?.col || String.fromCharCode(64+c);
+          html += `<th style="padding:2px 6px;color:#64748b;">${letter}</th>`;
+        }
+        html += '</tr>';
+        for(let r=1;r<=rows;r++){
+          html += `<tr><th style="padding:2px 6px;color:#64748b;">${r}</th>`;
+          for(let c=1;c<=cols;c++){
+            const cell = byKey.get(`${r},${c}`) || { role:'empty', label:'' };
+            const bg = EX_ROLE_COLORS[cell.role] || EX_ROLE_COLORS.empty;
+            const fg = cell.role === 'empty' ? '#334155' : '#0f172a';
+            html += `<td style="border:1px solid #334155;padding:4px 6px;background:${bg};color:${fg};min-width:28px;text-align:center;">${cell.label || ''}</td>`;
+          }
+          html += '</tr>';
+        }
+        html += '</table>';
+        el.innerHTML = html;
+      }
+
+      function colToIndex(val){
+        const s = String(val || '').trim().toUpperCase();
+        if(!s) return 0;
+        if(/^\d+$/.test(s)) return Math.max(1, parseInt(s, 10));
+        let n = 0;
+        for(const ch of s){
+          if(ch < 'A' || ch > 'Z') return 0;
+          n = n * 26 + (ch.charCodeAt(0) - 64);
+        }
+        return n;
+      }
+      function colLetter(n){
+        if(n < 1) return '?';
+        let s = '', x = n;
+        while(x){
+          const r = (x - 1) % 26;
+          s = String.fromCharCode(65 + r) + s;
+          x = Math.floor((x - 1) / 26);
+        }
+        return s;
+      }
+
+      function buildOrdersPreviewFromForm(){
+        const layout = q('exOrdersLayout').value;
+        const along = q('exOrdersAlong').value;
+        const pc = colToIndex(q('exOrdersProductCol').value || 'B');
+        const start = Math.max(1, Number(q('exOrdersDataStart').value || 3));
+        const cells = [];
+        const push = (r,c,role,label) => cells.push({ r, c, col: colLetter(c), role, label });
+
+        if(layout === 'table'){
+          const qc = colToIndex(q('exOrdersQtyCol').value || 'C') || 3;
+          const dueC = colToIndex(q('exOrdersDueCol').value || 'D');
+          const custC = colToIndex(q('exOrdersCustomerCol').value || '');
+          const noteC = colToIndex(q('exOrdersNoteCol').value || '');
+          const header = Math.max(1, start - 1);
+          const cols = Math.max(pc, qc, dueC || 0, custC || 0, noteC || 0, 5);
+          const rows = start + 3;
+          for(let r=1;r<=rows;r++){
+            for(let c=1;c<=cols;c++){
+              let role='empty', label='';
+              if(r === header){
+                if(c===pc){ role='header'; label='Ürün'; }
+                else if(c===qc){ role='header'; label='Miktar'; }
+                else if(dueC && c===dueC){ role='header'; label='Termin'; }
+                else if(custC && c===custC){ role='header'; label='Müşteri'; }
+                else if(noteC && c===noteC){ role='header'; label='Not'; }
+              } else if(r >= start){
+                if(c===pc){ role='product'; label='ürün…'; }
+                else if(c===qc){ role='qty'; label='100'; }
+                else if(dueC && c===dueC){ role='date'; label='09.09'; }
+                else if(custC && c===custC){ role='product'; label='firma'; }
+                else if(noteC && c===noteC){ role='header'; label='…'; }
+              }
+              push(r,c,role,label);
+            }
+          }
+          return {
+            hint: '',
+            rows, cols, cells,
+          };
+        }
+
+        if(along === 'column'){
+          const dc = colToIndex(q('exOrdersDateCol').value || 'I') || 9;
+          const dsr = Math.max(1, Number(q('exOrdersDateStartRow').value || 2));
+          const pr = Math.max(1, Number(q('exOrdersProductRow').value || 2));
+          const cols = Math.max(dc + 4, 8);
+          const rows = Math.max(dsr + 4, pr + 1, 8);
+          for(let r=1;r<=rows;r++){
+            for(let c=1;c<=cols;c++){
+              let role='empty', label='';
+              if(c===dc && r>=dsr){ role='date'; label='termin'; }
+              else if(r===pr && c>dc){ role='product'; label='ürün'; }
+              else if(r>pr && c>dc && r>=dsr){ role='qty'; label='adet'; }
+              push(r,c,role,label);
+            }
+          }
+          return {
+            hint: '',
+            rows, cols, cells,
+          };
+        }
+
+        const dsc = colToIndex(q('exOrdersDateStartCol').value || 'I') || 9;
+        const dr = Math.max(1, Number(q('exOrdersDateRow').value || 1));
+        const cols = Math.max(dsc + 5, pc + 1, 10);
+        const rows = Math.max(start + 3, dr + 1, 6);
+        for(let r=1;r<=rows;r++){
+          for(let c=1;c<=cols;c++){
+            let role='empty', label='';
+            if(r===dr && c>=dsc){ role='date'; label='termin'; }
+            else if(r>=start && c===pc){ role='product'; label='ürün'; }
+            else if(r>=start && c>=dsc){ role='qty'; label='adet'; }
+            push(r,c,role,label);
+          }
+        }
+        return {
+          hint: '',
+          rows, cols, cells,
+        };
+      }
+
+      function buildStockPreviewFromForm(){
+        const pc = colToIndex(q('exStockProductCol').value || 'A') || 1;
+        const qc = colToIndex(q('exStockQtyCol').value || 'B') || 2;
+        const start = Math.max(1, Number(q('exStockDataStart').value || 2));
+        const header = Math.max(1, start - 1);
+        const cols = Math.max(pc, qc, 4);
+        const rows = start + 3;
+        const cells = [];
+        for(let r=1;r<=rows;r++){
+          for(let c=1;c<=cols;c++){
+            let role='empty', label='';
+            if(r===header){
+              if(c===pc){ role='header'; label='Ürün'; }
+              else if(c===qc){ role='header'; label='Stok'; }
+            } else if(r>=start){
+              if(c===pc){ role='product'; label='ürün…'; }
+              else if(c===qc){ role='qty'; label='120'; }
+            }
+            cells.push({ r, c, col: colLetter(c), role, label });
+          }
+        }
+        return { hint: '', rows, cols, cells };
+      }
+
+      function refreshExcelPreviewLive(){
+        syncExcelFormatVisibility();
+        const ordersPrev = buildOrdersPreviewFromForm();
+        const stockPrev = buildStockPreviewFromForm();
+        q('exOrdersHint').textContent = ordersPrev.hint || '';
+        q('exStockHint').textContent = stockPrev.hint || '';
+        renderExcelPreview('exOrdersPreview', ordersPrev);
+        renderExcelPreview('exStockPreview', stockPrev);
+      }
+
+      function syncExcelFormatVisibility(){
+        const layout = q('exOrdersLayout').value;
+        const along = q('exOrdersAlong').value;
+        const isTable = layout === 'table';
+        q('exOrdersTableOpts').style.display = isTable ? '' : 'none';
+        q('exOrdersAlongWrap').style.display = isTable ? 'none' : '';
+        q('exOrdersRowOpts').style.display = (!isTable && along === 'row') ? '' : 'none';
+        q('exOrdersColOpts').style.display = (!isTable && along === 'column') ? '' : 'none';
+      }
+
+      function applyExcelFormatForm(data){
+        const o = data.orders || {};
+        const s = data.stock || {};
+        q('exOrdersLayout').value = o.layout || 'matrix';
+        q('exOrdersAlong').value = o.dates_along || 'row';
+        q('exOrdersProductCol').value = o.product_col || 'B';
+        q('exOrdersDataStart').value = String(o.data_start_row || 3);
+        q('exOrdersCustomerCol').value = o.customer_col || 'C';
+        q('exOrdersDateRow').value = String(o.date_row || 1);
+        q('exOrdersDateStartCol').value = o.date_start_col || 'I';
+        q('exOrdersDateCol').value = o.date_col || 'I';
+        q('exOrdersDateStartRow').value = String(o.date_start_row || 2);
+        q('exOrdersProductRow').value = String(o.product_row || 2);
+        q('exOrdersQtyCol').value = o.qty_col || 'C';
+        q('exOrdersDueCol').value = o.due_col || 'D';
+        q('exOrdersNoteCol').value = o.note_col || 'E';
+        q('exStockProductCol').value = s.product_col || 'A';
+        q('exStockQtyCol').value = s.qty_col || 'B';
+        q('exStockDataStart').value = String(s.data_start_row || 2);
+        refreshExcelPreviewLive();
+      }
+
+      async function refreshExcelFormat(){
+        const data = await jgetLocal('/api/settings/excel-format');
+        applyExcelFormatForm(data);
+        setMsg('exFormatMsg', '');
+      }
+
+      async function saveExcelFormat(){
+        const body = {
+          orders: {
+            layout: q('exOrdersLayout').value,
+            dates_along: q('exOrdersAlong').value,
+            product_col: q('exOrdersProductCol').value.trim(),
+            data_start_row: Number(q('exOrdersDataStart').value || 3),
+            customer_col: q('exOrdersCustomerCol').value.trim(),
+            date_row: Number(q('exOrdersDateRow').value || 1),
+            date_start_col: q('exOrdersDateStartCol').value.trim(),
+            date_col: q('exOrdersDateCol').value.trim(),
+            date_start_row: Number(q('exOrdersDateStartRow').value || 2),
+            product_row: Number(q('exOrdersProductRow').value || 2),
+            qty_col: q('exOrdersQtyCol').value.trim(),
+            due_col: q('exOrdersDueCol').value.trim(),
+            note_col: q('exOrdersNoteCol').value.trim(),
+          },
+          stock: {
+            product_col: q('exStockProductCol').value.trim(),
+            qty_col: q('exStockQtyCol').value.trim(),
+            data_start_row: Number(q('exStockDataStart').value || 2),
+          },
+        };
+        const data = await jpatchLocal('/api/settings/excel-format', body);
+        applyExcelFormatForm(data);
+        setMsg('exFormatMsg', 'Kaydedildi.', 'good');
       }
 
       function thresholdLabel(m, sm){
@@ -2617,8 +2972,27 @@
       };
       q('tvProdSaveBtn').onclick = async () => {
         try { await saveProductionSettings(); }
-        catch(e){ setMsg('tvProdMsg', apiErrText(e), 'bad'); }
+        catch(e){ setMsg('tvProdMsg', String(e), 'bad'); }
       };
+      q('exFormatSaveBtn').onclick = async () => {
+        try { await saveExcelFormat(); }
+        catch(e){ setMsg('exFormatMsg', String(e), 'bad'); }
+      };
+      ['exOrdersLayout','exOrdersAlong'].forEach(id => {
+        const el = q(id);
+        if(el) el.addEventListener('change', refreshExcelPreviewLive);
+      });
+      [
+        'exOrdersProductCol','exOrdersDataStart','exOrdersCustomerCol',
+        'exOrdersDateRow','exOrdersDateStartCol','exOrdersDateCol','exOrdersDateStartRow','exOrdersProductRow',
+        'exOrdersQtyCol','exOrdersDueCol','exOrdersNoteCol',
+        'exStockProductCol','exStockQtyCol','exStockDataStart',
+      ].forEach(id => {
+        const el = q(id);
+        if(!el) return;
+        el.addEventListener('input', refreshExcelPreviewLive);
+        el.addEventListener('change', refreshExcelPreviewLive);
+      });
 
       function apiErrText(e){
         let msg = String(e);
@@ -2696,6 +3070,7 @@
           if(p.panel_8080) names.push('8080');
           if(p.bot_mold_create) names.push('Üret');
           if(p.bot_mold_assign) names.push('Ata');
+          if(p.planning) names.push('Planlama');
         }
         if(p.alert_messages) names.push('Uyarı');
         return names.length ? names.join(', ') : '—';
@@ -2858,6 +3233,7 @@
             panel_8080: role === 'user' ? q('tgPermPanel8080').checked : true,
             bot_mold_create: role === 'user' ? q('tgPermMoldCreate').checked : true,
             bot_mold_assign: role === 'user' ? q('tgPermMoldAssign').checked : true,
+            planning: role === 'user' ? q('tgPermPlanning').checked : true,
             alert_messages: q('tgAlertEnabled').checked,
           };
           payload.alert_prefs = collectAlertPrefsFrom(q('tgAlertBox'));
@@ -2865,7 +3241,7 @@
           q('tgOpName').value = '';
           q('tgOpId').value = '';
           q('tgOpPassword').value = '';
-          ['tgPermPanel8000','tgPermPanel8080','tgPermMoldCreate','tgPermMoldAssign','tgAlertEnabled','tgAlertDetails'].forEach(id=>{ if(q(id)) q(id).checked = false; });
+          ['tgPermPanel8000','tgPermPanel8080','tgPermMoldCreate','tgPermMoldAssign','tgPermPlanning','tgAlertEnabled','tgAlertDetails'].forEach(id=>{ if(q(id)) q(id).checked = false; });
           if(q('tgAlertStart')) q('tgAlertStart').value = '08:00';
           if(q('tgAlertEnd')) q('tgAlertEnd').value = '18:00';
           fillDayChecks(q('tgAlertDays'), [0,1,2,3,4,5,6]);
@@ -3245,6 +3621,7 @@
       };
 
       let _appStarted = false;
+
       function startApp(){
         if(_appStarted) return;
         _appStarted = true;
@@ -3302,6 +3679,7 @@
           const me = await r.json();
           q('loginPw').value = '';
           q('whoami').textContent = me.display_name + (me.is_super ? ' (Super)' : '');
+          applyNavPermissions(me);
           showLogin(false);
           startApp();
         }catch(e){ setMsg('loginMsg', apiErrText(e), 'bad'); }
@@ -3329,6 +3707,7 @@
           if(r.ok){
             const me = await r.json();
             q('whoami').textContent = me.display_name + (me.is_super ? ' (Super)' : '');
+            applyNavPermissions(me);
             showLogin(false);
             startApp();
             return;

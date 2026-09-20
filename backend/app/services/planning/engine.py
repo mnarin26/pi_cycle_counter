@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db.models import Cycle, MachineFault, Mold, MoldMachineCapability, MoldRun
+from app.db.models import Cycle, MachineDowntime, Mold, MoldMachineCapability, MoldRun
 from app.services.planning import effective_cavity
 
 
@@ -121,6 +121,16 @@ def mold_machine_stats(db: Session, *, days: int = 30) -> list[dict]:
     return out
 
 
-def open_fault_machine_ids(db: Session) -> set[int]:
-    rows = db.query(MachineFault.machine_id).filter(MachineFault.end_at.is_(None)).all()
+def open_downtime_machine_ids(db: Session) -> set[int]:
+    """Machines with open-ended downtime (end_at NULL) — excluded from plan candidates."""
+    rows = (
+        db.query(MachineDowntime.machine_id)
+        .filter(MachineDowntime.end_at.is_(None))
+        .distinct()
+        .all()
+    )
     return {int(r[0]) for r in rows}
+
+
+# Back-compat alias
+open_fault_machine_ids = open_downtime_machine_ids

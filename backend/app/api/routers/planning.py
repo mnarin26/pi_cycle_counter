@@ -1,4 +1,4 @@
-"""Planning API: faults, stock, orders, Excel import, plans, compare, mold runs."""
+"""Planning API: stock, orders, Excel import, plans, compare, mold runs."""
 
 from __future__ import annotations
 
@@ -8,10 +8,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db, require_panel_8000
+from app.api.deps import get_db, require_planning
 from app.db.models import (
-    Machine,
-    MachineFault,
     Mold,
     MoldRun,
     OrderImport,
@@ -26,6 +24,7 @@ from app.services.planning.excel_orders import parse_orders_xlsx
 from app.services.planning.excel_stock import parse_stock_xlsx
 from app.services.planning.mold_runs import count_diff_info
 from app.services.planning.plan_engine import build_plan
+from app.services.planning.plan_state import get_current_plan, mark_active_plans_stale
 from app.services.planning.stock import (
     add_movement,
     current_stock,
@@ -36,105 +35,23 @@ from app.services.planning.stock import (
 router = APIRouter()
 
 
-# ----- Faults -----
-
-
-class FaultOut(BaseModel):
-    id: int
-    machine_id: int
-    start_at: datetime
-    end_at: datetime | None = None
-    note: str
-    created_by: str | None = None
-
-    class Config:
-        from_attributes = True
-
-
-class FaultCreate(BaseModel):
-    machine_id: int = Field(..., gt=0)
-    start_at: datetime | None = None
-    note: str = ""
-
-
-class FaultClose(BaseModel):
-    end_at: datetime | None = None
-
-
-@router.get("/faults", response_model=list[FaultOut])
-def list_faults(
-    open_only: bool = Query(False),
-    machine_id: int | None = None,
-    db: Session = Depends(get_db),
-):
-    q = db.query(MachineFault)
-    if open_only:
-        q = q.filter(MachineFault.end_at.is_(None))
-    if machine_id is not None:
-        q = q.filter(MachineFault.machine_id == machine_id)
-    return q.order_by(MachineFault.start_at.desc()).limit(200).all()
-
-
-@router.post("/faults", response_model=FaultOut)
-def create_fault(
-    body: FaultCreate,
-    db: Session = Depends(get_db),
-    user=Depends(require_panel_8000),
-):
-    if not db.get(Machine, body.machine_id):
-        raise HTTPException(404, detail="Makine bulunamadı")
-    start = body.start_at or datetime.now(timezone.utc)
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    row = MachineFault(
-        machine_id=body.machine_id,
-        start_at=start,
-        note=(body.note or "").strip(),
-        created_by=user.display_name,
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-@router.post("/faults/{fault_id}/close", response_model=FaultOut)
-def close_fault(
-    fault_id: int,
-    body: FaultClose,
-    db: Session = Depends(get_db),
-    user=Depends(require_panel_8000),
-):
-    row = db.get(MachineFault, fault_id)
-    if not row:
-        raise HTTPException(404)
-    end = body.end_at or datetime.now(timezone.utc)
-    if end.tzinfo is None:
-        end = end.replace(tzinfo=timezone.utc)
-    if end < row.start_at:
-        raise HTTPException(400, detail="Bitiş başlangıçtan önce olamaz")
-    row.end_at = end
-    db.commit()
-    db.refresh(row)
-    return row
-
-
 # ----- Stock -----
 
 
 @router.get("/stock")
-def get_stock(db: Session = Depends(get_db)):
+def get_stock(db: Session = Depends(get_db), user=Depends(require_planning)):
     return {"rows": list_stock_balances(db)}
 
 
 @router.post("/stock/excel/preview")
 async def stock_excel_preview(
     file: UploadFile = File(...),
-    user=Depends(require_panel_8000),
+    db: Session = Depends(get_db),
+    user=Depends(require_planning),
 ):
     data = await file.read()
     try:
-        return parse_stock_xlsx(data)
+        return parse_stock_xlsx(data, db=db)
     except RuntimeError as e:
         raise HTTPException(500, detail=str(e)) from e
 
@@ -153,7 +70,7 @@ class StockConfirmBody(BaseModel):
 def stock_excel_confirm(
     body: StockConfirmBody,
     db: Session = Depends(get_db),
-    user=Depends(require_panel_8000),
+    user=Depends(require_planning),
 ):
     applied = 0
     for r in body.rows:
@@ -167,8 +84,20 @@ def stock_excel_confirm(
             note=f"Stok Excel ({user.display_name})",
         )
         applied += 1
+    had_plan = get_current_plan(db) is not None
+    mark_active_plans_stale(db, "Stok Excel güncellendi")
     db.commit()
-    return {"ok": True, "applied": applied, "stock": list_stock_balances(db)}
+    auto_plan = None
+    if not had_plan:
+        plan = build_plan(db, created_by=user.display_name, note="Stok Excel sonrası otomatik")
+        auto_plan = _plan_detail(db, plan)
+    return {
+        "ok": True,
+        "applied": applied,
+        "stock": list_stock_balances(db),
+        "plan_stale": had_plan,
+        "plan": auto_plan,
+    }
 
 
 # ----- Orders -----
@@ -178,6 +107,7 @@ def stock_excel_confirm(
 def list_orders(
     status: str | None = Query(None),
     db: Session = Depends(get_db),
+    user=Depends(require_planning),
 ):
     q = db.query(OrderLine)
     if status:
@@ -208,22 +138,14 @@ def list_orders(
 @router.post("/orders/excel/preview")
 async def orders_excel_preview(
     file: UploadFile = File(...),
-    user=Depends(require_panel_8000),
+    db: Session = Depends(get_db),
+    user=Depends(require_planning),
 ):
     data = await file.read()
     try:
-        preview = parse_orders_xlsx(data)
+        return parse_orders_xlsx(data, db=db)
     except RuntimeError as e:
         raise HTTPException(500, detail=str(e)) from e
-    # Attach product match hints
-    for row in preview.get("rows") or []:
-        p = None
-        # soft match without creating
-        from sqlalchemy import func
-
-        # will resolve on confirm
-        row["matched"] = False
-    return preview
 
 
 class OrderConfirmRow(BaseModel):
@@ -245,7 +167,7 @@ class OrderConfirmBody(BaseModel):
 def orders_excel_confirm(
     body: OrderConfirmBody,
     db: Session = Depends(get_db),
-    user=Depends(require_panel_8000),
+    user=Depends(require_planning),
 ):
     imp = OrderImport(
         filename=body.filename or "upload.xlsx",
@@ -277,8 +199,20 @@ def orders_excel_confirm(
             )
         )
         created += 1
+    had_plan = get_current_plan(db) is not None
+    mark_active_plans_stale(db, "Sipariş Excel yüklendi")
     db.commit()
-    return {"ok": True, "import_id": imp.id, "created": created}
+    auto_plan = None
+    if not had_plan:
+        plan = build_plan(db, created_by=user.display_name, note="Sipariş Excel sonrası otomatik")
+        auto_plan = _plan_detail(db, plan)
+    return {
+        "ok": True,
+        "import_id": imp.id,
+        "created": created,
+        "plan_stale": had_plan,
+        "plan": auto_plan,
+    }
 
 
 class OrderPatch(BaseModel):
@@ -295,7 +229,7 @@ def patch_order(
     line_id: int,
     body: OrderPatch,
     db: Session = Depends(get_db),
-    user=Depends(require_panel_8000),
+    user=Depends(require_planning),
 ):
     row = db.get(OrderLine, line_id)
     if not row:
@@ -319,6 +253,8 @@ def patch_order(
             ref_id=row.id,
             note=f"Sipariş gönderildi #{row.id}",
         )
+    if any(k in data for k in ("qty", "due_date", "product_id", "status")):
+        mark_active_plans_stale(db, "Sipariş revize edildi")
     db.commit()
     db.refresh(row)
     return {"ok": True, "id": row.id, "status": row.status}
@@ -333,6 +269,7 @@ def list_mold_runs(
     mold_id: int | None = None,
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
+    user=Depends(require_planning),
 ):
     q = db.query(MoldRun)
     if machine_id is not None:
@@ -367,21 +304,33 @@ def list_mold_runs(
 
 
 @router.get("/mold-machine-stats")
-def get_mold_machine_stats(days: int = Query(30, ge=1, le=180), db: Session = Depends(get_db)):
+def get_mold_machine_stats(
+    days: int = Query(30, ge=1, le=180),
+    db: Session = Depends(get_db),
+    user=Depends(require_planning),
+):
     return {"days": days, "rows": mold_machine_stats(db, days=days)}
 
 
 @router.post("/plans/generate")
 def generate_plan(
     db: Session = Depends(get_db),
-    user=Depends(require_panel_8000),
+    user=Depends(require_planning),
 ):
     plan = build_plan(db, created_by=user.display_name)
     return _plan_detail(db, plan)
 
 
+@router.get("/plans/current")
+def current_plan(db: Session = Depends(get_db), user=Depends(require_planning)):
+    plan = get_current_plan(db)
+    if not plan:
+        return {"plan": None}
+    return {"plan": _plan_detail(db, plan)}
+
+
 @router.get("/plans")
-def list_plans(db: Session = Depends(get_db)):
+def list_plans(db: Session = Depends(get_db), user=Depends(require_planning)):
     rows = db.query(PlanRun).order_by(PlanRun.id.desc()).limit(20).all()
     return {
         "rows": [
@@ -390,6 +339,8 @@ def list_plans(db: Session = Depends(get_db)):
                 "created_at": p.created_at.isoformat() if p.created_at else None,
                 "created_by": p.created_by,
                 "note": p.note,
+                "status": getattr(p, "status", None) or "active",
+                "stale_reason": getattr(p, "stale_reason", None),
             }
             for p in rows
         ]
@@ -397,7 +348,7 @@ def list_plans(db: Session = Depends(get_db)):
 
 
 @router.get("/plans/{plan_id}")
-def get_plan(plan_id: int, db: Session = Depends(get_db)):
+def get_plan(plan_id: int, db: Session = Depends(get_db), user=Depends(require_planning)):
     plan = db.get(PlanRun, plan_id)
     if not plan:
         raise HTTPException(404)
@@ -405,7 +356,7 @@ def get_plan(plan_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/plans/{plan_id}/compare")
-def plan_compare(plan_id: int, db: Session = Depends(get_db)):
+def plan_compare(plan_id: int, db: Session = Depends(get_db), user=Depends(require_planning)):
     try:
         return compare_plan(db, plan_id)
     except ValueError as e:
@@ -419,6 +370,8 @@ def _plan_detail(db: Session, plan: PlanRun) -> dict:
         "created_at": plan.created_at.isoformat() if plan.created_at else None,
         "created_by": plan.created_by,
         "note": plan.note,
+        "status": getattr(plan, "status", None) or "active",
+        "stale_reason": getattr(plan, "stale_reason", None),
         "slots": [
             {
                 "id": s.id,

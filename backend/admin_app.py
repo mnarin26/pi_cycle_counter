@@ -19,7 +19,7 @@ from app.api.routers.cameras import (
 )
 from app.api.routers.machines import MachineOut, MachineUpdate, list_machines, set_roi, update_machine
 from app.api.routers import auth as auth_router
-from app.api.deps import client_ip, get_db, require_super_or_admin
+from app.api.deps import client_ip, get_db, require_planning, require_super_or_admin
 from app.services import audit_log
 from app.services import fault_log
 from app.services.fault_codes import (
@@ -30,6 +30,7 @@ from app.services.fault_codes import (
 from app.services.auth_service import get_session_user, invalidate_operator_sessions
 from app.services.reset_production import wipe_production_history
 from app.services.production_settings import get_production_settings, patch_production_settings
+from app.services.planning.excel_format import get_excel_format, patch_excel_format, preview_grid
 from app.services.vision_settings import get_vision_settings, patch_vision_settings
 from app.services.stored_settings import (
     add_operator,
@@ -147,6 +148,7 @@ class OperatorPermissions(BaseModel):
     panel_8080: bool = False
     bot_mold_create: bool = False
     bot_mold_assign: bool = False
+    planning: bool = False
     alert_messages: bool = False
 
 
@@ -201,6 +203,34 @@ class ProductionSettingsPatch(BaseModel):
     tv_rotate_seconds: int | None = Field(default=None, ge=5, le=300)
     idle_stopped_seconds: int | None = Field(default=None, ge=30, le=3600)
     shifts: list[ProductionShift] | None = None
+
+
+class ExcelOrdersFormatPatch(BaseModel):
+    layout: str | None = None
+    dates_along: str | None = None
+    product_col: str | None = None
+    data_start_row: int | None = None
+    date_row: int | None = None
+    date_start_col: str | None = None
+    date_col: str | None = None
+    date_start_row: int | None = None
+    product_row: int | None = None
+    customer_col: str | None = None
+    qty_col: str | None = None
+    due_col: str | None = None
+    note_col: str | None = None
+
+
+class ExcelStockFormatPatch(BaseModel):
+    layout: str | None = None
+    product_col: str | None = None
+    qty_col: str | None = None
+    data_start_row: int | None = None
+
+
+class ExcelFormatPatch(BaseModel):
+    orders: ExcelOrdersFormatPatch | None = None
+    stock: ExcelStockFormatPatch | None = None
 
 
 class VisionSettingsPatch(BaseModel):
@@ -863,6 +893,55 @@ def patch_vision_settings_admin(
             ip=client_ip(request),
         )
         return result
+    finally:
+        db.close()
+
+
+@app.get("/api/settings/excel-format")
+def get_excel_format_admin(user=Depends(require_planning)):
+    db = db_session.SessionLocal()
+    try:
+        cfg = get_excel_format(db)
+        return {
+            **cfg,
+            "preview_orders": preview_grid(cfg["orders"], kind="orders"),
+            "preview_stock": preview_grid(cfg["stock"], kind="stock"),
+        }
+    finally:
+        db.close()
+
+
+@app.patch("/api/settings/excel-format")
+def patch_excel_format_admin(
+    body: ExcelFormatPatch,
+    request: Request,
+    user=Depends(require_planning),
+):
+    db = db_session.SessionLocal()
+    try:
+        patch: dict = {}
+        if body.orders is not None:
+            patch["orders"] = body.orders.model_dump(exclude_unset=True)
+        if body.stock is not None:
+            patch["stock"] = body.stock.model_dump(exclude_unset=True)
+        try:
+            cfg = patch_excel_format(db, patch)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        audit_log.log_action(
+            db,
+            actor_type=user.actor_type,
+            action="settings.excel_format.update",
+            actor_name=user.display_name,
+            telegram_user_id=user.telegram_user_id,
+            detail={"fields": list(patch.keys())},
+            ip=client_ip(request),
+        )
+        return {
+            **cfg,
+            "preview_orders": preview_grid(cfg["orders"], kind="orders"),
+            "preview_stock": preview_grid(cfg["stock"], kind="stock"),
+        }
     finally:
         db.close()
 

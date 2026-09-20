@@ -126,6 +126,54 @@ def _add_column_if_missing(conn, table: str, existing: set[str], name: str, ddl:
         raise
 
 
+def _migrate_downtimes_nullable_end(conn) -> None:
+    """Recreate machine_downtimes so end_at can be NULL (open downtime)."""
+    try:
+        cols = {row[1]: row for row in conn.execute(text("PRAGMA table_info(machine_downtimes)")).fetchall()}
+    except Exception:
+        return
+    if not cols or "end_at" not in cols:
+        return
+    # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
+    end_notnull = int(cols["end_at"][3] or 0)
+    if end_notnull == 0:
+        return
+    conn.execute(text("ALTER TABLE machine_downtimes RENAME TO machine_downtimes__old_nn"))
+    conn.execute(
+        text(
+            """
+            CREATE TABLE machine_downtimes (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                machine_id INTEGER NOT NULL,
+                start_at DATETIME NOT NULL,
+                end_at DATETIME,
+                note VARCHAR(256) NOT NULL DEFAULT '',
+                created_by VARCHAR(128),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(machine_id) REFERENCES machines (id)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            INSERT INTO machine_downtimes
+                (id, machine_id, start_at, end_at, note, created_by, created_at)
+            SELECT id, machine_id, start_at, end_at, note, created_by, created_at
+            FROM machine_downtimes__old_nn
+            """
+        )
+    )
+    conn.execute(text("DROP TABLE machine_downtimes__old_nn"))
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_machine_downtimes_machine_span "
+            "ON machine_downtimes (machine_id, start_at, end_at)"
+        )
+    )
+
+
 def init_db() -> None:
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
@@ -249,6 +297,18 @@ def init_db() -> None:
                 "ON machine_downtimes (machine_id, start_at, end_at)"
             )
         )
+        # Allow open-ended downtimes (end_at NULL) — recreate table if needed.
+        _migrate_downtimes_nullable_end(conn)
+        plan_cols = set()
+        try:
+            plan_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(plan_runs)")).fetchall()}
+        except Exception:
+            plan_cols = set()
+        if plan_cols:
+            _add_column_if_missing(
+                conn, "plan_runs", plan_cols, "status", "status VARCHAR(16) NOT NULL DEFAULT 'active'"
+            )
+            _add_column_if_missing(conn, "plan_runs", plan_cols, "stale_reason", "stale_reason VARCHAR(256)")
     # Outside the migration txn — never block startup if SQLite is busy (bot/WAL).
     try:
         with engine.connect() as conn:

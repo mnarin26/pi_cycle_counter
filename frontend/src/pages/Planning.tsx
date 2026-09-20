@@ -27,7 +27,13 @@ type PlanSlot = {
   reason: string | null;
   score: number | null;
 };
-type PlanDetail = { id: number; created_at: string | null; slots: PlanSlot[] };
+type PlanDetail = {
+  id: number;
+  created_at: string | null;
+  status?: string;
+  stale_reason?: string | null;
+  slots: PlanSlot[];
+};
 type CompareRow = {
   slot_id: number;
   suggested_machine_id: number | null;
@@ -47,33 +53,36 @@ type StatRow = {
   count_diff: number | null;
   priority_suggestion: { suggested_priority: number; reason: string } | null;
 };
-type Fault = {
-  id: number;
-  machine_id: number;
-  start_at: string;
-  end_at: string | null;
-  note: string;
-};
-type Machine = { id: number; name: string };
 
 function parseApiError(e: unknown): string {
   return String(e instanceof Error ? e.message : e);
 }
 
+function formatPlanWhen(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("tr-TR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso.replace("T", " ").slice(0, 16);
+  }
+}
+
 export function PlanningPage() {
-  const [tab, setTab] = useState<"orders" | "stock" | "plan" | "stats" | "faults">("orders");
+  const [tab, setTab] = useState<"orders" | "stock" | "plan" | "stats">("orders");
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [stock, setStock] = useState<StockRow[]>([]);
   const [plan, setPlan] = useState<PlanDetail | null>(null);
   const [compare, setCompare] = useState<CompareRow[]>([]);
   const [stats, setStats] = useState<StatRow[]>([]);
-  const [faults, setFaults] = useState<Fault[]>([]);
-  const [machines, setMachines] = useState<Machine[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [faultMachine, setFaultMachine] = useState<number | "">("");
-  const [faultNote, setFaultNote] = useState("");
 
   const refreshOrders = useCallback(async () => {
     const r = await apiGet<{ rows: OrderRow[] }>("/api/planning/orders");
@@ -87,16 +96,29 @@ export function PlanningPage() {
     const r = await apiGet<{ rows: StatRow[] }>("/api/planning/mold-machine-stats?days=30");
     setStats(r.rows);
   }, []);
-  const refreshFaults = useCallback(async () => {
-    const r = await apiGet<Fault[]>("/api/planning/faults?open_only=true");
-    setFaults(r);
+
+  const loadPlan = useCallback(async (detail: PlanDetail) => {
+    setPlan(detail);
+    try {
+      const c = await apiGet<{ rows: CompareRow[] }>(`/api/planning/plans/${detail.id}/compare`);
+      setCompare(c.rows);
+    } catch {
+      setCompare([]);
+    }
   }, []);
 
+  const refreshCurrentPlan = useCallback(async () => {
+    const r = await apiGet<{ plan: PlanDetail | null }>("/api/planning/plans/current");
+    if (r.plan) await loadPlan(r.plan);
+    else {
+      setPlan(null);
+      setCompare([]);
+    }
+  }, [loadPlan]);
+
   useEffect(() => {
-    apiGet<Machine[]>("/api/machines")
-      .then((m) => setMachines(m.map((x) => ({ id: x.id, name: x.name }))))
-      .catch(() => {});
-  }, []);
+    void refreshCurrentPlan().catch(() => {});
+  }, [refreshCurrentPlan]);
 
   useEffect(() => {
     setErr(null);
@@ -104,8 +126,8 @@ export function PlanningPage() {
     if (tab === "orders") void refreshOrders().catch((e) => setErr(parseApiError(e)));
     if (tab === "stock") void refreshStock().catch((e) => setErr(parseApiError(e)));
     if (tab === "stats") void refreshStats().catch((e) => setErr(parseApiError(e)));
-    if (tab === "faults") void refreshFaults().catch((e) => setErr(parseApiError(e)));
-  }, [tab, refreshOrders, refreshStock, refreshStats, refreshFaults]);
+    if (tab === "plan") void refreshCurrentPlan().catch((e) => setErr(parseApiError(e)));
+  }, [tab, refreshOrders, refreshStock, refreshStats, refreshCurrentPlan]);
 
   async function onOrderFile(file: File) {
     setBusy(true);
@@ -129,10 +151,13 @@ export function PlanningPage() {
           preview.rows
             .slice(0, 5)
             .map((r) => `${r.due_date?.slice(0, 10) || "—"} · ${r.product_name_raw} · ${r.qty}`)
-            .join("\n")
+            .join("\n"),
       );
       if (!ok) return;
-      await apiPost("/api/planning/orders/excel/confirm", {
+      const conf = await apiPost<{
+        plan?: PlanDetail | null;
+        plan_stale?: boolean;
+      }>("/api/planning/orders/excel/confirm", {
         filename: file.name,
         file_hash: preview.file_hash,
         rows: preview.rows.map((r) => ({
@@ -143,7 +168,16 @@ export function PlanningPage() {
           note: r.note,
         })),
       });
-      setMsg("Siparişler kaydedildi");
+      if (conf.plan) {
+        await loadPlan(conf.plan);
+        setMsg("Siparişler kaydedildi · plan otomatik üretildi");
+        setTab("plan");
+      } else if (conf.plan_stale) {
+        setMsg("Siparişler kaydedildi · mevcut plan bayat — yenileyin");
+        await refreshCurrentPlan();
+      } else {
+        setMsg("Siparişler kaydedildi");
+      }
       await refreshOrders();
     } catch (e) {
       setErr(parseApiError(e));
@@ -165,11 +199,23 @@ export function PlanningPage() {
       if (!preview.rows?.length) throw new Error("Önizlemede satır yok");
       const ok = confirm(`${preview.rows.length} stok satırı Excel'e göre yazılacak. Onaylıyor musunuz?`);
       if (!ok) return;
-      await apiPost("/api/planning/stock/excel/confirm", {
+      const conf = await apiPost<{
+        plan?: PlanDetail | null;
+        plan_stale?: boolean;
+      }>("/api/planning/stock/excel/confirm", {
         file_hash: preview.file_hash,
         rows: preview.rows,
       });
-      setMsg("Stok Excel ile güncellendi (gerçek veri)");
+      if (conf.plan) {
+        await loadPlan(conf.plan);
+        setMsg("Stok güncellendi · plan otomatik üretildi");
+        setTab("plan");
+      } else if (conf.plan_stale) {
+        setMsg("Stok güncellendi · mevcut plan bayat — yenileyin");
+        await refreshCurrentPlan();
+      } else {
+        setMsg("Stok Excel ile güncellendi");
+      }
       await refreshStock();
     } catch (e) {
       setErr(parseApiError(e));
@@ -183,6 +229,7 @@ export function PlanningPage() {
     await apiPatch(`/api/planning/orders/${id}`, { status: "shipped" });
     await refreshOrders();
     await refreshStock();
+    await refreshCurrentPlan();
   }
 
   async function generatePlan() {
@@ -190,10 +237,8 @@ export function PlanningPage() {
     setErr(null);
     try {
       const p = await apiPost<PlanDetail>("/api/planning/plans/generate");
-      setPlan(p);
-      const c = await apiGet<{ rows: CompareRow[] }>(`/api/planning/plans/${p.id}/compare`);
-      setCompare(c.rows);
-      setMsg(`Plan #${p.id} oluşturuldu (yalnız öneri)`);
+      await loadPlan(p);
+      setMsg(`Aktif plan güncellendi · ${formatPlanWhen(p.created_at)}`);
       setTab("plan");
     } catch (e) {
       setErr(parseApiError(e));
@@ -202,29 +247,14 @@ export function PlanningPage() {
     }
   }
 
-  async function openFault() {
-    if (typeof faultMachine !== "number") {
-      setErr("Makine seçin");
-      return;
-    }
-    await apiPost("/api/planning/faults", { machine_id: faultMachine, note: faultNote });
-    setFaultNote("");
-    await refreshFaults();
-    setMsg("Arıza açıldı (bitiş sonra girilebilir)");
-  }
-
-  async function closeFault(id: number) {
-    await apiPost(`/api/planning/faults/${id}/close`, {});
-    await refreshFaults();
-  }
-
   const tabs: Array<[typeof tab, string]> = [
     ["orders", "Siparişler"],
     ["stock", "Stok"],
     ["plan", "Plan önerisi"],
     ["stats", "Kalıp×Makine"],
-    ["faults", "Arızalar"],
   ];
+
+  const planStale = plan?.status === "stale";
 
   return (
     <div className="space-y-4 p-4">
@@ -248,13 +278,15 @@ export function PlanningPage() {
           disabled={busy}
           onClick={() => void generatePlan()}
         >
-          Plan önerisi üret
+          {busy ? "…" : planStale ? "Planı yenile" : "Plan önerisi üret"}
         </button>
       </div>
-      <p className="text-sm text-slate-400">
-        Geçici Excel formatları: sipariş = Ürün Adı | Miktar | Termin | Müşteri | Not; stok = Ürün Adı | Stok.
-        Gerçek format gelince yalnız parser eşlemesi değişecek.
-      </p>
+      {planStale && (
+        <div className="rounded border border-amber-700/60 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
+          Sipariş/stok değişti — plan güncel değil
+          {plan?.stale_reason ? ` (${plan.stale_reason})` : ""}. «Planı yenile» ile yeniden üretin.
+        </div>
+      )}
       {msg && <p className="text-sm text-emerald-300">{msg}</p>}
       {err && <p className="text-sm text-red-300">{err}</p>}
 
@@ -347,7 +379,9 @@ export function PlanningPage() {
             <p className="text-sm text-slate-400">Henüz plan yok. «Plan önerisi üret»e basın.</p>
           ) : (
             <>
-              <h3 className="font-medium text-slate-200">Plan #{plan.id}</h3>
+              <h3 className="font-medium text-slate-200">
+                {planStale ? "Bayat plan" : "Aktif plan"} · {formatPlanWhen(plan.created_at)}
+              </h3>
               <div className="overflow-x-auto rounded border border-slate-700">
                 <table className="min-w-full text-left text-sm">
                   <thead className="bg-slate-800 text-slate-300">
@@ -366,8 +400,12 @@ export function PlanningPage() {
                         <td className="px-3 py-2">{s.machine_id ?? "—"}</td>
                         <td className="px-3 py-2">{s.mold_id ?? "—"}</td>
                         <td className="px-3 py-2">{s.qty_planned}</td>
-                        <td className="px-3 py-2">{s.suggested_start?.replace("T", " ").slice(0, 16) || "—"}</td>
-                        <td className="px-3 py-2">{s.suggested_end?.replace("T", " ").slice(0, 16) || "—"}</td>
+                        <td className="px-3 py-2">
+                          {s.suggested_start?.replace("T", " ").slice(0, 16) || "—"}
+                        </td>
+                        <td className="px-3 py-2">
+                          {s.suggested_end?.replace("T", " ").slice(0, 16) || "—"}
+                        </td>
                         <td className="px-3 py-2 text-xs text-slate-400">{s.reason}</td>
                       </tr>
                     ))}
@@ -434,50 +472,6 @@ export function PlanningPage() {
               ))}
             </tbody>
           </table>
-        </div>
-      )}
-
-      {tab === "faults" && (
-        <div className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            <select
-              className="rounded border border-slate-600 bg-slate-900 px-2 py-2 text-sm"
-              value={faultMachine}
-              onChange={(e) => setFaultMachine(e.target.value ? Number(e.target.value) : "")}
-            >
-              <option value="">Makine…</option>
-              {machines.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-            <input
-              className="min-w-[200px] flex-1 rounded border border-slate-600 bg-slate-900 px-2 py-2 text-sm"
-              placeholder="Arıza notu"
-              value={faultNote}
-              onChange={(e) => setFaultNote(e.target.value)}
-            />
-            <button type="button" className="rounded bg-amber-800 px-3 py-2 text-sm" onClick={() => void openFault()}>
-              Arıza aç
-            </button>
-          </div>
-          <ul className="space-y-2 text-sm">
-            {faults.map((f) => (
-              <li key={f.id} className="flex flex-wrap items-center gap-2 rounded border border-slate-700 px-3 py-2">
-                <span>
-                  Makine #{f.machine_id} · {f.start_at.replace("T", " ").slice(0, 16)} · {f.note || "—"}
-                </span>
-                <button
-                  type="button"
-                  className="ml-auto rounded bg-slate-700 px-2 py-1 text-xs"
-                  onClick={() => void closeFault(f.id)}
-                >
-                  Kapat
-                </button>
-              </li>
-            ))}
-          </ul>
         </div>
       )}
     </div>
