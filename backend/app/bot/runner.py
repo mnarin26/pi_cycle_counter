@@ -33,6 +33,7 @@ class BotState(str, Enum):
     IDLE = "idle"
     ASSIGN_MACHINE = "assign_machine"
     ASSIGN_MOLD = "assign_mold"
+    ASSIGN_PRESS = "assign_press"
     CREATE_MOLD_QR = "create_mold_qr"
     CREATE_MOLD_NAME = "create_mold_name"
     CREATE_MOLD_TARGET = "create_mold_target"
@@ -57,6 +58,7 @@ class UserSession:
     state: BotState = BotState.IDLE
     machine_id: int | None = None
     machine_name: str | None = None
+    pending_mold_id: int | None = None
     pending_qr_code: str | None = None
     pending_name: str | None = None
     pending_target_cycle_s: float | None = None
@@ -309,11 +311,75 @@ def handle_text_command(token: str, chat_id: int, user_id: str, operator, text: 
         return
 
     sess = _session(user_id)
+    if sess.state == BotState.ASSIGN_PRESS:
+        _finish_assign_with_press(token, chat_id, user_id, operator, t)
+        return
     if sess.state in CREATE_TEXT_STATES:
         _advance_create(token, chat_id, user_id, operator, t)
         return
     if sess.state == BotState.IDLE:
         send_message(token, chat_id, "Menüden seçim yapın veya /start yazın.", reply_markup=_main_keyboard(operator))
+
+
+def _finish_assign_with_press(token: str, chat_id: int, user_id: str, operator, text: str) -> None:
+    sess = _session(user_id)
+    press: int | None = None
+    t = (text or "").strip()
+    if not _is_skip(t):
+        try:
+            press = _parse_nonneg_int(t)
+        except ValueError:
+            send_message(token, chat_id, "Geçerli bir baskı sayısı yazın (örn. 1200) veya - Atla.")
+            return
+    if sess.machine_id is None or sess.pending_mold_id is None:
+        reset_session(user_id)
+        send_message(token, chat_id, "Oturum hatası. /start ile tekrar deneyin.")
+        return
+    db = db_session.SessionLocal()
+    try:
+        machine, mold = assign_mold_to_machine(
+            db,
+            machine_id=sess.machine_id,
+            mold_id=sess.pending_mold_id,
+            operator_name=operator.name,
+            operator_id=operator.id,
+            actual_press_count=press,
+        )
+        audit_log.log_action(
+            db,
+            actor_type="operator",
+            action="mold.assign",
+            actor_name=operator.name,
+            telegram_user_id=operator.id,
+            resource=f"machine/{machine.id}",
+            detail={
+                "machine_id": machine.id,
+                "machine_name": machine.name,
+                "machine": machine.name,
+                "mold_id": mold.id,
+                "mold_name": mold.name,
+                "mold": mold.name or mold.qr_code,
+                "mold_qr_code": mold.qr_code,
+                "actual_press_count": press,
+                "source": "telegram",
+            },
+        )
+        reset_session(user_id)
+        label = mold.name or mold.qr_code or str(mold.id)
+        press_txt = f"\nÖnceki baskı: {press}" if press is not None else ""
+        send_message(
+            token,
+            chat_id,
+            f"✅ Atama tamam.\n{machine.name} → {label}\n(Kod: {mold.qr_code or '—'}){press_txt}",
+            reply_markup=_main_keyboard(operator),
+        )
+    except ValueError as e:
+        send_message(token, chat_id, str(e))
+    except Exception:
+        logger.exception("assign finish failed")
+        send_message(token, chat_id, "Atama sırasında hata oluştu.")
+    finally:
+        db.close()
 
 
 def _advance_create(token: str, chat_id: int, user_id: str, operator, text: str) -> None:
@@ -519,38 +585,15 @@ def handle_qr_or_text(token: str, chat_id: int, user_id: str, operator, message:
             if payload.kind != QrKind.MOLD:
                 payload = parse_qr_text(f"MOLD:{payload.code}")
             mold = parse_and_resolve_mold(db, payload.raw)
-            machine, mold = assign_mold_to_machine(
-                db,
-                machine_id=sess.machine_id,
-                mold_id=mold.id,
-                operator_name=operator.name,
-                operator_id=operator.id,
-            )
-            audit_log.log_action(
-                db,
-                actor_type="operator",
-                action="mold.assign",
-                actor_name=operator.name,
-                telegram_user_id=operator.id,
-                resource=f"machine/{machine.id}",
-                detail={
-                    "machine_id": machine.id,
-                    "machine_name": machine.name,
-                    "machine": machine.name,
-                    "mold_id": mold.id,
-                    "mold_name": mold.name,
-                    "mold": mold.name or mold.qr_code,
-                    "mold_qr_code": mold.qr_code,
-                    "source": "telegram",
-                },
-            )
-            reset_session(user_id)
-            label = mold.name or mold.qr_code or str(mold.id)
+            sess.pending_mold_id = mold.id
+            sess.state = BotState.ASSIGN_PRESS
             send_message(
                 token,
                 chat_id,
-                f"✅ Atama tamam.\n{machine.name} → {label}\n(Kod: {mold.qr_code or '—'})",
-                reply_markup=_main_keyboard(operator),
+                f"Kalıp: {mold.name or mold.qr_code}\n\n"
+                "Önceki kalıpta kaç baskı yapıldı? (sayı yazın)\n"
+                "Bilinmiyorsa - Atla yazın.",
+                reply_markup=_skip_keyboard(),
             )
             return
 

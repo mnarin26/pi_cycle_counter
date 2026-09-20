@@ -88,6 +88,18 @@ class Machine(Base):
     camera: Mapped["Camera"] = relationship(back_populates="machines")
 
 
+class Product(Base):
+    """SKU / product name as it appears on order & stock Excel sheets."""
+
+    __tablename__ = "products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    molds: Mapped[list["Mold"]] = relationship(back_populates="product")
+
+
 class Mold(Base):
     __tablename__ = "molds"
 
@@ -105,12 +117,133 @@ class Mold(Base):
     stdev_limit_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     sample_count: Mapped[int] = mapped_column(Integer, default=0)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True)
+    cavity_count: Mapped[int] = mapped_column(Integer, default=1)  # defined cavities
+    # Operator-adjustable while mounted; None → use cavity_count
+    active_cavity_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    product: Mapped["Product | None"] = relationship(back_populates="molds")
     machine_links: Mapped[list["MoldMachine"]] = relationship(back_populates="mold")
+
+
+class MoldMachineCapability(Base):
+    """Which machines a mold may run on + manual priority (rule, not history)."""
+
+    __tablename__ = "mold_machine_capabilities"
+    __table_args__ = (UniqueConstraint("mold_id", "machine_id", name="uq_mold_cap_mold_machine"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mold_id: Mapped[int] = mapped_column(ForeignKey("molds.id"), nullable=False)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"), nullable=False)
+    allowed: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100)  # lower = preferred
+
+
+class MachineFault(Base):
+    """Open-ended machine fault; end_at NULL until resolved. Planning skips open faults."""
+
+    __tablename__ = "machine_faults"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"), nullable=False)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MoldRun(Base):
+    """One continuous mold-on-machine work segment (not always closed at mold change)."""
+
+    __tablename__ = "mold_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mold_id: Mapped[int] = mapped_column(ForeignKey("molds.id"), nullable=False)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    end_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)  # mold_change | long_stop
+    camera_cycles: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entered_press_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active_cavity_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    product_added: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StockMovement(Base):
+    """Stock ledger. excel_reset qty is absolute stock; production/shipment are deltas."""
+
+    __tablename__ = "stock_movements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)  # production | shipment | excel_reset
+    ref_type: Mapped[str | None] = mapped_column(String(32), nullable=True)  # mold_run | order_line | import
+    ref_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    note: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OrderImport(Base):
+    __tablename__ = "order_imports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    filename: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OrderLine(Base):
+    __tablename__ = "order_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    import_id: Mapped[int | None] = mapped_column(ForeignKey("order_imports.id"), nullable=True)
+    product_name_raw: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True)
+    qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    customer: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open | shipped | cancelled
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class PlanRun(Base):
+    """One planning suggestion batch (never auto-assigns)."""
+
+    __tablename__ = "plan_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PlanSlot(Base):
+    __tablename__ = "plan_slots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plan_run_id: Mapped[int] = mapped_column(ForeignKey("plan_runs.id"), nullable=False)
+    order_line_id: Mapped[int | None] = mapped_column(ForeignKey("order_lines.id"), nullable=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"), nullable=True)
+    mold_id: Mapped[int | None] = mapped_column(ForeignKey("molds.id"), nullable=True)
+    machine_id: Mapped[int | None] = mapped_column(ForeignKey("machines.id"), nullable=True)
+    suggested_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suggested_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    qty_planned: Mapped[int] = mapped_column(Integer, default=0)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class MoldMachine(Base):

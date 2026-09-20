@@ -202,6 +202,9 @@ def init_db() -> None:
         _add_column_if_missing(conn, "molds", mold_cols, "work_mode", "work_mode VARCHAR(16) NOT NULL DEFAULT 'auto'")
         _add_column_if_missing(conn, "molds", mold_cols, "mount_minutes", "mount_minutes INTEGER")
         _add_column_if_missing(conn, "molds", mold_cols, "removal_minutes", "removal_minutes INTEGER")
+        _add_column_if_missing(conn, "molds", mold_cols, "product_id", "product_id INTEGER")
+        _add_column_if_missing(conn, "molds", mold_cols, "cavity_count", "cavity_count INTEGER NOT NULL DEFAULT 1")
+        _add_column_if_missing(conn, "molds", mold_cols, "active_cavity_count", "active_cavity_count INTEGER")
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_molds_qr_code ON molds (qr_code) WHERE qr_code IS NOT NULL"))
         conn.execute(
             text("CREATE UNIQUE INDEX IF NOT EXISTS uq_machines_qr_code ON machines (qr_code) WHERE qr_code IS NOT NULL")

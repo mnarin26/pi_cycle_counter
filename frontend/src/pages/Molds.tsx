@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { datetimeLocalInputToUtcIso } from "../lib/chartTheme";
-import { apiDelete, apiDownloadCsv, apiGet, apiPatch, apiPost } from "../api/client";
+import { apiDelete, apiDownloadCsv, apiGet, apiPatch, apiPost, apiPut } from "../api/client";
 
 type Mold = {
   id: number;
@@ -13,8 +13,16 @@ type Mold = {
   work_mode: "auto" | "manual";
   mount_minutes: number | null;
   removal_minutes: number | null;
+  product_id: number | null;
+  product_name: string | null;
+  cavity_count: number;
+  active_cavity_count: number | null;
+  effective_cavity: number;
   created_at?: string | null;
 };
+
+type Product = { id: number; name: string };
+type MachineLite = { id: number; name: string };
 
 type MoldUsageRow = {
   mold_id: number;
@@ -44,6 +52,8 @@ type EditDraft = {
   work_mode: "auto" | "manual";
   mount_minutes: string;
   removal_minutes: string;
+  product_id: string;
+  cavity_count: string;
 };
 
 type SortField = "qr" | "daily_target" | "name";
@@ -95,24 +105,65 @@ function draftFromMold(m: Mold): EditDraft {
     work_mode: m.work_mode === "manual" ? "manual" : "auto",
     mount_minutes: m.mount_minutes != null ? String(m.mount_minutes) : "",
     removal_minutes: m.removal_minutes != null ? String(m.removal_minutes) : "",
+    product_id: m.product_id != null ? String(m.product_id) : "",
+    cavity_count: String(m.cavity_count ?? 1),
   };
 }
 
 function MoldCard({
   mold,
+  products,
+  machines,
   onChanged,
 }: {
   mold: Mold;
+  products: Product[];
+  machines: MachineLite[];
   onChanged: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<EditDraft>(() => draftFromMold(mold));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [caps, setCaps] = useState<Array<{ machine_id: number; allowed: boolean; priority: number }>>([]);
+  const [newProductName, setNewProductName] = useState("");
 
   useEffect(() => {
     if (!editing) setDraft(draftFromMold(mold));
   }, [mold, editing]);
+
+  useEffect(() => {
+    apiGet<{ items: Array<{ machine_id: number; allowed: boolean; priority: number }> }>(
+      `/api/molds/${mold.id}/capabilities`
+    )
+      .then((r) => setCaps(r.items || []))
+      .catch(() => setCaps([]));
+  }, [mold.id]);
+
+  async function bumpCavity(delta: number) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await apiPost(`/api/molds/${mold.id}/active-cavity`, { delta });
+      onChanged();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveCaps() {
+    setBusy(true);
+    try {
+      await apiPut(`/api/molds/${mold.id}/capabilities`, { items: caps.filter((c) => c.allowed) });
+      onChanged();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function save() {
     setBusy(true);
@@ -136,6 +187,13 @@ function MoldCard({
       const removal_minutes = draft.removal_minutes.trim() ? parseInt(draft.removal_minutes, 10) : null;
       if (removal_minutes != null && (!Number.isFinite(removal_minutes) || removal_minutes < 0))
         throw new Error("Sökme süresi geçerli bir sayı olmalı");
+      let product_id: number | null = draft.product_id ? parseInt(draft.product_id, 10) : null;
+      if (newProductName.trim()) {
+        const p = await apiPost<Product>("/api/products", { name: newProductName.trim() });
+        product_id = p.id;
+      }
+      const cavity_count = parseInt(draft.cavity_count || "1", 10);
+      if (!Number.isFinite(cavity_count) || cavity_count < 1) throw new Error("Göz sayısı geçersiz");
       await apiPatch<Mold>(`/api/molds/${mold.id}`, {
         name: draft.name.trim() || null,
         qr_code: draft.qr_code.trim() || null,
@@ -145,8 +203,12 @@ function MoldCard({
         work_mode: draft.work_mode,
         mount_minutes,
         removal_minutes,
+        product_id,
+        cavity_count,
       });
+      await saveCaps();
       setEditing(false);
+      setNewProductName("");
       onChanged();
     } catch (e) {
       setErr(String(e));
@@ -170,6 +232,15 @@ function MoldCard({
     }
   }
 
+  function toggleMachine(mid: number, checked: boolean) {
+    setCaps((prev) => {
+      const rest = prev.filter((c) => c.machine_id !== mid);
+      if (!checked) return rest;
+      const maxPri = rest.reduce((m, c) => Math.max(m, c.priority), 0);
+      return [...rest, { machine_id: mid, allowed: true, priority: maxPri + 1 }];
+    });
+  }
+
   return (
     <div className="rounded border border-slate-700 bg-panel2 p-4">
       {!editing ? (
@@ -178,9 +249,31 @@ function MoldCard({
             <div className="font-medium">{mold.name || "İsimsiz kalıp"}</div>
             <div className="text-xs text-slate-400">
               QR: {mold.qr_code ? <code className="text-accent">{mold.qr_code}</code> : "—"}
+              {mold.product_name ? ` · Ürün: ${mold.product_name}` : ""}
+              {` · Göz ${mold.effective_cavity}/${mold.cavity_count || 1}`}
               {mold.target_cycle_s != null ? ` · Hedef ${mold.target_cycle_s.toFixed(2)}s` : ""}
               {mold.daily_target_count != null ? ` · Günlük hedef ${mold.daily_target_count}` : ""}
               {` · ${mold.work_mode === "manual" ? "Manuel" : "Otomatik"}`}
+            </div>
+            <div className="mt-2 flex items-center gap-2 text-sm">
+              <span className="text-xs text-slate-400">Aktif göz</span>
+              <button
+                type="button"
+                className="min-h-[36px] min-w-[36px] rounded bg-slate-700"
+                disabled={busy}
+                onClick={() => void bumpCavity(-1)}
+              >
+                −
+              </button>
+              <span className="font-semibold text-sky-300">{mold.effective_cavity}</span>
+              <button
+                type="button"
+                className="min-h-[36px] min-w-[36px] rounded bg-slate-700"
+                disabled={busy}
+                onClick={() => void bumpCavity(1)}
+              >
+                +
+              </button>
             </div>
           </div>
           <button
@@ -218,6 +311,37 @@ function MoldCard({
                 placeholder="042"
                 value={draft.qr_code}
                 onChange={(e) => setDraft((d) => ({ ...d, qr_code: e.target.value }))}
+              />
+            </label>
+            <label className="text-sm sm:col-span-2">
+              <span className="mb-1 block text-xs text-slate-400">Ürün</span>
+              <select
+                className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+                value={draft.product_id}
+                onChange={(e) => setDraft((d) => ({ ...d, product_id: e.target.value }))}
+              >
+                <option value="">—</option>
+                {products.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="mt-1 w-full rounded border border-slate-600 bg-slate-900 px-2 py-1 text-xs"
+                placeholder="Yeni ürün adı (kaydedince oluşturulur)"
+                value={newProductName}
+                onChange={(e) => setNewProductName(e.target.value)}
+              />
+            </label>
+            <label className="text-sm">
+              <span className="mb-1 block text-xs text-slate-400">Tanım göz adedi</span>
+              <input
+                type="number"
+                min={1}
+                className="w-full rounded border border-slate-600 bg-slate-900 px-2 py-2"
+                value={draft.cavity_count}
+                onChange={(e) => setDraft((d) => ({ ...d, cavity_count: e.target.value }))}
               />
             </label>
             <label className="text-sm">
@@ -281,6 +405,26 @@ function MoldCard({
                 onChange={(e) => setDraft((d) => ({ ...d, removal_minutes: e.target.value }))}
               />
             </label>
+          </div>
+          <div className="rounded border border-slate-700 bg-slate-900/60 p-3">
+            <div className="mb-2 text-xs font-medium text-sky-300">Çalışabilir makineler (öncelik sırası)</div>
+            <div className="flex flex-wrap gap-3">
+              {machines.map((m) => {
+                const on = caps.some((c) => c.machine_id === m.id && c.allowed);
+                const pri = caps.find((c) => c.machine_id === m.id)?.priority;
+                return (
+                  <label key={m.id} className="flex items-center gap-2 text-sm text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={(e) => toggleMachine(m.id, e.target.checked)}
+                    />
+                    {m.name}
+                    {on && pri != null ? <span className="text-xs text-slate-500">#{pri}</span> : null}
+                  </label>
+                );
+              })}
+            </div>
           </div>
           <p className="rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
             Günlük hedef girilirse verimlilik ona göre (vardiya saatine oranlı) hesaplanır; boşsa hedef
@@ -505,6 +649,8 @@ function CreateMoldForm({ onCreated }: { onCreated: () => void }) {
 
 export function MoldsPage() {
   const [rows, setRows] = useState<Mold[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [machines, setMachines] = useState<MachineLite[]>([]);
   const [usage, setUsage] = useState<MoldUsageResponse | null>(null);
   const [range, setRange] = useState<"daily" | "weekly" | "monthly" | "yearly">("weekly");
   const [fromInput, setFromInput] = useState("");
@@ -544,8 +690,14 @@ export function MoldsPage() {
   const loadMolds = useCallback(async () => {
     setLoadingMolds(true);
     try {
-      const molds = await apiGet<Mold[]>("/api/molds");
+      const [molds, prods, machs] = await Promise.all([
+        apiGet<Mold[]>("/api/molds"),
+        apiGet<Product[]>("/api/products"),
+        apiGet<Array<{ id: number; name: string }>>("/api/machines"),
+      ]);
       setRows(molds);
+      setProducts(prods);
+      setMachines(machs.map((m) => ({ id: m.id, name: m.name })));
       setErr(null);
     } catch (e) {
       setErr(String(e));
@@ -641,7 +793,13 @@ export function MoldsPage() {
             </label>
           </div>
           {filteredMolds.map((m) => (
-            <MoldCard key={m.id} mold={m} onChanged={() => void reloadAll()} />
+            <MoldCard
+              key={m.id}
+              mold={m}
+              products={products}
+              machines={machines}
+              onChanged={() => void reloadAll()}
+            />
           ))}
           {rows.length === 0 && !loadingMolds && (
             <p className="text-sm text-slate-400">Kayıtlı kalıp yok.</p>

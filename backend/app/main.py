@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 import app.db.session as db_session
 from app.services.auth_service import get_session_user
-from app.api.routers import activity, analytics, auth, calibration, cameras, events, machines, molds, settings as settings_router
+from app.api.routers import activity, analytics, auth, calibration, cameras, events, machines, molds, planning, products, settings as settings_router
 from app.vision.orchestrator import VisionOrchestrator, drain_cycle_queue_item
 from app.ws.hub import Hub
 from app.ws.pos_tick_hub import PosTickHub
@@ -211,6 +211,8 @@ app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(cameras.router, prefix="/api/cameras", tags=["cameras"])
 app.include_router(machines.router, prefix="/api/machines", tags=["machines"])
 app.include_router(molds.router, prefix="/api/molds", tags=["molds"])
+app.include_router(products.router, prefix="/api/products", tags=["products"])
+app.include_router(planning.router, prefix="/api/planning", tags=["planning"])
 app.include_router(events.router, prefix="/api/events", tags=["events"])
 app.include_router(activity.router, prefix="/api/activity", tags=["activity"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])

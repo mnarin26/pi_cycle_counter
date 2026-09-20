@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_mold_assign, require_panel_8000
-from app.db.models import Cycle, Machine, Mold, MoldMachine
+from app.db.models import Cycle, Machine, Mold, MoldMachine, MoldMachineCapability, Product
 from app.services.audit_log import log_action
 from app.services.cycle_export import (
     export_filename,
@@ -24,6 +24,7 @@ from app.services.mold_names import (
     clear_orphan_cycle_mold_labels,
 )
 from app.services.mold_registry import assign_mold_to_machine, create_mold_from_qr
+from app.services.planning import effective_cavity
 from app.services.time_windows import resolve_window
 
 router = APIRouter()
@@ -40,6 +41,11 @@ class MoldOut(BaseModel):
     work_mode: str = "auto"
     mount_minutes: int | None = None
     removal_minutes: int | None = None
+    product_id: int | None = None
+    product_name: str | None = None
+    cavity_count: int = 1
+    active_cavity_count: int | None = None
+    effective_cavity: int = 1
     tolerance_s: float
     stdev_limit_s: float | None = None
     sample_count: int
@@ -61,6 +67,8 @@ class MoldCreate(BaseModel):
     mount_minutes: int | None = Field(default=None, ge=0, description="Kalıp montaj süresi (dk)")
     removal_minutes: int | None = Field(default=None, ge=0, description="Kalıp sökme süresi (dk)")
     tolerance_s: float = Field(default=0.35, gt=0)
+    product_id: int | None = None
+    cavity_count: int = Field(default=1, ge=1, le=128)
 
 
 class NameBody(BaseModel):
@@ -79,6 +87,9 @@ class MoldUpdate(BaseModel):
     removal_minutes: int | None = Field(default=None, ge=0)
     tolerance_s: float | None = Field(default=None, gt=0)
     stdev_limit_s: float | None = Field(default=None, gt=0)
+    product_id: int | None = None
+    cavity_count: int | None = Field(default=None, ge=1, le=128)
+    active_cavity_count: int | None = Field(default=None, ge=1, le=128)
 
 
 class ConfirmMatchBody(BaseModel):
@@ -92,6 +103,23 @@ class AssignMoldBody(BaseModel):
     assigned_at: datetime | None = Field(default=None, description="Atama saati (geriye dönük olabilir)")
     changeover_start: datetime | None = Field(default=None, description="Kalıp değişimi başlangıcı")
     changeover_end: datetime | None = Field(default=None, description="Kalıp değişimi bitişi")
+    actual_press_count: int | None = Field(
+        default=None, ge=0, description="Önceki kalıpta yapılan gerçek baskı (opsiyonel)"
+    )
+
+
+class ActiveCavityBody(BaseModel):
+    delta: int = Field(..., description="+1 veya -1")
+
+
+class CapabilityItem(BaseModel):
+    machine_id: int
+    allowed: bool = True
+    priority: int = Field(default=100, ge=1, le=999)
+
+
+class CapabilitiesBody(BaseModel):
+    items: list[CapabilityItem]
 
 
 def _assignment_map(db: Session) -> dict[int, Machine]:
@@ -99,7 +127,11 @@ def _assignment_map(db: Session) -> dict[int, Machine]:
     return {int(m.current_mold_id): m for m in rows if m.current_mold_id}
 
 
-def _mold_out(mold: Mold, assigned: Machine | None) -> MoldOut:
+def _mold_out(mold: Mold, assigned: Machine | None, db: Session | None = None) -> MoldOut:
+    product_name = None
+    if mold.product_id and db is not None:
+        p = db.get(Product, mold.product_id)
+        product_name = p.name if p else None
     return MoldOut(
         id=mold.id,
         name=mold.name,
@@ -111,6 +143,11 @@ def _mold_out(mold: Mold, assigned: Machine | None) -> MoldOut:
         work_mode=mold.work_mode or "auto",
         mount_minutes=mold.mount_minutes,
         removal_minutes=mold.removal_minutes,
+        product_id=mold.product_id,
+        product_name=product_name,
+        cavity_count=int(getattr(mold, "cavity_count", None) or 1),
+        active_cavity_count=getattr(mold, "active_cavity_count", None),
+        effective_cavity=effective_cavity(mold),
         tolerance_s=mold.tolerance_s,
         stdev_limit_s=mold.stdev_limit_s,
         sample_count=mold.sample_count,
@@ -125,7 +162,7 @@ def _mold_out(mold: Mold, assigned: Machine | None) -> MoldOut:
 def list_molds(db: Session = Depends(get_db)):
     assigned = _assignment_map(db)
     molds = db.query(Mold).order_by(Mold.id.desc()).limit(200).all()
-    return [_mold_out(m, assigned.get(m.id)) for m in molds]
+    return [_mold_out(m, assigned.get(m.id), db) for m in molds]
 
 
 @router.post("", response_model=MoldOut)
@@ -159,7 +196,7 @@ def create_mold(
         resource=f"mold:{mold.id}",
         detail={"name": mold.name, "qr_code": mold.qr_code, "source": "web"},
     )
-    return _mold_out(mold, None)
+    return _mold_out(mold, None, db)
 
 
 @router.post("/{mold_id}/assign", response_model=MoldOut)
@@ -185,6 +222,7 @@ def assign_mold(
             assigned_at=body.assigned_at,
             changeover_start=body.changeover_start,
             changeover_end=body.changeover_end,
+            actual_press_count=body.actual_press_count,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -204,7 +242,7 @@ def assign_mold(
             "source": "web",
         },
     )
-    return _mold_out(mold, machine)
+    return _mold_out(mold, machine, db)
 
 
 @router.get("/usage")
@@ -325,6 +363,9 @@ def update_mold(
             if clash:
                 raise HTTPException(400, detail="Bu QR kodu baska kalıpta kullanılıyor")
         data["qr_code"] = qc
+    if "product_id" in data and data["product_id"] is not None:
+        if db.get(Product, data["product_id"]) is None:
+            raise HTTPException(400, detail="Ürün bulunamadı")
     for k, v in data.items():
         setattr(m, k, v)
     if m.name:
@@ -344,7 +385,7 @@ def update_mold(
         detail={"name": m.name, "mold_name": m.name},
     )
     assigned = _assignment_map(db).get(m.id)
-    return _mold_out(m, assigned)
+    return _mold_out(m, assigned, db)
 
 
 @router.delete("/{mold_id}")
@@ -366,6 +407,9 @@ def delete_mold(
         synchronize_session=False,
     )
     db.query(MoldMachine).filter(MoldMachine.mold_id == mold_id).delete(synchronize_session=False)
+    db.query(MoldMachineCapability).filter(MoldMachineCapability.mold_id == mold_id).delete(
+        synchronize_session=False
+    )
     db.delete(m)
     db.commit()
     log_action(
@@ -380,6 +424,75 @@ def delete_mold(
     return {"ok": True}
 
 
+@router.post("/{mold_id}/active-cavity", response_model=MoldOut)
+def bump_active_cavity(
+    mold_id: int,
+    body: ActiveCavityBody,
+    db: Session = Depends(get_db),
+    user=Depends(require_panel_8000),
+):
+    m = db.get(Mold, mold_id)
+    if not m:
+        raise HTTPException(404)
+    if body.delta not in (-1, 1):
+        raise HTTPException(400, detail="delta +1 veya -1 olmalı")
+    cur = effective_cavity(m)
+    nxt = cur + int(body.delta)
+    defined = max(1, int(m.cavity_count or 1))
+    if nxt < 1 or nxt > defined:
+        raise HTTPException(400, detail=f"Aktif göz 1..{defined} arasında olmalı")
+    m.active_cavity_count = nxt
+    db.commit()
+    db.refresh(m)
+    return _mold_out(m, _assignment_map(db).get(m.id), db)
+
+
+@router.get("/{mold_id}/capabilities")
+def get_capabilities(mold_id: int, db: Session = Depends(get_db)):
+    if not db.get(Mold, mold_id):
+        raise HTTPException(404)
+    rows = (
+        db.query(MoldMachineCapability)
+        .filter(MoldMachineCapability.mold_id == mold_id)
+        .order_by(MoldMachineCapability.priority.asc(), MoldMachineCapability.machine_id.asc())
+        .all()
+    )
+    return {
+        "mold_id": mold_id,
+        "items": [
+            {"machine_id": r.machine_id, "allowed": bool(r.allowed), "priority": int(r.priority)}
+            for r in rows
+        ],
+    }
+
+
+@router.put("/{mold_id}/capabilities")
+def put_capabilities(
+    mold_id: int,
+    body: CapabilitiesBody,
+    db: Session = Depends(get_db),
+    user=Depends(require_panel_8000),
+):
+    if not db.get(Mold, mold_id):
+        raise HTTPException(404)
+    db.query(MoldMachineCapability).filter(MoldMachineCapability.mold_id == mold_id).delete(
+        synchronize_session=False
+    )
+    for it in body.items:
+        if not db.get(Machine, it.machine_id):
+            raise HTTPException(400, detail=f"Makine bulunamadı: {it.machine_id}")
+        db.add(
+            MoldMachineCapability(
+                mold_id=mold_id,
+                machine_id=it.machine_id,
+                allowed=bool(it.allowed),
+                priority=int(it.priority),
+            )
+        )
+    db.commit()
+    return get_capabilities(mold_id, db)
+
+
 @router.post("/{mold_id}/name", response_model=MoldOut)
 def name_mold(mold_id: int, body: NameBody, db: Session = Depends(get_db)):
     m = db.get(Mold, mold_id)
@@ -390,7 +503,7 @@ def name_mold(mold_id: int, body: NameBody, db: Session = Depends(get_db)):
     backfill_mold_name_snapshots(db, mold_id, body.name)
     db.commit()
     db.refresh(m)
-    return m
+    return _mold_out(m, _assignment_map(db).get(m.id), db)
 
 
 @router.post("/{mold_id}/ignore", response_model=MoldOut)
@@ -401,7 +514,7 @@ def ignore_mold(mold_id: int, db: Session = Depends(get_db)):
     m.status = "ignored"
     db.commit()
     db.refresh(m)
-    return m
+    return _mold_out(m, _assignment_map(db).get(m.id), db)
 
 
 @router.post("/{mold_id}/confirm-match")

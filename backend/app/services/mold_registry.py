@@ -67,6 +67,7 @@ def assign_mold_to_machine(
     assigned_at: datetime | None = None,
     changeover_start: datetime | None = None,
     changeover_end: datetime | None = None,
+    actual_press_count: int | None = None,
 ) -> tuple[Machine, Mold]:
     machine = db.get(Machine, machine_id)
     mold = db.get(Mold, mold_id)
@@ -85,6 +86,33 @@ def assign_mold_to_machine(
         raise ValueError("Atama saati en fazla 14 gun geriye alinabilir")
 
     prev_mold = machine.current_mold_id and db.get(Mold, machine.current_mold_id) or None
+
+    # Close previous open mold_run(s) on this machine (long-stop vs mold_change rule).
+    try:
+        from app.services.planning.mold_runs import (
+            close_open_runs_for_machine,
+            ensure_open_run_from_assign,
+        )
+
+        if prev_mold and prev_mold.id != mold.id:
+            close_open_runs_for_machine(
+                db,
+                machine_id=machine.id,
+                assign_at=when,
+                entered_press_count=actual_press_count,
+            )
+        elif prev_mold is None and actual_press_count is not None:
+            close_open_runs_for_machine(
+                db,
+                machine_id=machine.id,
+                assign_at=when,
+                entered_press_count=actual_press_count,
+            )
+    except Exception:
+        # Planning layer must never block assignment.
+        import logging
+
+        logging.getLogger(__name__).exception("mold_run close failed mid=%s", machine.id)
 
     # Changeover window: explicit if provided, else standard removal+mount ending at assignment.
     co_start: datetime | None = None
@@ -116,6 +144,8 @@ def assign_mold_to_machine(
         "operator_name": operator_name,
         "operator_id": operator_id,
     }
+    if actual_press_count is not None:
+        payload["actual_press_count"] = int(actual_press_count)
     if co_start and co_end:
         payload["changeover_start"] = co_start.astimezone(timezone.utc).isoformat()
         payload["changeover_end"] = co_end.astimezone(timezone.utc).isoformat()
@@ -127,6 +157,17 @@ def assign_mold_to_machine(
             created_at=when,
         )
     )
+    try:
+        from app.services.planning.mold_runs import ensure_open_run_from_assign
+
+        ensure_open_run_from_assign(
+            db, machine_id=machine.id, mold_id=mold.id, started_at=when
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("mold_run open failed mid=%s", machine.id)
+
     db.commit()
     db.refresh(machine)
     db.refresh(mold)

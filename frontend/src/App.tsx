@@ -7,6 +7,7 @@ import { EventsPage } from "./pages/Events";
 import { LoginPage } from "./pages/Login";
 import { MachineDetailPage } from "./pages/MachineDetail";
 import { MoldsPage } from "./pages/Molds";
+import { PlanningPage } from "./pages/Planning";
 import { TvWallPage } from "./pages/TvWall";
 
 export default function App() {
@@ -27,6 +28,7 @@ export default function App() {
               <Route index element={<DashboardPage />} />
               <Route path="machines/:id" element={<MachineDetailPage />} />
               <Route path="molds" element={<MoldsPage />} />
+              <Route path="planning" element={<PlanningPage />} />
               <Route path="events" element={<EventsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

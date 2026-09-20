@@ -43,6 +43,8 @@ function AssignMoldModal({
   const [assignedAt, setAssignedAt] = useState("");
   const [coStart, setCoStart] = useState("");
   const [coEnd, setCoEnd] = useState("");
+  const [actualPress, setActualPress] = useState("");
+  const [capWarn, setCapWarn] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -80,6 +82,37 @@ function AssignMoldModal({
     return removal + mount;
   }, [selected, currentMold]);
 
+  useEffect(() => {
+    let active = true;
+    if (typeof selectedId !== "number") {
+      setCapWarn(null);
+      return;
+    }
+    apiGet<{ items: Array<{ machine_id: number; allowed: boolean }> }>(
+      `/api/molds/${selectedId}/capabilities`
+    )
+      .then((r) => {
+        if (!active) return;
+        const items = r.items || [];
+        if (!items.length) {
+          setCapWarn(null);
+          return;
+        }
+        const ok = items.some((i) => i.allowed && i.machine_id === machine.id);
+        setCapWarn(
+          ok
+            ? null
+            : "Bu kalıp için makine uyumluluk listesinde bu makine işaretli değil (uyarı; atama engellenmez)."
+        );
+      })
+      .catch(() => {
+        if (active) setCapWarn(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedId, machine.id]);
+
   const customChangeover = coStart !== "" || coEnd !== "";
 
   async function submit() {
@@ -99,6 +132,11 @@ function AssignMoldModal({
       if (customChangeover) {
         body.changeover_start = datetimeLocalInputToUtcIso(coStart);
         body.changeover_end = datetimeLocalInputToUtcIso(coEnd);
+      }
+      if (actualPress.trim()) {
+        const n = parseInt(actualPress, 10);
+        if (!Number.isFinite(n) || n < 0) throw new Error("Gerçek baskı sayısı geçersiz");
+        body.actual_press_count = n;
       }
       await apiPost(`/api/molds/${selectedId}/assign`, body);
       onClose();
@@ -143,6 +181,27 @@ function AssignMoldModal({
             Atarsanız oradan kalkar.
           </p>
         )}
+        {capWarn && (
+          <p className="mt-3 rounded-md border border-amber-700 bg-amber-950/50 px-3 py-2 text-sm text-amber-200">
+            {capWarn}
+          </p>
+        )}
+
+        <label className="mt-4 block text-sm text-slate-300">
+          Önceki kalıp gerçek baskı sayısı (opsiyonel)
+          <input
+            type="number"
+            min={0}
+            className="mt-1 w-full rounded-md border border-slate-600 bg-slate-800 px-3 py-2 text-white"
+            value={actualPress}
+            onChange={(e) => setActualPress(e.target.value)}
+            placeholder="Boş = girilmedi"
+          />
+          <span className="mt-1 block text-xs text-slate-500">
+            Girilirse stoka ürün eklenir (baskı × aktif göz) ve kamera çevrimiyle yalnız «Fark» olarak
+            karşılaştırılır.
+          </span>
+        </label>
 
         <label className="mt-4 block text-sm text-slate-300">
           Atama saati

@@ -8,6 +8,7 @@ const nav = [
   ["/", "Pano"],
   ["/tv", "Bilgi Ekranı"],
   ["/molds", "Kalıplar"],
+  ["/planning", "Planlama"],
   ["/events", "Olaylar"],
 ];
 

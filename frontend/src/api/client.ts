@@ -56,6 +56,31 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
 
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(`${base}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    handleUnauthorized(r.status);
+    throw new Error(await r.text());
+  }
+  return r.json() as Promise<T>;
+}
+
+export async function apiUpload<T>(path: string, file: File): Promise<T> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(`${base}${path}`, { method: "POST", credentials: "include", body: fd });
+  if (!r.ok) {
+    handleUnauthorized(r.status);
+    throw new Error(await r.text());
+  }
+  return r.json() as Promise<T>;
+}
+
 export async function apiDownloadCsv(path: string, fallbackFilename: string): Promise<void> {
   const r = await fetch(`${base}${path}`, { credentials: "include" });
   if (!r.ok) throw new Error(await r.text());
