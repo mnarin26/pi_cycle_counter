@@ -23,6 +23,7 @@ from app.services.stored_settings import get_telegram_config
 from app.services.telegram_auth import can_assign, can_create_mold, get_operator
 from app.services.daily_password import issue_daily_password
 from app.services import audit_log
+from app.bot.telegram_poll import http_error_description, is_webhook_conflict
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,16 @@ def _api(token: str, method: str, **payload) -> dict[str, Any]:
     if not data.get("ok"):
         raise RuntimeError(data.get("description") or "Telegram API hatasi")
     return data
+
+
+def ensure_long_polling(token: str) -> None:
+    """Drop any active webhook so getUpdates long-polling can receive messages.
+
+    External hosts (e.g. a broken tele.* relay) can re-register a webhook and
+    mute the Pi bot with HTTP 409 / silent delivery to a dead URL. Call this
+    before each getUpdates; deleteWebhook is idempotent.
+    """
+    _api(token, "deleteWebhook", drop_pending_updates=False)
 
 
 def send_message(token: str, chat_id: int, text: str, *, reply_markup: dict | None = None) -> None:
@@ -692,7 +703,7 @@ def run_forever() -> None:
 
     start_alert_thread(send_message)
     logger.info("Telegram bot baslatiliyor...")
-    webhook_cleared_for: str | None = None
+    webhook_warn_logged = False
     while True:
         db = db_session.SessionLocal()
         try:
@@ -707,15 +718,17 @@ def run_forever() -> None:
         finally:
             db.close()
 
-        # Long-polling (getUpdates) conflicts with an active webhook → 409.
-        # Clear once per token so an old webhook (e.g. external host) cannot mute the bot.
-        if webhook_cleared_for != token:
-            try:
-                _api(token, "deleteWebhook", drop_pending_updates=False)
+        # Long-polling conflicts with any active webhook → 409 / muted bot.
+        # Re-clear every poll: external relays may re-register the webhook.
+        try:
+            ensure_long_polling(token)
+            if not webhook_warn_logged:
                 logger.info("Telegram webhook temizlendi (getUpdates icin)")
-            except Exception:
-                logger.exception("deleteWebhook basarisiz")
-            webhook_cleared_for = token
+                webhook_warn_logged = True
+        except Exception:
+            logger.exception("deleteWebhook basarisiz")
+            time.sleep(5)
+            continue
 
         try:
             data = _api(token, "getUpdates", offset=_runtime.offset, timeout=30)
@@ -733,8 +746,20 @@ def run_forever() -> None:
                     except Exception:
                         logger.exception("hata mesaji gonderilemedi")
         except httpx.HTTPStatusError as e:
+            desc = http_error_description(e)
+            if e.response.status_code == 409 and is_webhook_conflict(e):
+                logger.error(
+                    "409 Conflict: webhook hala aktif — tekrar temizleniyor (%s)",
+                    desc or "webhook",
+                )
+                webhook_warn_logged = False
+                time.sleep(1)
+                continue
             if e.response.status_code == 409:
-                logger.error("409 Conflict: baska bot instance calisiyor — fazlalari durdurun")
+                logger.error(
+                    "409 Conflict: baska getUpdates instance — fazlalari durdurun (%s)",
+                    desc or "conflict",
+                )
             logger.exception("Telegram HTTP hatasi")
             time.sleep(5)
         except Exception:
