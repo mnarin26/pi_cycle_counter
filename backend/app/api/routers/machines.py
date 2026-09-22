@@ -61,6 +61,7 @@ class MachineOut(BaseModel):
     line_thickness: int
     reflector_len_min: int | None
     reflector_len_max: int | None
+    reflector_dual_regime: bool = False
     occlusion_grace_ms: int
     debounce_ms: int
     stability_confirm_ms: int
@@ -100,6 +101,7 @@ class MachineUpdate(BaseModel):
     line_thickness: int | None = Field(default=None, ge=1, le=51)
     reflector_len_min: int | None = Field(default=None, ge=1, le=2000)
     reflector_len_max: int | None = Field(default=None, ge=1, le=2000)
+    reflector_dual_regime: bool | None = None
     occlusion_grace_ms: int | None = Field(default=None, ge=0, le=5000)
     debounce_ms: int | None = None
     stability_confirm_ms: int | None = None

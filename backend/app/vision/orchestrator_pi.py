@@ -36,7 +36,7 @@ from app.services.cycle_tracker import CycleTracker
 from app.services.process_log import ProcessLog
 from app.services.mold_matcher import handle_cycle_completion
 from app.services.playback_buffer import PlaybackBuffer
-from app.vision.line_pipeline import line_peak_position_gray
+from app.vision.line_pipeline import line_peak_position_gray, resolve_detect_regime
 from app.vision.performance import PerformanceMonitor
 from app.vision.rtsp_worker import RtspWorker
 from app.vision.state_machine import ClampStateMachine, StateMachineConfig
@@ -64,6 +64,8 @@ class MachineRuntime:
     dbg_cycle_emit_count: int = 0
     dbg_last_confirmed: str = "UNKNOWN"
     last_frame_mono: float = 0.0
+    # Dual-regime hysteresis state ("global" | "local"); only used when flag ON.
+    detect_regime: str = "global"
 
 
 class CameraProcessWorker(threading.Thread):
@@ -339,6 +341,7 @@ class VisionOrchestrator(threading.Thread):
         rt = self.machine_rt[m.id]
         rt.last_frame_mono = float(frame_mono)
 
+        dual_regime = bool(getattr(m, "reflector_dual_regime", False))
         result = line_peak_position_gray(
             gray=gray,
             axis_p0_json=m.axis_p0,
@@ -349,13 +352,19 @@ class VisionOrchestrator(threading.Thread):
             prominence_offset=int(m.threshold_offset or 0),
             reflector_len_min=m.reflector_len_min,
             reflector_len_max=m.reflector_len_max,
+            dual_regime=dual_regime,
+            prev_regime=rt.detect_regime if dual_regime else None,
         )
 
-        # Extra guard: line_pipeline can still accept a single-sample glitch as "found";
-        # that keeps last_found_mono fresh and locks OPEN/CLOSED. Real stripe is wider post-blur.
         effective_found = bool(result.found)
-        if effective_found and result.segment_len == 1 and result.prominence < 42:
-            effective_found = False
+        if dual_regime:
+            g_delta = int(result.global_delta if result.global_delta is not None else result.prominence)
+            rt.detect_regime = resolve_detect_regime(rt.detect_regime, g_delta)
+        else:
+            # Extra guard: line_pipeline can still accept a single-sample glitch as "found";
+            # that keeps last_found_mono fresh and locks OPEN/CLOSED. Real stripe is wider post-blur.
+            if effective_found and result.segment_len == 1 and result.prominence < 42:
+                effective_found = False
 
         pos: float | None = None
         centroid_xy: tuple[float, float] | None = None
@@ -536,6 +545,15 @@ class VisionOrchestrator(threading.Thread):
                 "line_thickness": int(m.line_thickness or 7),
                 "reflector_len_min": m.reflector_len_min,
                 "reflector_len_max": m.reflector_len_max,
+                "reflector_dual_regime": bool(getattr(m, "reflector_dual_regime", False)),
+                "detect_regime": result.detect_regime if dual_regime else None,
+                "global_delta": int(result.global_delta) if dual_regime and result.global_delta is not None else None,
+                "local_delta": int(result.local_delta) if dual_regime and result.local_delta is not None else None,
+                "reliability_score": (
+                    float(result.reliability_score)
+                    if dual_regime and result.reliability_score is not None
+                    else None
+                ),
                 "occlusion_hold": occlusion_hold,
                 "dbg_cycle_emit_count": int(rt.dbg_cycle_emit_count),
             }
