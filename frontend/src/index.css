@@ -7,3 +7,30 @@ body {
   min-height: 100vh;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
 }
+
+/* Operator left-rail nav: collapsed emblems, hover/pin expand */
+.op-nav-rail .op-nav {
+  width: 52px;
+  transition: width 0.18s ease, box-shadow 0.18s ease;
+}
+.op-nav-rail.is-pinned .op-nav,
+.op-nav-rail:hover .op-nav,
+.op-nav-rail:focus-within .op-nav {
+  width: 240px;
+}
+.op-nav-rail:not(.is-pinned):hover .op-nav,
+.op-nav-rail:not(.is-pinned):focus-within .op-nav {
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+}
+.op-nav-rail .op-nav-label {
+  opacity: 0;
+  max-width: 0;
+  overflow: hidden;
+  transition: opacity 0.12s ease, max-width 0.12s ease;
+}
+.op-nav-rail.is-pinned .op-nav-label,
+.op-nav-rail:hover .op-nav-label,
+.op-nav-rail:focus-within .op-nav-label {
+  opacity: 1;
+  max-width: 180px;
+}
