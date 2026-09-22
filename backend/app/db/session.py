@@ -137,6 +137,13 @@ def init_db() -> None:
         _add_column_if_missing(conn, "machines", machine_cols, "line_thickness", "line_thickness INTEGER NOT NULL DEFAULT 7")
         _add_column_if_missing(conn, "machines", machine_cols, "reflector_len_min", "reflector_len_min INTEGER")
         _add_column_if_missing(conn, "machines", machine_cols, "reflector_len_max", "reflector_len_max INTEGER")
+        _add_column_if_missing(
+            conn,
+            "machines",
+            machine_cols,
+            "reflector_dual_regime",
+            "reflector_dual_regime INTEGER NOT NULL DEFAULT 0",
+        )
         _add_column_if_missing(conn, "machines", machine_cols, "occlusion_grace_ms", "occlusion_grace_ms INTEGER NOT NULL DEFAULT 300")
         _add_column_if_missing(conn, "machines", machine_cols, "qr_code", "qr_code VARCHAR(64)")
         # Optional legacy column from brief move_eps experiment (unused by ORM).

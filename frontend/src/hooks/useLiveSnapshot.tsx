@@ -24,6 +24,11 @@ export type MachineSnap = {
   line_thickness?: number;
   reflector_len_min?: number | null;
   reflector_len_max?: number | null;
+  reflector_dual_regime?: boolean;
+  detect_regime?: "global" | "local" | null;
+  global_delta?: number | null;
+  local_delta?: number | null;
+  reliability_score?: number | null;
   dbg_cycle_emit_count?: number;
   idle_s?: number | null;
 };

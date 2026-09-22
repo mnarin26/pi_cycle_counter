@@ -444,6 +444,14 @@
             <input id="lenMax" type="number" min="1" max="2000" />
           </div>
           <div class="col-3">
+            <label>İki adımlı tespit</label>
+            <select id="dualRegime">
+              <option value="false">Kapalı (eski yol)</option>
+              <option value="true">Açık</option>
+            </select>
+            <p class="muted" style="margin-top:4px;">Açık: histerezis 75/100 + local küme; len_max aşımı local'e düşer. Kapalı: tam eski yol.</p>
+          </div>
+          <div class="col-3">
             <label>Kalibrasyon Sure (sn)</label>
             <input id="lenCalibSec" type="number" min="3" max="60" step="1" value="12" />
           </div>
@@ -1119,6 +1127,7 @@
         lineThickness: 'Sari cizgi etrafindaki ornek bandi (px). Tespit dayanikliligi; zigzag sayim kurali degil.',
         lenMin: 'Parlak segment min uzunlugu. Cok kisa isik noktalarini reddeder (tespit).',
         lenMax: 'Parlak segment max uzunlugu. Cok genis parlak alanlari reddeder (tespit).',
+        dualRegime: 'İki adımlı reflektör tespiti. Kapalı=tam eski yol (42 veto dahil). Açık=histerezis Δ≤75 local / Δ≥100 global + local küme; len_max aşımı ret değil local\'e düşer.',
         lenCalibSec: 'Uzunluk kalibrasyon suresi (sn). Reflektoru cizgi boyunca gezdirin.',
         minProminence: 'UI alani: kaydedilir ama CANLI kod su an global 0.12 sabit kullanir (makine satiri yok sayilir). Zigzag min salinim esigi.',
         countingMode: 'KULLANILMIYOR. Canli her zaman zigzag peak/trough. Schmitt secimi sayimi degistirmez.',
@@ -1424,7 +1433,15 @@
         const lmin = m.reflector_len_min;
         const lmax = m.reflector_len_max;
         const lenTxt = (lmin != null && lmax != null) ? ` len ${seg} (${lmin}-${lmax})` : ` len ${seg}`;
-        return `${peak}/${bg}  Δ${prom}${lenTxt}`;
+        const dualOn = !!(sm.reflector_dual_regime ?? m.reflector_dual_regime);
+        let dualTxt = '';
+        if(dualOn){
+          const reg = sm.detect_regime || '—';
+          const gd = sm.global_delta != null ? sm.global_delta : prom;
+          const ld = sm.local_delta != null ? sm.local_delta : '—';
+          dualTxt = ` | 2adım ${reg} gΔ${gd} lΔ${ld}`;
+        }
+        return `${peak}/${bg}  Δ${prom}${lenTxt}${dualTxt}`;
       }
 
       function renderMachineLiveTable(){
@@ -1547,9 +1564,14 @@
         const found = d.found != null ? (d.found ? 'evet' : 'hayir') : '—';
         const age = d.frame_age_ms != null ? `${Math.round(Number(d.frame_age_ms))} ms` : '—';
         const reasons = Array.isArray(d.anomaly_reasons) ? d.anomaly_reasons.join(',') : (d.anomaly_reasons || '');
+        const dualOn = !!d.reflector_dual_regime;
+        const dualLine = dualOn
+          ? `<div><b>İki adımlı:</b> açık &nbsp; <b>rejim:</b> ${escapeHtml(String(d.detect_regime || '—'))} &nbsp; <b>gΔ:</b> ${escapeHtml(String(d.global_delta != null ? d.global_delta : '—'))} &nbsp; <b>lΔ:</b> ${escapeHtml(String(d.local_delta != null ? d.local_delta : '—'))}${d.reliability_score != null ? ` &nbsp; <b>skor:</b> ${escapeHtml(String(d.reliability_score))}` : ''}</div>`
+          : `<div><b>İki adımlı:</b> kapalı (eski yol)</div>`;
         return `<div><b>Eşik:</b> ${escapeHtml(th + off)}</div>
           <div><b>Peak/bg:</b> ${escapeHtml(peakBg)} &nbsp; <b>Δ:</b> ${escapeHtml(delta)}</div>
           <div><b>Len:</b> ${escapeHtml(len)} &nbsp; <b>Found:</b> ${escapeHtml(found)} &nbsp; <b>pos:</b> ${escapeHtml(pos)}</div>
+          ${dualLine}
           <div><b>Kare yaşı:</b> ${escapeHtml(age)}${reasons ? ` &nbsp; <b>Anomali:</b> ${escapeHtml(String(reasons))}` : ''}</div>`;
       }
 
@@ -2397,6 +2419,7 @@
         q('lineThickness').value = Number(m.line_thickness || 7);
         q('lenMin').value = m.reflector_len_min ?? '';
         q('lenMax').value = m.reflector_len_max ?? '';
+        if(q('dualRegime')) q('dualRegime').value = m.reflector_dual_regime ? 'true' : 'false';
         q('thMax').value = m.threshold_max;
         q('thresholdMode').value = normalizeThresholdMode(m.threshold_mode);
         q('minProminence').value = m.min_prominence != null ? m.min_prominence : 0.1;
@@ -2616,6 +2639,7 @@
             line_thickness: Number(q('lineThickness').value || 7),
             reflector_len_min: q('lenMin').value ? Number(q('lenMin').value) : null,
             reflector_len_max: q('lenMax').value ? Number(q('lenMax').value) : null,
+            reflector_dual_regime: q('dualRegime') ? q('dualRegime').value === 'true' : false,
             threshold_max: Number(q('thMax').value),
             min_prominence: Number(q('minProminence').value || 0.1),
             occlusion_grace_ms: parseMs('occlusionGraceMs', 300),

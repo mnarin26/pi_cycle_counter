@@ -55,6 +55,8 @@ class Machine(Base):
     line_thickness: Mapped[int] = mapped_column(Integer, default=7)  # perpendicular sampling window for 1D line probe
     reflector_len_min: Mapped[int | None] = mapped_column(Integer, nullable=True)  # learned lower bound in line samples
     reflector_len_max: Mapped[int | None] = mapped_column(Integer, nullable=True)  # learned upper bound in line samples
+    # Two-step reflector detect (hysteresis + local cluster). Default OFF = exact legacy path.
+    reflector_dual_regime: Mapped[bool] = mapped_column(Boolean, default=False)
     occlusion_grace_ms: Mapped[int] = mapped_column(Integer, default=300)
     debounce_ms: Mapped[int] = mapped_column(Integer, default=80)
     stability_confirm_ms: Mapped[int] = mapped_column(Integer, default=500)
