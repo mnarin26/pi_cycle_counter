@@ -8,12 +8,137 @@
       body { margin: 0; font-family: Arial, sans-serif; background: #0b1220; color: #e2e8f0; }
       .wrap { max-width: none; margin: 0; padding: 0; }
       .admin-top { padding: 16px 16px 0; }
-      .admin-shell { display: flex; min-height: calc(100vh - 72px); }
-      .admin-nav { width: 240px; flex-shrink: 0; background: #0f172a; border-right: 1px solid #334155; padding: 12px 10px; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
-      .nav-item { display: block; width: 100%; text-align: left; margin-bottom: 6px; padding: 10px 12px; background: transparent; border: 1px solid transparent; border-radius: 8px; color: #cbd5e1; font-weight: normal; font-size: 13px; cursor: pointer; }
+      .admin-shell { display: flex; min-height: calc(100vh - 72px); position: relative; }
+      .admin-nav-rail {
+        position: relative;
+        width: 52px;
+        flex-shrink: 0;
+        z-index: 30;
+      }
+      .admin-nav-rail.is-pinned { width: 240px; }
+      .admin-nav {
+        position: absolute;
+        left: 0; top: 0;
+        width: 52px;
+        min-height: 100%;
+        max-height: 100vh;
+        overflow-x: hidden;
+        overflow-y: auto;
+        background: #0f172a;
+        border-right: 1px solid #334155;
+        padding: 10px 6px;
+        box-sizing: border-box;
+        transition: width 0.18s ease, box-shadow 0.18s ease;
+      }
+      .admin-nav-rail.is-pinned .admin-nav,
+      .admin-nav-rail:hover .admin-nav,
+      .admin-nav-rail:focus-within .admin-nav {
+        width: 240px;
+      }
+      .admin-nav-rail:not(.is-pinned):hover .admin-nav,
+      .admin-nav-rail:not(.is-pinned):focus-within .admin-nav {
+        box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+      }
+      .nav-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 8px;
+        margin-bottom: 10px;
+        min-height: 36px;
+        padding: 0 2px;
+      }
+      .nav-pin-btn {
+        width: auto;
+        min-width: 36px;
+        height: 36px;
+        padding: 0 8px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        background: #1e293b;
+        color: #cbd5e1;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .nav-pin-btn:hover { background: #334155; }
+      .admin-nav-rail.is-pinned .nav-pin-btn {
+        background: #172554;
+        border-color: #3b82f6;
+        color: #93c5fd;
+      }
+      .nav-pin-icon { font-size: 14px; line-height: 1; }
+      .nav-pin-label {
+        display: none;
+        overflow: hidden;
+      }
+      .admin-nav-rail.is-pinned .nav-pin-label,
+      .admin-nav-rail:hover .nav-pin-label,
+      .admin-nav-rail:focus-within .nav-pin-label {
+        display: inline;
+      }
+      .nav-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        text-align: left;
+        margin-bottom: 6px;
+        padding: 8px;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        color: #cbd5e1;
+        font-weight: normal;
+        font-size: 13px;
+        cursor: pointer;
+        min-height: 40px;
+        box-sizing: border-box;
+      }
       .nav-item:hover { background: #1e293b; }
-      .nav-item.active { background: #172554; border-color: #334155; color: #93c5fd; font-weight: bold; }
-      .admin-main { flex: 1; padding: 16px; overflow: auto; }
+      .nav-item.active {
+        background: #172554;
+        border-color: #3b82f6;
+        color: #93c5fd;
+        font-weight: bold;
+        box-shadow: inset 3px 0 0 #38bdf8;
+      }
+      .nav-emblem {
+        flex: 0 0 28px;
+        width: 28px;
+        height: 28px;
+        border-radius: 7px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: #1e293b;
+        color: #94a3b8;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .nav-item.active .nav-emblem {
+        background: #1d4ed8;
+        color: #eff6ff;
+      }
+      .nav-label {
+        white-space: nowrap;
+        overflow: hidden;
+        opacity: 0;
+        max-width: 0;
+        transition: opacity 0.12s ease, max-width 0.12s ease;
+      }
+      .admin-nav-rail.is-pinned .nav-label,
+      .admin-nav-rail:hover .nav-label,
+      .admin-nav-rail:focus-within .nav-label {
+        opacity: 1;
+        max-width: 180px;
+      }
+      .admin-main { flex: 1; padding: 16px; overflow: auto; min-width: 0; }
       .admin-panel { display: none; }
       .admin-panel.active { display: block; }
       .section-divider { border: 0; border-top: 1px solid #334155; margin: 20px 0 16px; }
@@ -138,16 +263,48 @@
         <p class="muted" style="margin:8px 0 0;">Ozet pano: <a id="mainAppLink" href="#" style="color:#93c5fd">8000</a> · TV: <a id="tvAppLink" href="#" style="color:#93c5fd">8000/tv</a></p>
       </div>
       <div class="admin-shell">
-        <nav class="admin-nav" aria-label="Bolumler">
-          <button type="button" class="nav-item active" data-panel="panel-live">1. Canli goruntu</button>
-          <button type="button" class="nav-item" data-panel="panel-machines">2. Makineler</button>
-          <button type="button" class="nav-item" data-panel="panel-camera">3. Kamera</button>
-          <button type="button" class="nav-item" data-panel="panel-telegram">4. Yetkilendirme</button>
-          <button type="button" class="nav-item" data-panel="panel-system">5. Pi saati ve Wi-Fi</button>
-          <button type="button" class="nav-item" data-panel="panel-tv">6. TV ve vardiya</button>
-          <button type="button" class="nav-item" data-panel="panel-audit">7. Islem kayitlari</button>
-          <button type="button" class="nav-item" data-panel="panel-diagnosis">8. Diagnosis</button>
-        </nav>
+        <div class="admin-nav-rail" id="adminNavRail" aria-label="Sol menu rayi">
+          <nav class="admin-nav" id="adminNav" aria-label="Bolumler">
+            <div class="nav-toolbar">
+              <button type="button" class="nav-pin-btn" id="navPinBtn" aria-pressed="false" title="Menuyu sabitle">
+                <span class="nav-pin-icon" aria-hidden="true">⊙</span>
+                <span class="nav-pin-label">Sabitle</span>
+              </button>
+            </div>
+            <button type="button" class="nav-item active" data-panel="panel-live" title="Canli goruntu">
+              <span class="nav-emblem" aria-hidden="true">1</span>
+              <span class="nav-label">1. Canli goruntu</span>
+            </button>
+            <button type="button" class="nav-item" data-panel="panel-machines" title="Makineler">
+              <span class="nav-emblem" aria-hidden="true">2</span>
+              <span class="nav-label">2. Makineler</span>
+            </button>
+            <button type="button" class="nav-item" data-panel="panel-camera" title="Kamera">
+              <span class="nav-emblem" aria-hidden="true">3</span>
+              <span class="nav-label">3. Kamera</span>
+            </button>
+            <button type="button" class="nav-item" data-panel="panel-telegram" title="Yetkilendirme">
+              <span class="nav-emblem" aria-hidden="true">4</span>
+              <span class="nav-label">4. Yetkilendirme</span>
+            </button>
+            <button type="button" class="nav-item" data-panel="panel-system" title="Pi saati ve Wi-Fi">
+              <span class="nav-emblem" aria-hidden="true">5</span>
+              <span class="nav-label">5. Pi saati ve Wi-Fi</span>
+            </button>
+            <button type="button" class="nav-item" data-panel="panel-tv" title="TV ve vardiya">
+              <span class="nav-emblem" aria-hidden="true">6</span>
+              <span class="nav-label">6. TV ve vardiya</span>
+            </button>
+            <button type="button" class="nav-item" data-panel="panel-audit" title="Islem kayitlari">
+              <span class="nav-emblem" aria-hidden="true">7</span>
+              <span class="nav-label">7. Islem kayitlari</span>
+            </button>
+            <button type="button" class="nav-item" data-panel="panel-diagnosis" title="Diagnosis">
+              <span class="nav-emblem" aria-hidden="true">8</span>
+              <span class="nav-label">8. Diagnosis</span>
+            </button>
+          </nav>
+        </div>
         <main class="admin-main">
 
       <section id="panel-live" class="admin-panel active">
@@ -908,6 +1065,27 @@
           if(panelId) showPanel(panelId);
         });
       });
+
+      (function initAdminNavRail(){
+        const rail = document.getElementById('adminNavRail');
+        const pinBtn = document.getElementById('navPinBtn');
+        const pinLabel = pinBtn ? pinBtn.querySelector('.nav-pin-label') : null;
+        const pinIcon = pinBtn ? pinBtn.querySelector('.nav-pin-icon') : null;
+        if(!rail || !pinBtn) return;
+        const KEY = 'adminNavPinned';
+        function applyPinned(pinned){
+          rail.classList.toggle('is-pinned', pinned);
+          pinBtn.setAttribute('aria-pressed', pinned ? 'true' : 'false');
+          pinBtn.title = pinned ? 'Sabitlemeyi kaldir' : 'Menuyu sabitle';
+          if(pinLabel) pinLabel.textContent = pinned ? 'Sabitli' : 'Sabitle';
+          if(pinIcon) pinIcon.textContent = pinned ? '◉' : '⊙';
+          try { localStorage.setItem(KEY, pinned ? '1' : '0'); } catch (_) {}
+        }
+        let pinned = false;
+        try { pinned = localStorage.getItem(KEY) === '1'; } catch (_) {}
+        applyPinned(pinned);
+        pinBtn.addEventListener('click', () => applyPinned(!rail.classList.contains('is-pinned')));
+      })();
 
       const hashKey = (location.hash || '').replace(/^#/, '');
       if(PANEL_BY_HASH[hashKey]) showPanel(PANEL_BY_HASH[hashKey]);
