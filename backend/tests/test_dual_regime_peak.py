@@ -151,3 +151,37 @@ def test_flag_off_does_not_use_soft_len_max():
     assert off.found is False
     assert off.detect_regime is None
     assert off.segment_len == 8
+    assert off.reject_reason is None
+
+
+def test_flag_on_local_cluster_outside_len_max_sets_reject_reason():
+    """Wide bright island: local expand stays > len_max → reject_reason=len_band (E003)."""
+    smooth = np.full(40, 100.0, dtype=np.float32)
+    smooth[17:23] = 240.0  # 6-sample plateau; neighbor drop keeps all 6
+    xs = np.arange(40, dtype=np.float32)
+    ys = np.zeros(40, dtype=np.float32)
+
+    on = line_peak_on_smooth_profile(
+        smooth,
+        xs,
+        ys,
+        prominence_min=20,
+        reflector_len_min=1,
+        reflector_len_max=3,
+        dual_regime=True,
+        prev_regime="local",
+    )
+    assert on.found is False
+    assert on.detect_regime == "local"
+    assert on.segment_len > 3
+    assert on.reject_reason == "len_band"
+
+
+def test_flag_on_successful_find_clears_reject_reason():
+    smooth = np.full(40, 100.0, dtype=np.float32)
+    smooth[20] = 141.0
+    on = line_peak_on_smooth_profile(
+        smooth, prominence_min=20, dual_regime=True, prev_regime="local"
+    )
+    assert on.found is True
+    assert on.reject_reason is None

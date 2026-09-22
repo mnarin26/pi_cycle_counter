@@ -138,6 +138,11 @@ def format_detail_message(code: str, detail: dict[str, Any] | None) -> str | Non
         if lo is not None or hi is not None:
             span = f" (min {lo if lo is not None else '—'} – max {hi if hi is not None else '—'})"
         lines.append(f"Len: {seg if seg is not None else '—'}{span}")
+    regime = d.get("detect_regime")
+    if regime is not None:
+        lines.append(f"Rejim: {regime}")
+    if d.get("reject_reason"):
+        lines.append(f"Red nedeni: {d.get('reject_reason')}")
     thick = d.get("line_thickness")
     if thick is not None:
         lines.append(f"Kalınlık: {thick}")
@@ -152,6 +157,17 @@ def format_detail_message(code: str, detail: dict[str, Any] | None) -> str | Non
         "len_min",
         "len_max",
         "line_thickness",
+        "brightness_band",
+        "band_along",
+        "band_thickness",
+        "reject_reason",
+        "detect_regime",
+        "global_delta",
+        "local_delta",
+        "reliability_score",
+        "anomaly_reasons",
+        "found",
+        "effective_found",
     }
     extra = [k for k in d.keys() if k not in used and d[k] is not None]
     for k in extra:

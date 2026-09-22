@@ -55,6 +55,9 @@ class LineProbeResult:
     global_delta: int | None = None
     local_delta: int | None = None
     reliability_score: float | None = None
+    # Dual-regime only: "len_band" when local cluster length is outside len_min–len_max.
+    # Orchestrator maps this to E003 (not classic E001).
+    reject_reason: str | None = None
 
 
 # Dual-regime constants (code-only; not UI knobs).
@@ -629,6 +632,7 @@ def find_local_bright_cluster(
             global_delta=g_delta,
             local_delta=local_delta,
             reliability_score=0.0,
+            reject_reason="len_band",
         )
     if reflector_len_max is not None and segment_len > int(reflector_len_max):
         return LineProbeResult(
@@ -644,6 +648,7 @@ def find_local_bright_cluster(
             global_delta=g_delta,
             local_delta=local_delta,
             reliability_score=0.0,
+            reject_reason="len_band",
         )
 
     score = reliability_score_for_segment(

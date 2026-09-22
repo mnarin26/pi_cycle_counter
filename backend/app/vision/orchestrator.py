@@ -76,6 +76,9 @@ class MachineRuntime:
     # Starts True so an alarm left open by a previous process run is closed on
     # the first found frame after startup (one cheap resolve() per machine).
     reflector_was_lost: bool = True
+    # E003: dual-regime len_band reject active → resolve once on found (or when
+    # loss reason switches to classic E001). Starts True to clear stale E003.
+    len_band_was_active: bool = True
     # E002: brightness anomaly active → resolve once when signal returns to normal.
     signal_anomaly_was_active: bool = False
     # Dual-regime hysteresis state ("global" | "local"); only used when flag ON.
@@ -520,15 +523,22 @@ class VisionOrchestrator(threading.Thread):
             pos = None
             centroid_xy = None
 
-        # E001: true reflector loss (not occlusion hold, not "UNKNOWN with pos").
-        # Resolve is code-specific: E001 closes as soon as reflector is found again.
-        # Other fault codes will use their own resolve conditions later.
+        # Reflector loss alarms (mutually exclusive per frame when dual ON):
+        #   E003 — dual-regime local cluster outside len_min–len_max
+        #   E001 — classic reflector not found (all other loss reasons)
+        # Resolve is code-specific: both close when reflector is found again.
         # Transition-only: note_active() is memory-throttled (60 s) so it is cheap
         # per frame; resolve() hits SQLite, so call it once on lost -> found only.
-        reflector_lost = bool(not effective_found and not occlusion_hold)
-        if reflector_lost:
-            rt.reflector_was_lost = True
-            detail_e001: dict[str, Any] = {
+        lost_no_hold = bool(not effective_found and not occlusion_hold)
+        len_band_reject = bool(
+            dual_regime
+            and lost_no_hold
+            and getattr(result, "reject_reason", None) == "len_band"
+        )
+        reflector_lost = bool(lost_no_hold and not len_band_reject)
+
+        def _reflector_detail() -> dict[str, Any]:
+            d: dict[str, Any] = {
                 "threshold_mode": (m.threshold_mode or "fixed").lower(),
                 "threshold_active": int(result.active_threshold),
                 "threshold_offset": int(m.threshold_offset or 0),
@@ -540,6 +550,42 @@ class VisionOrchestrator(threading.Thread):
                 "len_max": m.reflector_len_max,
                 "line_thickness": int(m.line_thickness or 7),
             }
+            if dual_regime:
+                d["detect_regime"] = result.detect_regime
+                d["global_delta"] = result.global_delta
+                d["local_delta"] = result.local_delta
+                if result.reject_reason:
+                    d["reject_reason"] = result.reject_reason
+            return d
+
+        if len_band_reject:
+            rt.len_band_was_active = True
+            detail_e003 = _reflector_detail()
+            if fault_log.would_write(machine_id=m.id, code="E003", now_mono=now_mono):
+                try:
+                    band = sample_line_band_gray(
+                        gray,
+                        m.axis_p0,
+                        m.axis_p1,
+                        thickness_px=int(m.line_thickness or 7),
+                    )
+                    detail_e003.update(pack_brightness_band(band))
+                except Exception:
+                    logger.exception("E003 brightness band capture failed mid=%s", m.id)
+            fault_log.note_active(
+                machine_id=m.id,
+                machine_name=m.name,
+                code="E003",
+                now_mono=now_mono,
+                detail=detail_e003,
+            )
+            # Do not keep classic E001 open for the same len-band episode.
+            if rt.reflector_was_lost:
+                rt.reflector_was_lost = False
+                fault_log.resolve(machine_id=m.id, code="E001")
+        elif reflector_lost:
+            rt.reflector_was_lost = True
+            detail_e001 = _reflector_detail()
             # Band/preview only when a DB sample will be written (hot-path safe).
             if fault_log.would_write(machine_id=m.id, code="E001", now_mono=now_mono):
                 try:
@@ -559,9 +605,16 @@ class VisionOrchestrator(threading.Thread):
                 now_mono=now_mono,
                 detail=detail_e001,
             )
-        elif effective_found and rt.reflector_was_lost:
-            rt.reflector_was_lost = False
-            fault_log.resolve(machine_id=m.id, code="E001")
+            if rt.len_band_was_active:
+                rt.len_band_was_active = False
+                fault_log.resolve(machine_id=m.id, code="E003")
+        else:
+            if effective_found and rt.reflector_was_lost:
+                rt.reflector_was_lost = False
+                fault_log.resolve(machine_id=m.id, code="E001")
+            if effective_found and rt.len_band_was_active:
+                rt.len_band_was_active = False
+                fault_log.resolve(machine_id=m.id, code="E003")
 
         # E002: peak/bg close / both high / both low. Integer checks every frame;
         # brightness band (remap) only when note_active would actually write.
