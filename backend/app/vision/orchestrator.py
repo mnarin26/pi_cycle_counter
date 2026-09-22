@@ -41,6 +41,7 @@ from app.services.playback_buffer import PlaybackBuffer
 from app.vision.line_pipeline import (
     line_peak_position_gray,
     pack_brightness_band,
+    resolve_detect_regime,
     sample_line_band_gray,
 )
 from app.vision.performance import PerformanceMonitor
@@ -77,6 +78,8 @@ class MachineRuntime:
     reflector_was_lost: bool = True
     # E002: brightness anomaly active → resolve once when signal returns to normal.
     signal_anomaly_was_active: bool = False
+    # Dual-regime hysteresis state ("global" | "local"); only used when flag ON.
+    detect_regime: str = "global"
 
 # Idle poll when no new frame is available yet (camera ~7-10 FPS => 100-130 ms/frame).
 _IDLE_POLL_S = 0.012
@@ -437,6 +440,7 @@ class VisionOrchestrator(threading.Thread):
         rt.last_frame_mono = float(frame_mono)
 
         t0 = time.monotonic()
+        dual_regime = bool(getattr(m, "reflector_dual_regime", False))
         result = line_peak_position_gray(
             gray=gray,
             axis_p0_json=m.axis_p0,
@@ -447,14 +451,22 @@ class VisionOrchestrator(threading.Thread):
             prominence_offset=int(m.threshold_offset or 0),
             reflector_len_min=m.reflector_len_min,
             reflector_len_max=m.reflector_len_max,
+            dual_regime=dual_regime,
+            prev_regime=rt.detect_regime if dual_regime else None,
         )
         self._note_stage("probe", time.monotonic() - t0)
 
-        # Extra guard: line_pipeline can still accept a single-sample glitch as "found";
-        # that keeps last_found_mono fresh and locks OPEN/CLOSED. Real stripe is wider post-blur.
         effective_found = bool(result.found)
-        if effective_found and result.segment_len == 1 and result.prominence < 42:
-            effective_found = False
+        if dual_regime:
+            # Advance hysteresis from global_Δ only (len_max fall-through does not flip hold state).
+            g_delta = int(result.global_delta if result.global_delta is not None else result.prominence)
+            rt.detect_regime = resolve_detect_regime(rt.detect_regime, g_delta)
+            # No legacy seg==1 && prom<42 veto when dual regime is ON.
+        else:
+            # Extra guard: line_pipeline can still accept a single-sample glitch as "found";
+            # that keeps last_found_mono fresh and locks OPEN/CLOSED. Real stripe is wider post-blur.
+            if effective_found and result.segment_len == 1 and result.prominence < 42:
+                effective_found = False
 
         pos: float | None = None
         centroid_xy: tuple[float, float] | None = None
@@ -769,6 +781,15 @@ class VisionOrchestrator(threading.Thread):
             "line_thickness": int(m.line_thickness or 7),
             "reflector_len_min": m.reflector_len_min,
             "reflector_len_max": m.reflector_len_max,
+            "reflector_dual_regime": bool(getattr(m, "reflector_dual_regime", False)),
+            "detect_regime": result.detect_regime if dual_regime else None,
+            "global_delta": int(result.global_delta) if dual_regime and result.global_delta is not None else None,
+            "local_delta": int(result.local_delta) if dual_regime and result.local_delta is not None else None,
+            "reliability_score": (
+                float(result.reliability_score)
+                if dual_regime and result.reliability_score is not None
+                else None
+            ),
             "occlusion_hold": occlusion_hold,
             "dbg_cycle_emit_count": int(rt.dbg_cycle_emit_count),
         }
@@ -792,6 +813,9 @@ class VisionOrchestrator(threading.Thread):
         gray, frame_mono, age_ms = w.read_latest_gray()
         if gray is None:
             raise ValueError("no frame")
+        dual_regime = bool(getattr(m, "reflector_dual_regime", False))
+        rt = self.machine_rt.get(mid)
+        prev_regime = rt.detect_regime if (dual_regime and rt is not None) else None
         result = line_peak_position_gray(
             gray=gray,
             axis_p0_json=m.axis_p0,
@@ -802,6 +826,8 @@ class VisionOrchestrator(threading.Thread):
             prominence_offset=int(m.threshold_offset or 0),
             reflector_len_min=m.reflector_len_min,
             reflector_len_max=m.reflector_len_max,
+            dual_regime=dual_regime,
+            prev_regime=prev_regime,
         )
         detail: dict[str, Any] = {
             "machine_id": mid,
@@ -822,6 +848,15 @@ class VisionOrchestrator(threading.Thread):
             "found": bool(result.found),
             "position_01": result.position_01,
             "anomaly_reasons": brightness_anomaly_reasons(result.peak, result.background),
+            "reflector_dual_regime": dual_regime,
+            "detect_regime": result.detect_regime if dual_regime else None,
+            "global_delta": int(result.global_delta) if dual_regime and result.global_delta is not None else None,
+            "local_delta": int(result.local_delta) if dual_regime and result.local_delta is not None else None,
+            "reliability_score": (
+                float(result.reliability_score)
+                if dual_regime and result.reliability_score is not None
+                else None
+            ),
         }
         band = sample_line_band_gray(
             gray,
