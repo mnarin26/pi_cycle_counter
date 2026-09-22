@@ -14,6 +14,7 @@ __all__ = [
     "require_panel_8080",
     "require_super_or_admin",
     "require_mold_assign",
+    "require_planning",
     "client_ip",
 ]
 
@@ -55,4 +56,10 @@ def require_super_or_admin(user: CurrentUser = Depends(get_current_user)) -> Cur
 def require_mold_assign(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     if not (user.is_super or user.has("bot_mold_assign")):
         raise HTTPException(status_code=403, detail="Kalip atama yetkiniz yok")
+    return user
+
+
+def require_planning(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    if not (user.is_super or user.has("planning")):
+        raise HTTPException(status_code=403, detail="Planlama yetkiniz yok")
     return user

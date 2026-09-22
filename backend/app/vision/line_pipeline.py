@@ -50,6 +50,17 @@ class LineProbeResult:
     prominence: int  # peak - background
     segment_len: int  # contiguous bright segment length around chosen peak (in samples)
     active_threshold: int  # threshold used this frame (for UI)
+    # Dual-regime telemetry (populated only when reflector_dual_regime path runs).
+    detect_regime: str | None = None  # "global" | "local"
+    global_delta: int | None = None
+    local_delta: int | None = None
+    reliability_score: float | None = None
+
+
+# Dual-regime constants (code-only; not UI knobs).
+REGIME_ENTER = 75  # global_Δ ≤ 75 → enter local
+REGIME_EXIT = 100  # global_Δ ≥ 100 → exit to global
+LOCAL_NEIGHBOR_DROP = 20  # min peak-to-neighbor contrast for local cluster
 
 
 @lru_cache(maxsize=256)
@@ -312,9 +323,37 @@ def find_peak_on_profile(
     gating. Caller computed smoothing + threshold from this same array, so
     decisions are consistent.
     """
+    result, _overflow = _find_peak_on_profile_core(
+        smooth_profile,
+        sample_xs,
+        sample_ys,
+        prominence_min,
+        reflector_len_min=reflector_len_min,
+        reflector_len_max=reflector_len_max,
+        soft_len_max=False,
+    )
+    return result
+
+
+def _find_peak_on_profile_core(
+    smooth_profile: np.ndarray,
+    sample_xs: np.ndarray,
+    sample_ys: np.ndarray,
+    prominence_min: int,
+    reflector_len_min: int | None = None,
+    reflector_len_max: int | None = None,
+    *,
+    soft_len_max: bool = False,
+) -> tuple[LineProbeResult, bool]:
+    """Core global argmax + midpoint expand.
+
+    When soft_len_max is True and segment_len > len_max, returns
+    (not-found result, True) so the dual-regime path can fall through to local
+    cluster instead of hard-rejecting.
+    """
     n = smooth_profile.size
     if n < 4:
-        return LineProbeResult(False, None, None, 0, 0, 0, 0, prominence_min)
+        return LineProbeResult(False, None, None, 0, 0, 0, 0, prominence_min), False
 
     idx = int(np.argmax(smooth_profile))
     peak = int(round(float(smooth_profile[idx])))
@@ -333,12 +372,26 @@ def find_peak_on_profile(
     segment_len = int(max(1, right - left + 1))
 
     if prominence < int(prominence_min):
-        return LineProbeResult(False, None, None, peak, background, prominence, segment_len, int(prominence_min))
+        return (
+            LineProbeResult(False, None, None, peak, background, prominence, segment_len, int(prominence_min)),
+            False,
+        )
 
     if reflector_len_min is not None and segment_len < int(reflector_len_min):
-        return LineProbeResult(False, None, None, peak, background, prominence, segment_len, int(prominence_min))
+        return (
+            LineProbeResult(False, None, None, peak, background, prominence, segment_len, int(prominence_min)),
+            False,
+        )
     if reflector_len_max is not None and segment_len > int(reflector_len_max):
-        return LineProbeResult(False, None, None, peak, background, prominence, segment_len, int(prominence_min))
+        if soft_len_max:
+            return (
+                LineProbeResult(False, None, None, peak, background, prominence, segment_len, int(prominence_min)),
+                True,
+            )
+        return (
+            LineProbeResult(False, None, None, peak, background, prominence, segment_len, int(prominence_min)),
+            False,
+        )
 
     refined = _parabolic_subpixel(smooth_profile.astype(np.uint8), idx)
     refined = float(np.clip(refined, 0.0, n - 1))
@@ -350,7 +403,268 @@ def find_peak_on_profile(
     cx = float(sample_xs[lo]) * (1.0 - frac) + float(sample_xs[hi]) * frac
     cy = float(sample_ys[lo]) * (1.0 - frac) + float(sample_ys[hi]) * frac
 
-    return LineProbeResult(True, position_01, (cx, cy), peak, background, prominence, segment_len, int(prominence_min))
+    return (
+        LineProbeResult(True, position_01, (cx, cy), peak, background, prominence, segment_len, int(prominence_min)),
+        False,
+    )
+
+
+def resolve_detect_regime(prev_regime: str | None, global_delta: int) -> str:
+    """Hysteresis: Δ≤75 → local, Δ≥100 → global, 76–99 hold previous (default global)."""
+    d = int(global_delta)
+    if d <= REGIME_ENTER:
+        return "local"
+    if d >= REGIME_EXIT:
+        return "global"
+    if prev_regime in ("local", "global"):
+        return prev_regime
+    return "global"
+
+
+def _flank_drops(smooth_profile: np.ndarray, left: int, right: int, peak: float) -> list[float]:
+    n = int(smooth_profile.size)
+    drops: list[float] = []
+    if left > 0:
+        drops.append(float(peak) - float(smooth_profile[left - 1]))
+    if right < n - 1:
+        drops.append(float(peak) - float(smooth_profile[right + 1]))
+    return drops
+
+
+def reliability_score_for_segment(
+    smooth_profile: np.ndarray,
+    left: int,
+    right: int,
+    peak: float,
+    segment_len: int,
+    reflector_len_min: int | None,
+    reflector_len_max: int | None,
+) -> float:
+    """Soft reliability: dark flanks + len in range boost (never a hard veto)."""
+    score = 0.0
+    if reflector_len_min is not None and reflector_len_max is not None:
+        if int(reflector_len_min) <= int(segment_len) <= int(reflector_len_max):
+            score += 1.0
+    elif reflector_len_min is not None and int(segment_len) >= int(reflector_len_min):
+        score += 0.5
+    elif reflector_len_max is not None and int(segment_len) <= int(reflector_len_max):
+        score += 0.5
+    drops = _flank_drops(smooth_profile, left, right, peak)
+    if drops and min(drops) >= float(LOCAL_NEIGHBOR_DROP):
+        score += 1.0
+    elif drops and max(drops) >= float(LOCAL_NEIGHBOR_DROP):
+        score += 0.5
+    return float(score)
+
+
+def _result_with_centroid(
+    *,
+    found: bool,
+    smooth_profile: np.ndarray,
+    sample_xs: np.ndarray,
+    sample_ys: np.ndarray,
+    idx: int,
+    peak: int,
+    background: int,
+    prominence: int,
+    segment_len: int,
+    prominence_min: int,
+    detect_regime: str | None,
+    global_delta: int | None,
+    local_delta: int | None,
+    reliability_score: float | None,
+) -> LineProbeResult:
+    if not found:
+        return LineProbeResult(
+            False,
+            None,
+            None,
+            peak,
+            background,
+            prominence,
+            segment_len,
+            int(prominence_min),
+            detect_regime=detect_regime,
+            global_delta=global_delta,
+            local_delta=local_delta,
+            reliability_score=reliability_score,
+        )
+    n = int(smooth_profile.size)
+    refined = _parabolic_subpixel(smooth_profile.astype(np.uint8), idx)
+    refined = float(np.clip(refined, 0.0, n - 1))
+    position_01 = refined / float(n - 1)
+    lo = int(np.floor(refined))
+    hi = min(n - 1, lo + 1)
+    frac = refined - lo
+    cx = float(sample_xs[lo]) * (1.0 - frac) + float(sample_xs[hi]) * frac
+    cy = float(sample_ys[lo]) * (1.0 - frac) + float(sample_ys[hi]) * frac
+    return LineProbeResult(
+        True,
+        position_01,
+        (cx, cy),
+        peak,
+        background,
+        prominence,
+        segment_len,
+        int(prominence_min),
+        detect_regime=detect_regime,
+        global_delta=global_delta,
+        local_delta=local_delta,
+        reliability_score=reliability_score,
+    )
+
+
+def find_local_bright_cluster(
+    smooth_profile: np.ndarray,
+    sample_xs: np.ndarray,
+    sample_ys: np.ndarray,
+    prominence_min: int,
+    reflector_len_min: int | None = None,
+    reflector_len_max: int | None = None,
+    *,
+    global_delta: int | None = None,
+) -> LineProbeResult:
+    """Brightest short cluster for dual-regime local path.
+
+    No long global midpoint expand. Expand only while samples stay within
+    LOCAL_NEIGHBOR_DROP of the peak. Require neighbor contrast ≥ ~20, reject
+    flat profiles and local contrast below prom_min. len==1 alone is not a
+    reject; when len_min/max are set the cluster length must fit that range.
+    """
+    n = smooth_profile.size
+    if n < 4:
+        return LineProbeResult(
+            False, None, None, 0, 0, 0, 0, prominence_min, detect_regime="local", global_delta=global_delta or 0, local_delta=0
+        )
+
+    line_med = float(np.median(smooth_profile))
+    line_peak = float(np.max(smooth_profile))
+    g_delta = int(global_delta) if global_delta is not None else int(round(max(0.0, line_peak - line_med)))
+
+    if line_peak - line_med < _MIN_MAX_MEDIAN_SPREAD:
+        pk_i = int(round(line_peak))
+        bg_i = int(round(line_med))
+        prom_i = max(0, pk_i - bg_i)
+        return LineProbeResult(
+            False,
+            None,
+            None,
+            pk_i,
+            bg_i,
+            prom_i,
+            0,
+            int(prominence_min),
+            detect_regime="local",
+            global_delta=g_delta,
+            local_delta=0,
+            reliability_score=0.0,
+        )
+
+    idx = int(np.argmax(smooth_profile))
+    peak_f = float(smooth_profile[idx])
+    floor = peak_f - float(LOCAL_NEIGHBOR_DROP)
+    left = idx
+    while left > 0 and float(smooth_profile[left - 1]) >= floor:
+        left -= 1
+    right = idx
+    while right < n - 1 and float(smooth_profile[right + 1]) >= floor:
+        right += 1
+    segment_len = int(max(1, right - left + 1))
+
+    drops = _flank_drops(smooth_profile, left, right, peak_f)
+    if drops:
+        local_delta = int(round(max(0.0, max(drops))))
+    else:
+        local_delta = int(round(max(0.0, peak_f - line_med)))
+
+    peak_i = int(round(peak_f))
+    background = int(round(line_med))
+    prominence = max(0, peak_i - background)
+
+    # Neighbor contrast gate when flanks exist.
+    if drops and max(drops) < float(LOCAL_NEIGHBOR_DROP):
+        return LineProbeResult(
+            False,
+            None,
+            None,
+            peak_i,
+            background,
+            prominence,
+            segment_len,
+            int(prominence_min),
+            detect_regime="local",
+            global_delta=g_delta,
+            local_delta=local_delta,
+            reliability_score=0.0,
+        )
+
+    if local_delta < int(prominence_min):
+        return LineProbeResult(
+            False,
+            None,
+            None,
+            peak_i,
+            background,
+            prominence,
+            segment_len,
+            int(prominence_min),
+            detect_regime="local",
+            global_delta=g_delta,
+            local_delta=local_delta,
+            reliability_score=0.0,
+        )
+
+    # Fit machine length band when set. len==1 alone is not an extra reject.
+    if reflector_len_min is not None and segment_len < int(reflector_len_min):
+        return LineProbeResult(
+            False,
+            None,
+            None,
+            peak_i,
+            background,
+            prominence,
+            segment_len,
+            int(prominence_min),
+            detect_regime="local",
+            global_delta=g_delta,
+            local_delta=local_delta,
+            reliability_score=0.0,
+        )
+    if reflector_len_max is not None and segment_len > int(reflector_len_max):
+        return LineProbeResult(
+            False,
+            None,
+            None,
+            peak_i,
+            background,
+            prominence,
+            segment_len,
+            int(prominence_min),
+            detect_regime="local",
+            global_delta=g_delta,
+            local_delta=local_delta,
+            reliability_score=0.0,
+        )
+
+    score = reliability_score_for_segment(
+        smooth_profile, left, right, peak_f, segment_len, reflector_len_min, reflector_len_max
+    )
+    return _result_with_centroid(
+        found=True,
+        smooth_profile=smooth_profile,
+        sample_xs=sample_xs,
+        sample_ys=sample_ys,
+        idx=idx,
+        peak=peak_i,
+        background=background,
+        prominence=prominence,
+        segment_len=segment_len,
+        prominence_min=int(prominence_min),
+        detect_regime="local",
+        global_delta=g_delta,
+        local_delta=local_delta,
+        reliability_score=score,
+    )
 
 
 _ADAPTIVE_FLOOR = 12  # absolute minimum prominence even if scene is flat (noise gate)
@@ -359,30 +673,16 @@ _ADAPTIVE_RATIO = 0.5  # require at least 50% of (max - median) — guarantees t
 _MIN_MAX_MEDIAN_SPREAD = 16.0
 
 
-def line_peak_position_gray(
+def _prom_min_and_smooth(
     gray: np.ndarray,
     axis_p0_json: str,
     axis_p1_json: str,
     thickness_px: int,
     threshold_mode: str,
     prominence_min_fixed: int,
-    prominence_offset: int = 0,
-    reflector_len_min: int | None = None,
-    reflector_len_max: int | None = None,
-) -> LineProbeResult:
-    """Top-level call on a shared grayscale frame (preferred hot path).
-
-    Threshold semantics:
-    - mode == "fixed":
-          prom_min = max(0, prominence_min_fixed + offset)
-    - mode == "adaptive":
-          prom_min = max(_ADAPTIVE_FLOOR, round((max - median) * _ADAPTIVE_RATIO)) + offset
-      This means: if the scene contains a real peak, the half of its relative
-      height is the bar to clear — peak (= 100%) always passes. If the scene
-      is flat, _ADAPTIVE_FLOOR rejects ambient noise.
-    A hard `max-median` spread check also rejects nearly flat profiles so random
-    argmax does not synthesize a reflector.
-    """
+    prominence_offset: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int] | LineProbeResult:
+    """Sample + smooth + compute prom_min. Returns arrays or an early fail result."""
     h, w = gray.shape[:2]
     p0n = _parse_xy(axis_p0_json)
     p1n = _parse_xy(axis_p1_json)
@@ -403,24 +703,142 @@ def line_peak_position_gray(
         prom_min = max(0, adaptive_prom + offset)
     else:
         prom_min = max(0, int(prominence_min_fixed) + offset)
+    return smooth, sx, sy, int(prom_min)
+
+
+def line_peak_position_gray(
+    gray: np.ndarray,
+    axis_p0_json: str,
+    axis_p1_json: str,
+    thickness_px: int,
+    threshold_mode: str,
+    prominence_min_fixed: int,
+    prominence_offset: int = 0,
+    reflector_len_min: int | None = None,
+    reflector_len_max: int | None = None,
+    *,
+    dual_regime: bool = False,
+    prev_regime: str | None = None,
+) -> LineProbeResult:
+    """Top-level call on a shared grayscale frame (preferred hot path).
+
+    Threshold semantics:
+    - mode == "fixed":
+          prom_min = max(0, prominence_min_fixed + offset)
+    - mode == "adaptive":
+          prom_min = max(_ADAPTIVE_FLOOR, round((max - median) * _ADAPTIVE_RATIO)) + offset
+      This means: if the scene contains a real peak, the half of its relative
+      height is the bar to clear — peak (= 100%) always passes. If the scene
+      is flat, _ADAPTIVE_FLOOR rejects ambient noise.
+    A hard `max-median` spread check also rejects nearly flat profiles so random
+    argmax does not synthesize a reflector.
+
+    When dual_regime is False (default), behavior is the legacy path only —
+    no hysteresis / local-cluster code runs.
+    """
+    prepared = _prom_min_and_smooth(
+        gray, axis_p0_json, axis_p1_json, thickness_px, threshold_mode, prominence_min_fixed, prominence_offset
+    )
+    if isinstance(prepared, LineProbeResult):
+        return prepared
+    smooth, sx, sy, prom_min = prepared
 
     line_med = float(np.median(smooth))
     line_peak = float(np.max(smooth))
+    global_delta = int(round(max(0.0, line_peak - line_med)))
+
     if line_peak - line_med < _MIN_MAX_MEDIAN_SPREAD:
         pk_i = int(round(line_peak))
         bg_i = int(round(line_med))
         prom_i = max(0, pk_i - bg_i)
+        if dual_regime:
+            return LineProbeResult(
+                False,
+                None,
+                None,
+                pk_i,
+                bg_i,
+                prom_i,
+                0,
+                int(prom_min),
+                detect_regime=resolve_detect_regime(prev_regime, global_delta),
+                global_delta=global_delta,
+                local_delta=0,
+                reliability_score=0.0,
+            )
         return LineProbeResult(False, None, None, pk_i, bg_i, prom_i, 0, int(prom_min))
 
     len_min = int(reflector_len_min) if reflector_len_min is not None and int(reflector_len_min) > 0 else None
     len_max = int(reflector_len_max) if reflector_len_max is not None and int(reflector_len_max) > 0 else None
-    return find_peak_on_profile(
+
+    if not dual_regime:
+        return find_peak_on_profile(
+            smooth,
+            sx,
+            sy,
+            prominence_min=prom_min,
+            reflector_len_min=len_min,
+            reflector_len_max=len_max,
+        )
+
+    # --- Dual-regime path (flag ON only) ---
+    regime = resolve_detect_regime(prev_regime, global_delta)
+    use_local = regime == "local"
+
+    if not use_local:
+        global_result, overflow = _find_peak_on_profile_core(
+            smooth,
+            sx,
+            sy,
+            prominence_min=prom_min,
+            reflector_len_min=len_min,
+            reflector_len_max=len_max,
+            soft_len_max=True,
+        )
+        if overflow:
+            use_local = True
+        else:
+            # Annotate telemetry; soft reliability score on accept.
+            idx = int(np.argmax(smooth))
+            peak_f = float(smooth[idx])
+            seg_thr = float(global_result.background) + 0.5 * float(global_result.prominence)
+            left = idx
+            while left > 0 and float(smooth[left - 1]) >= seg_thr:
+                left -= 1
+            right = idx
+            n = int(smooth.size)
+            while right < n - 1 and float(smooth[right + 1]) >= seg_thr:
+                right += 1
+            score = None
+            if global_result.found:
+                score = reliability_score_for_segment(
+                    smooth, left, right, peak_f, global_result.segment_len, len_min, len_max
+                )
+            drops = _flank_drops(smooth, left, right, peak_f)
+            local_d = int(round(max(drops))) if drops else 0
+            return LineProbeResult(
+                global_result.found,
+                global_result.position_01,
+                global_result.centroid_px,
+                global_result.peak,
+                global_result.background,
+                global_result.prominence,
+                global_result.segment_len,
+                global_result.active_threshold,
+                detect_regime="global",
+                global_delta=global_delta,
+                local_delta=local_d,
+                reliability_score=score,
+            )
+
+    return find_local_bright_cluster(
         smooth,
         sx,
         sy,
         prominence_min=prom_min,
         reflector_len_min=len_min,
         reflector_len_max=len_max,
+        global_delta=global_delta,
     )
 
 
@@ -434,6 +852,9 @@ def line_peak_position(
     prominence_offset: int = 0,
     reflector_len_min: int | None = None,
     reflector_len_max: int | None = None,
+    *,
+    dual_regime: bool = False,
+    prev_regime: str | None = None,
 ) -> LineProbeResult:
     """BGR convenience wrapper — converts to gray then calls line_peak_position_gray."""
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
@@ -447,4 +868,109 @@ def line_peak_position(
         prominence_offset=prominence_offset,
         reflector_len_min=reflector_len_min,
         reflector_len_max=reflector_len_max,
+        dual_regime=dual_regime,
+        prev_regime=prev_regime,
+    )
+
+def line_peak_on_smooth_profile(
+    smooth: np.ndarray,
+    sample_xs: np.ndarray | None = None,
+    sample_ys: np.ndarray | None = None,
+    *,
+    prominence_min: int,
+    reflector_len_min: int | None = None,
+    reflector_len_max: int | None = None,
+    dual_regime: bool = False,
+    prev_regime: str | None = None,
+) -> LineProbeResult:
+    """Test / tooling helper: run peak detection on an already-smoothed 1D profile."""
+    n = int(smooth.size)
+    if sample_xs is None:
+        sample_xs = np.arange(n, dtype=np.float32)
+    if sample_ys is None:
+        sample_ys = np.zeros(n, dtype=np.float32)
+    len_min = int(reflector_len_min) if reflector_len_min is not None and int(reflector_len_min) > 0 else None
+    len_max = int(reflector_len_max) if reflector_len_max is not None and int(reflector_len_max) > 0 else None
+
+    line_med = float(np.median(smooth))
+    line_peak = float(np.max(smooth))
+    global_delta = int(round(max(0.0, line_peak - line_med)))
+
+    if line_peak - line_med < _MIN_MAX_MEDIAN_SPREAD:
+        pk_i = int(round(line_peak))
+        bg_i = int(round(line_med))
+        prom_i = max(0, pk_i - bg_i)
+        if dual_regime:
+            return LineProbeResult(
+                False,
+                None,
+                None,
+                pk_i,
+                bg_i,
+                prom_i,
+                0,
+                int(prominence_min),
+                detect_regime=resolve_detect_regime(prev_regime, global_delta),
+                global_delta=global_delta,
+                local_delta=0,
+                reliability_score=0.0,
+            )
+        return LineProbeResult(False, None, None, pk_i, bg_i, prom_i, 0, int(prominence_min))
+
+    if not dual_regime:
+        return find_peak_on_profile(
+            smooth, sample_xs, sample_ys, prominence_min=prominence_min, reflector_len_min=len_min, reflector_len_max=len_max
+        )
+
+    regime = resolve_detect_regime(prev_regime, global_delta)
+    use_local = regime == "local"
+    if not use_local:
+        global_result, overflow = _find_peak_on_profile_core(
+            smooth,
+            sample_xs,
+            sample_ys,
+            prominence_min=prominence_min,
+            reflector_len_min=len_min,
+            reflector_len_max=len_max,
+            soft_len_max=True,
+        )
+        if not overflow:
+            idx = int(np.argmax(smooth))
+            peak_f = float(smooth[idx])
+            seg_thr = float(global_result.background) + 0.5 * float(global_result.prominence)
+            left = idx
+            while left > 0 and float(smooth[left - 1]) >= seg_thr:
+                left -= 1
+            right = idx
+            while right < n - 1 and float(smooth[right + 1]) >= seg_thr:
+                right += 1
+            score = None
+            if global_result.found:
+                score = reliability_score_for_segment(
+                    smooth, left, right, peak_f, global_result.segment_len, len_min, len_max
+                )
+            drops = _flank_drops(smooth, left, right, peak_f)
+            local_d = int(round(max(drops))) if drops else 0
+            return LineProbeResult(
+                global_result.found,
+                global_result.position_01,
+                global_result.centroid_px,
+                global_result.peak,
+                global_result.background,
+                global_result.prominence,
+                global_result.segment_len,
+                global_result.active_threshold,
+                detect_regime="global",
+                global_delta=global_delta,
+                local_delta=local_d,
+                reliability_score=score,
+            )
+    return find_local_bright_cluster(
+        smooth,
+        sample_xs,
+        sample_ys,
+        prominence_min=prominence_min,
+        reflector_len_min=len_min,
+        reflector_len_max=len_max,
+        global_delta=global_delta,
     )
