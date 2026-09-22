@@ -34,6 +34,16 @@ FAULT_CATALOG: dict[str, FaultDef] = {
             "Sinyal normale dönünce alarm kapanır; örnekler 1 dk aralıkla alınır."
         ),
     },
+    "E003": {
+        "code": "E003",
+        "name": "DUAL_REGIME_LEN_REJECT",
+        "title_tr": "Küme uzunluğu sınır dışı (iki adımlı)",
+        "description_tr": (
+            "İki adımlı tespit açıkken yerel parlak küme uzunluğu len_min–len_max dışında kaldı "
+            "(klasik E001 reflektör kaybı değil). Alarm reflektör tekrar bulununca kapanır; "
+            "örnekler 1 dk aralıkla alınır."
+        ),
+    },
 }
 
 # Interval between samples for the same active alarm.
@@ -177,6 +187,59 @@ def suggest_for_code(code: str, detail: dict[str, Any] | None) -> list[str]:
             )
         if not tips:
             tips.append("Parlaklık sinyali anormal. Takip bandı ve ışığı kontrol edin.")
+    elif code == "E003":
+        seg = d.get("segment_len")
+        lo = d.get("len_min")
+        hi = d.get("len_max")
+        try:
+            seg_i = int(seg) if seg is not None else None
+            lo_i = int(lo) if lo is not None else None
+            hi_i = int(hi) if hi is not None else None
+        except (TypeError, ValueError):
+            seg_i = lo_i = hi_i = None
+        regime = d.get("detect_regime")
+        if seg_i is not None and lo_i is not None and hi_i is not None:
+            if seg_i > hi_i:
+                tips.append(
+                    f"Yerel küme uzunluğu len_max üstünde ({seg_i} > {hi_i}). "
+                    "İki adımlı modda bu E001 değil — len_max’ı yükseltin, kalibrasyonu yenileyin "
+                    "veya çizgi/ROI’yi daraltıp kızak platosunu ayırın."
+                )
+            elif seg_i < lo_i:
+                tips.append(
+                    f"Yerel küme uzunluğu len_min altında ({seg_i} < {lo_i}). "
+                    "len_min’i düşürün veya kalibrasyonu yenileyin; tek-örnek tepe için "
+                    "len_min=1 uygun olabilir."
+                )
+            else:
+                tips.append(
+                    f"Küme len={seg_i} görünüyor (beklenen {lo_i}–{hi_i}) ama iki adımlı "
+                    "len reddi işaretli — örnekleri ve ROI’yi kontrol edin."
+                )
+        elif seg_i is not None:
+            tips.append(
+                f"Küme len={seg_i} sınır dışı (min/max eksik veya tanımsız). "
+                "Admin’de uzunluk kalibrasyonu yapın."
+            )
+        else:
+            tips.append(
+                "İki adımlı tespitte küme uzunluğu len_min–len_max dışında. "
+                "len_max / len_min sınırlarını veya kalibrasyonu kontrol edin."
+            )
+        if regime:
+            tips.append(f"Aktif tespit rejimi: {regime}.")
+        if d.get("brightness_band"):
+            along = d.get("band_along")
+            thick = d.get("band_thickness")
+            tips.append(
+                f"Detaydaki parlaklık ızgarası ham banttır"
+                + (f" ({along}×{thick})" if along and thick else "")
+                + ". Satırlar çizgi boyunca, sütunlar kalınlık (dik) yönüdür."
+            )
+        if not tips:
+            tips.append(
+                "İki adımlı modda küme uzunluğu reddi. len_max/len_min ve çizgi hizasını kontrol edin."
+            )
     else:
         tips.append("Bu hata kodu için özel öneri yok. ROI / kamera / eşik ayarlarını kontrol edin.")
     return tips
