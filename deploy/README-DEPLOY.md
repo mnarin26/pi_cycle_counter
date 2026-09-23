@@ -2,6 +2,8 @@
 
 Bu belge **canlı rsp3b stack**’ine göredir (`main` dalı). Clone = yazılım; kamera/çizgi/şifreler ayrıca kurulur.
 
+**Cloud / yerel ajan deploy protokolü:** [AGENT-DEPLOY.md](./AGENT-DEPLOY.md) (minimal SCP, backup, servis seçimi, hot-path doğrulama).
+
 ## Mimari
 
 ```
