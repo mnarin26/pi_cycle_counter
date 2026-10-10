@@ -97,3 +97,12 @@ export async function apiDownloadCsv(path: string, fallbackFilename: string): Pr
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+export async function apiPostForm<T>(path: string, form: FormData): Promise<T> {
+  const r = await fetch(`${base}${path}`, { method: "POST", credentials: "include", body: form });
+  if (!r.ok) {
+    handleUnauthorized(r.status);
+    throw new Error(await r.text());
+  }
+  return r.json() as Promise<T>;
+}
