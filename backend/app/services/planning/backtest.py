@@ -24,6 +24,7 @@ from app.services.planning.excel_orders import parse_orders_xlsx
 from app.services.planning.excel_stock import parse_stock_xlsx
 from app.services.planning.plan_engine import LineIn, compute_plan, gather_context, write_plan_run
 from app.services.planning.plan_state import BACKTEST
+from app.services.planning.prefs import prefs_from_dict
 from app.services.planning.stock import stock_as_of
 from app.services.time_windows import DISPLAY_TZ
 
@@ -354,6 +355,7 @@ def run_backtest(
     orders_filename: str = "",
     stock_filename: str = "",
 ) -> PlanRun:
+    plan_prefs = prefs_from_dict(prefs) if prefs is not None else None
     if orders_data:
         report = inspect_excels(
             db, orders_data, stock_data, orders_filename=orders_filename, stock_filename=stock_filename
@@ -392,8 +394,10 @@ def run_backtest(
             )
     report["stock_confidence"] = stock_conf
 
+    if plan_prefs is not None:
+        plan_prefs.start_at = None  # a backtest always starts at T0
     ctx = gather_context(db, as_of=t0)
-    result = compute_plan(ctx, lines, stock)
+    result = compute_plan(ctx, lines, stock, plan_prefs)
     inputs = {k: v for k, v in report.items() if k != "format_used"}
     plan = write_plan_run(
         db,
@@ -403,7 +407,7 @@ def run_backtest(
         note=f"Geçmiş deneme · {orders_filename or report.get('orders_filename') or 'liste'}"[:256],
         as_of=t0,
         horizon_end=t1,
-        prefs=prefs,
+        prefs=plan_prefs.to_dict() if plan_prefs is not None else None,
         inputs=inputs,
     )
     db.commit()

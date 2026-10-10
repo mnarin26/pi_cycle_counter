@@ -1,0 +1,196 @@
+"""Working-time calendar for the planner (Europe/Istanbul shifts).
+
+Intervals are sorted, non-overlapping `(start_utc, end_utc)` tuples.
+"Hard" rules remove time; "soft" rules only appear in the strict variant, so
+the engine can try strict first and fall back to relaxed when a due date
+would otherwise be missed.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, time, timedelta, timezone
+
+from app.services.planning.prefs import PlanPrefs
+from app.services.shifts import ShiftDef
+from app.services.time_windows import DISPLAY_TZ
+
+Interval = tuple[datetime, datetime]
+_END_OF_DAY = time(23, 59, 59, 999999)
+
+
+def _is_night(s: ShiftDef) -> bool:
+    return s.start.hour < 6 or s.start.hour >= 22
+
+
+def pattern_shifts(shifts: list[ShiftDef], pattern: str) -> list[ShiftDef]:
+    ordered = sorted(shifts, key=lambda s: (s.start.hour, s.start.minute))
+    if pattern == "3x8" or len(ordered) <= 1:
+        return ordered
+    non_night = [s for s in ordered if not _is_night(s)] or ordered
+    if pattern == "2x8":
+        return non_night[:2]
+    noon = [s for s in non_night if s.start <= time(12) < (s.end if s.end > s.start else _END_OF_DAY)]
+    return (noon or non_night)[:1]
+
+
+def _shift_span(day: date, s: ShiftDef) -> tuple[datetime, datetime]:
+    start = datetime.combine(day, s.start, tzinfo=DISPLAY_TZ)
+    if s.end == _END_OF_DAY:
+        end = datetime.combine(day + timedelta(days=1), time(0), tzinfo=DISPLAY_TZ)
+    else:
+        end = datetime.combine(day, s.end, tzinfo=DISPLAY_TZ)
+        if end <= start:
+            end += timedelta(days=1)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def _merge(iv: list[Interval]) -> list[Interval]:
+    iv = sorted(iv)
+    out: list[Interval] = []
+    for s, e in iv:
+        if e <= s:
+            continue
+        if out and s <= out[-1][1]:
+            if e > out[-1][1]:
+                out[-1] = (out[-1][0], e)
+        else:
+            out.append((s, e))
+    return out
+
+
+def _intersect(a: list[Interval], b: list[Interval]) -> list[Interval]:
+    out: list[Interval] = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        s = max(a[i][0], b[j][0])
+        e = min(a[i][1], b[j][1])
+        if s < e:
+            out.append((s, e))
+        if a[i][1] < b[j][1]:
+            i += 1
+        else:
+            j += 1
+    return out
+
+
+class WorkCalendar:
+    def __init__(self, prefs: PlanPrefs, shifts: list[ShiftDef], start: datetime, days: int = 150):
+        self.prefs = prefs
+        self.start = start
+        self.shifts = pattern_shifts(shifts, prefs.work_pattern)
+        self.night_ids = {s.id for s in self.shifts if _is_night(s)}
+        self._cache: dict[tuple, list[Interval]] = {}
+        first = start.astimezone(DISPLAY_TZ).date() - timedelta(days=1)
+        self.days = [first + timedelta(days=i) for i in range(days + 2)]
+        self.closed = set(prefs.closed_days)
+
+    def has_soft_rules(self, manual: bool) -> bool:
+        p = self.prefs
+        return (
+            p.saturday == "avoid"
+            or p.sunday == "avoid"
+            or (manual and p.manual_not_night == "soft")
+            or p.changeover_daytime == "soft"
+        )
+
+    def _day_blocked(self, day: date, strict: bool) -> bool:
+        if day.isoformat() in self.closed:
+            return True
+        wd = day.weekday()
+        mode = self.prefs.saturday if wd == 5 else self.prefs.sunday if wd == 6 else "work"
+        return mode == "off" or (strict and mode == "avoid")
+
+    def production(self, *, manual: bool, strict: bool) -> list[Interval]:
+        key = ("prod", manual, strict)
+        if key in self._cache:
+            return self._cache[key]
+        lvl = self.prefs.manual_not_night
+        skip_night = manual and (lvl == "hard" or (strict and lvl == "soft"))
+        raw: list[Interval] = []
+        for day in self.days:
+            if self._day_blocked(day, strict):
+                continue
+            for s in self.shifts:
+                if skip_night and s.id in self.night_ids:
+                    continue
+                raw.append(_shift_span(day, s))
+        out = [iv for iv in _merge(raw) if iv[1] > self.start]
+        self._cache[key] = out
+        return out
+
+    def changeover(self, *, manual: bool, strict: bool) -> list[Interval]:
+        key = ("co", manual, strict)
+        if key in self._cache:
+            return self._cache[key]
+        base = self.production(manual=manual, strict=strict)
+        lvl = self.prefs.changeover_daytime
+        if lvl == "hard" or (strict and lvl == "soft"):
+            a, b = self.prefs.window_minutes()
+            win = []
+            for day in self.days:
+                d0 = datetime.combine(day, time(0), tzinfo=DISPLAY_TZ)
+                win.append(
+                    (
+                        (d0 + timedelta(minutes=a)).astimezone(timezone.utc),
+                        (d0 + timedelta(minutes=b)).astimezone(timezone.utc),
+                    )
+                )
+            base = _intersect(base, _merge(win))
+        self._cache[key] = base
+        return base
+
+    def relaxed_labels(self, a: datetime, b: datetime, *, manual: bool) -> list[str]:
+        """Which soft preferences a relaxed [a, b] work span actually broke."""
+        out: list[str] = []
+        p = self.prefs
+        cur = a.astimezone(DISPLAY_TZ).date()
+        last = b.astimezone(DISPLAY_TZ).date()
+        while cur <= last:
+            wd = cur.weekday()
+            if wd == 5 and p.saturday == "avoid" and "Cumartesi kullanıldı" not in out:
+                out.append("Cumartesi kullanıldı")
+            if wd == 6 and p.sunday == "avoid" and "Pazar kullanıldı" not in out:
+                out.append("Pazar kullanıldı")
+            cur += timedelta(days=1)
+        if manual and p.manual_not_night == "soft" and self.night_ids:
+            strict = self.production(manual=True, strict=True)
+            if worked_between(strict, a, b) < worked_between(self.production(manual=True, strict=False), a, b):
+                out.append("manuel kalıp gece vardiyasında çalıştı")
+        return out
+
+
+def fit_contiguous(iv: list[Interval], t: datetime, dur_s: float) -> datetime | None:
+    """Earliest s >= t with [s, s+dur] inside one interval."""
+    for s, e in iv:
+        if e <= t:
+            continue
+        s2 = max(s, t)
+        if (e - s2).total_seconds() >= dur_s:
+            return s2
+    return None
+
+
+def consume(iv: list[Interval], t: datetime, dur_s: float) -> tuple[datetime, datetime] | None:
+    """Spend `dur_s` working seconds from t (pausing in gaps) → (first, end)."""
+    remaining = float(dur_s)
+    first: datetime | None = None
+    for s, e in iv:
+        if e <= t:
+            continue
+        s2 = max(s, t)
+        if first is None:
+            first = s2
+        avail = (e - s2).total_seconds()
+        if avail >= remaining:
+            return first, s2 + timedelta(seconds=remaining)
+        remaining -= avail
+    return None
+
+
+def worked_between(iv: list[Interval], a: datetime, b: datetime) -> float:
+    tot = 0.0
+    for s, e in iv:
+        s2, e2 = max(s, a), min(e, b)
+        if e2 > s2:
+            tot += (e2 - s2).total_seconds()
+    return tot
