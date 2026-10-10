@@ -629,8 +629,8 @@ def compute_plan_a2(
         "lines": len(states),
         **counts,
         "on_time_rate": round(
-            (sum(1 for s in dated if s.status != "late") / len(dated)) if dated else 1.0, 3
-        ),
+            sum(1 for s in dated if s.status != "late") / len(dated), 3
+        ) if dated else None,
         "makespan_h": round(
             (max(p.end for p in parts_all) - min(p.co_start for p in parts_all)).total_seconds() / 3600.0, 1
         ) if parts_all else 0.0,

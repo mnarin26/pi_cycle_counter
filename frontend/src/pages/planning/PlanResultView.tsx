@@ -41,7 +41,11 @@ export function PlanResultView({ result }: { result: PlanResult }) {
         <p className="text-xs text-slate-400">Tercihler: {result.prefs_summary.join(" · ")}</p>
       )}
       <div className="flex flex-wrap gap-2">
-        <Kpi label="Zamanında" value={pct(Number(k.on_time_rate))} sub={`${k.late ?? 0} gecikir · ${k.risky ?? 0} riskli`} />
+        <Kpi
+          label="Zamanında"
+          value={k.on_time_rate == null ? "—" : pct(Number(k.on_time_rate))}
+          sub={`${k.late ?? 0} gecikir · ${k.risky ?? 0} riskli${k.unplanned ? ` · ${k.unplanned} planlanamadı` : ""}`}
+        />
         <Kpi label="Stoktan" value={String(k.stock ?? 0)} sub="sipariş" />
         <Kpi label="Toplam süre" value={`${k.makespan_h ?? 0} sa`} sub={`bitiş ${fmtDate(String(k.plan_end ?? ""))}`} />
         <Kpi label="Kalıp değişimi" value={String(k.changeovers ?? 0)} sub={`${k.changeover_min ?? 0} dk`} />
