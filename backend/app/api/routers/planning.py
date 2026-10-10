@@ -21,7 +21,8 @@ from app.db.models import (
     Product,
 )
 from app.services.planning.backtest import inspect_excels, run_backtest
-from app.services.planning.compare import compare_plan
+from app.services.planning.compare import compare_backtest, compare_plan
+from app.services.planning.replan import suggest_replans
 from app.services.planning.engine import mold_machine_stats
 from app.services.planning.excel_orders import parse_orders_xlsx
 from app.services.planning.excel_stock import parse_stock_xlsx
@@ -492,6 +493,17 @@ def _get_backtest(db: Session, plan_id: int) -> PlanRun:
 @router.get("/backtest/{plan_id}")
 def backtest_get(plan_id: int, db: Session = Depends(get_db), user=Depends(require_planning)):
     return _plan_detail(db, _get_backtest(db, plan_id))
+
+
+@router.get("/backtest/{plan_id}/compare")
+def backtest_compare(plan_id: int, db: Session = Depends(get_db), user=Depends(require_planning)):
+    plan = _get_backtest(db, plan_id)
+    try:
+        cmp = compare_backtest(db, plan.id)
+    except ValueError as e:
+        raise HTTPException(404, detail=str(e)) from e
+    cmp["suggestions"] = suggest_replans(db, plan, cmp)
+    return cmp
 
 
 @router.delete("/backtest/{plan_id}")
