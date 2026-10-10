@@ -11,13 +11,14 @@ from app.db.models import Cycle, MachineDowntime, Mold, MoldMachineCapability, M
 from app.services.planning import effective_cavity
 
 
-def mold_machine_stats(db: Session, *, days: int = 30) -> list[dict]:
-    since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
-    runs = (
-        db.query(MoldRun)
-        .filter(MoldRun.ended_at.isnot(None), MoldRun.started_at >= since)
-        .all()
-    )
+def mold_machine_stats(db: Session, *, days: int = 30, as_of: datetime | None = None) -> list[dict]:
+    """Per mold×machine history. With `as_of`, only runs that ended by then count (no look-ahead)."""
+    ref = _aware(as_of) if as_of is not None else datetime.now(timezone.utc)
+    since = ref - timedelta(days=max(1, days))
+    q = db.query(MoldRun).filter(MoldRun.ended_at.isnot(None), MoldRun.started_at >= since)
+    if as_of is not None:
+        q = q.filter(MoldRun.ended_at <= ref)
+    runs = q.all()
     # Aggregate by (mold_id, machine_id)
     buckets: dict[tuple[int, int], dict] = {}
     for r in runs:
@@ -118,6 +119,65 @@ def mold_machine_stats(db: Session, *, days: int = 30) -> list[dict]:
             }
         )
     out.sort(key=lambda x: (-(x["run_ratio"] or 0), x["mold_id"], x["machine_id"]))
+    return out
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def downtime_machine_ids_at(db: Session, at: datetime) -> set[int]:
+    """Machines down at `at`: started before and not yet ended (end may be later or NULL)."""
+    at = _aware(at)
+    rows = db.query(MachineDowntime).filter(MachineDowntime.start_at <= at).all()
+    return {
+        int(r.machine_id)
+        for r in rows
+        if r.end_at is None or _aware(r.end_at) > at
+    }
+
+
+def machine_downtime_risk(db: Session, at: datetime) -> dict[int, dict]:
+    """Explainable failure-frequency score from downtimes that *started* before `at`.
+
+    score ∈ [0, 1]: 30-day stops weigh most, 90-day stops add a tail, long
+    outages add a little. Only past data is read, so backtests stay honest.
+    """
+    at = _aware(at)
+    since = at - timedelta(days=90)
+    rows = (
+        db.query(MachineDowntime)
+        .filter(MachineDowntime.start_at < at, MachineDowntime.start_at >= since)
+        .all()
+    )
+    out: dict[int, dict] = {}
+    for r in rows:
+        start = _aware(r.start_at)
+        end = min(_aware(r.end_at), at) if r.end_at is not None else at
+        b = out.setdefault(int(r.machine_id), {"stops_30d": 0, "stops_90d": 0, "hours_30d": 0.0})
+        b["stops_90d"] += 1
+        if start >= at - timedelta(days=30):
+            b["stops_30d"] += 1
+            b["hours_30d"] += max(0.0, (end - start).total_seconds() / 3600.0)
+    for b in out.values():
+        raw = b["stops_30d"] * 0.2 + (b["stops_90d"] - b["stops_30d"]) * 0.05 + min(0.2, b["hours_30d"] / 100.0)
+        b["score"] = round(min(1.0, raw), 3)
+        b["hours_30d"] = round(b["hours_30d"], 1)
+    return out
+
+
+def current_molds_at(db: Session, at: datetime) -> dict[int, int]:
+    """machine_id → mold_id mounted at `at`, from mold_runs (no future rows)."""
+    at = _aware(at)
+    rows = (
+        db.query(MoldRun)
+        .filter(MoldRun.started_at <= at)
+        .order_by(MoldRun.started_at.asc(), MoldRun.id.asc())
+        .all()
+    )
+    out: dict[int, int] = {}
+    for r in rows:
+        out[int(r.machine_id)] = int(r.mold_id)
     return out
 
 

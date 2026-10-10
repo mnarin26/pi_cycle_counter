@@ -309,6 +309,19 @@ def init_db() -> None:
                 conn, "plan_runs", plan_cols, "status", "status VARCHAR(16) NOT NULL DEFAULT 'active'"
             )
             _add_column_if_missing(conn, "plan_runs", plan_cols, "stale_reason", "stale_reason VARCHAR(256)")
+            _add_column_if_missing(conn, "plan_runs", plan_cols, "as_of", "as_of DATETIME")
+            _add_column_if_missing(conn, "plan_runs", plan_cols, "horizon_end", "horizon_end DATETIME")
+            _add_column_if_missing(conn, "plan_runs", plan_cols, "prefs_json", "prefs_json TEXT")
+            _add_column_if_missing(conn, "plan_runs", plan_cols, "input_json", "input_json TEXT")
+            _add_column_if_missing(conn, "plan_runs", plan_cols, "result_json", "result_json TEXT")
+        slot_cols = set()
+        try:
+            slot_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(plan_slots)")).fetchall()}
+        except Exception:
+            slot_cols = set()
+        if slot_cols:
+            _add_column_if_missing(conn, "plan_slots", slot_cols, "line_key", "line_key VARCHAR(64)")
+            _add_column_if_missing(conn, "plan_slots", slot_cols, "meta_json", "meta_json TEXT")
     # Outside the migration txn — never block startup if SQLite is busy (bot/WAL).
     try:
         with engine.connect() as conn:

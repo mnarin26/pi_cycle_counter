@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_planning
 from app.db.models import (
+    Machine,
     Mold,
     MoldRun,
     OrderImport,
@@ -18,13 +20,14 @@ from app.db.models import (
     PlanSlot,
     Product,
 )
+from app.services.planning.backtest import inspect_excels, run_backtest
 from app.services.planning.compare import compare_plan
 from app.services.planning.engine import mold_machine_stats
 from app.services.planning.excel_orders import parse_orders_xlsx
 from app.services.planning.excel_stock import parse_stock_xlsx
 from app.services.planning.mold_runs import count_diff_info
 from app.services.planning.plan_engine import build_plan
-from app.services.planning.plan_state import get_current_plan, mark_active_plans_stale
+from app.services.planning.plan_state import BACKTEST, get_current_plan, mark_active_plans_stale
 from app.services.planning.stock import (
     add_movement,
     current_stock,
@@ -331,7 +334,13 @@ def current_plan(db: Session = Depends(get_db), user=Depends(require_planning)):
 
 @router.get("/plans")
 def list_plans(db: Session = Depends(get_db), user=Depends(require_planning)):
-    rows = db.query(PlanRun).order_by(PlanRun.id.desc()).limit(20).all()
+    rows = (
+        db.query(PlanRun)
+        .filter(PlanRun.status != BACKTEST)
+        .order_by(PlanRun.id.desc())
+        .limit(20)
+        .all()
+    )
     return {
         "rows": [
             {
@@ -363,8 +372,126 @@ def plan_compare(plan_id: int, db: Session = Depends(get_db), user=Depends(requi
         raise HTTPException(404, detail=str(e)) from e
 
 
+# ----- Geçmiş deneme (backtest) — never touches the live plan / ledgers -----
+
+
+@router.post("/backtest/inspect")
+async def backtest_inspect(
+    orders: UploadFile = File(...),
+    stock: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    user=Depends(require_planning),
+):
+    try:
+        return inspect_excels(
+            db,
+            await orders.read(),
+            (await stock.read()) if stock else None,
+            orders_filename=orders.filename or "",
+            stock_filename=(stock.filename or "") if stock else "",
+        )
+    except RuntimeError as e:
+        raise HTTPException(500, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e)) from e
+
+
+@router.post("/backtest")
+async def backtest_run(
+    orders: UploadFile | None = File(None),
+    stock: UploadFile | None = File(None),
+    import_id: int | None = Form(None),
+    as_of: str | None = Form(None),
+    horizon_end: str | None = Form(None),
+    prefs: str | None = Form(None),
+    db: Session = Depends(get_db),
+    user=Depends(require_planning),
+):
+    try:
+        prefs_raw = json.loads(prefs) if prefs else None
+        plan = run_backtest(
+            db,
+            orders_data=(await orders.read()) if orders else None,
+            stock_data=(await stock.read()) if stock else None,
+            import_id=import_id,
+            as_of=as_of,
+            horizon_end=horizon_end,
+            prefs=prefs_raw,
+            created_by=user.display_name,
+            orders_filename=(orders.filename or "") if orders else "",
+            stock_filename=(stock.filename or "") if stock else "",
+        )
+    except (ValueError, json.JSONDecodeError) as e:
+        raise HTTPException(400, detail=str(e)) from e
+    return _plan_detail(db, plan)
+
+
+@router.get("/backtest")
+def backtest_list(db: Session = Depends(get_db), user=Depends(require_planning)):
+    rows = (
+        db.query(PlanRun)
+        .filter(PlanRun.status == BACKTEST)
+        .order_by(PlanRun.id.desc())
+        .limit(30)
+        .all()
+    )
+    return {
+        "rows": [
+            {
+                "id": p.id,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "created_by": p.created_by,
+                "note": p.note,
+                "as_of": _iso(p.as_of),
+                "horizon_end": _iso(p.horizon_end),
+                "prefs": json.loads(p.prefs_json) if p.prefs_json else None,
+            }
+            for p in rows
+        ]
+    }
+
+
+def _get_backtest(db: Session, plan_id: int) -> PlanRun:
+    plan = db.get(PlanRun, plan_id)
+    if not plan or plan.status != BACKTEST:
+        raise HTTPException(404, detail="Geçmiş deneme bulunamadı")
+    return plan
+
+
+@router.get("/backtest/{plan_id}")
+def backtest_get(plan_id: int, db: Session = Depends(get_db), user=Depends(require_planning)):
+    return _plan_detail(db, _get_backtest(db, plan_id))
+
+
+@router.delete("/backtest/{plan_id}")
+def backtest_delete(plan_id: int, db: Session = Depends(get_db), user=Depends(require_planning)):
+    plan = _get_backtest(db, plan_id)
+    db.query(PlanSlot).filter(PlanSlot.plan_run_id == plan.id).delete()
+    db.delete(plan)
+    db.commit()
+    return {"ok": True}
+
+
+def _iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).isoformat()
+
+
+def _loads(raw: str | None):
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
 def _plan_detail(db: Session, plan: PlanRun) -> dict:
     slots = db.query(PlanSlot).filter(PlanSlot.plan_run_id == plan.id).order_by(PlanSlot.id).all()
+    machine_names = {m.id: m.name for m in db.query(Machine).all()}
+    mold_names = {m.id: m.name for m in db.query(Mold).all()}
+    product_names = {p.id: p.name for p in db.query(Product).all()}
     return {
         "id": plan.id,
         "created_at": plan.created_at.isoformat() if plan.created_at else None,
@@ -372,18 +499,28 @@ def _plan_detail(db: Session, plan: PlanRun) -> dict:
         "note": plan.note,
         "status": getattr(plan, "status", None) or "active",
         "stale_reason": getattr(plan, "stale_reason", None),
+        "as_of": _iso(plan.as_of),
+        "horizon_end": _iso(plan.horizon_end),
+        "prefs": _loads(plan.prefs_json),
+        "inputs": _loads(plan.input_json),
+        "result": _loads(plan.result_json),
         "slots": [
             {
                 "id": s.id,
                 "order_line_id": s.order_line_id,
+                "line_key": s.line_key,
                 "product_id": s.product_id,
+                "product_name": product_names.get(s.product_id) if s.product_id else None,
                 "mold_id": s.mold_id,
+                "mold_name": mold_names.get(s.mold_id) if s.mold_id else None,
                 "machine_id": s.machine_id,
-                "suggested_start": s.suggested_start.isoformat() if s.suggested_start else None,
-                "suggested_end": s.suggested_end.isoformat() if s.suggested_end else None,
+                "machine_name": machine_names.get(s.machine_id) if s.machine_id else None,
+                "suggested_start": _iso(s.suggested_start),
+                "suggested_end": _iso(s.suggested_end),
                 "qty_planned": s.qty_planned,
                 "reason": s.reason,
                 "score": s.score,
+                "meta": _loads(s.meta_json),
             }
             for s in slots
         ],

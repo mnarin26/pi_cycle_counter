@@ -227,10 +227,15 @@ class PlanRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     note: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    # active | stale | superseded
+    # active | stale | superseded | backtest (backtest never becomes the current plan)
     status: Mapped[str] = mapped_column(String(16), default="active")
     stale_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    horizon_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    prefs_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PlanSlot(Base):
@@ -247,6 +252,9 @@ class PlanSlot(Base):
     qty_planned: Mapped[int] = mapped_column(Integer, default=0)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Backtest lines come from a temporary Excel, not order_lines → keyed by line_key.
+    line_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    meta_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class MoldMachine(Base):

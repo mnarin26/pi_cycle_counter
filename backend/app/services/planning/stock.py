@@ -97,6 +97,35 @@ def current_stock(db: Session, product_id: int) -> int:
     return base + int(sum(int(r.qty) for r in later2))
 
 
+def stock_as_of(db: Session, product_id: int, as_of: datetime) -> tuple[int, str]:
+    """Ledger balance at `as_of` → (qty, confidence: high | low | unknown).
+
+    high    = an excel_reset at/before as_of + later deltas up to as_of
+    low     = no reset before as_of; sum of earlier deltas only
+    unknown = nothing recorded before as_of
+    """
+    pid = int(product_id)
+    at = as_of if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
+    rows = (
+        db.query(StockMovement)
+        .filter(StockMovement.product_id == pid, StockMovement.created_at <= at)
+        .order_by(StockMovement.id.asc())
+        .all()
+    )
+    if not rows:
+        return 0, "unknown"
+    resets = [r for r in rows if r.kind == "excel_reset"]
+    if not resets:
+        return int(sum(int(r.qty) for r in rows)), "low"
+    base = max(resets, key=lambda r: (_aware(r.created_at), r.id))
+    later = [r for r in rows if r.kind != "excel_reset" and r.id > base.id]
+    return int(base.qty) + int(sum(int(r.qty) for r in later)), "high"
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def list_stock_balances(db: Session) -> list[dict]:
     products = db.query(Product).order_by(Product.name.asc()).all()
     out = []
