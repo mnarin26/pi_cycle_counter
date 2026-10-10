@@ -198,6 +198,21 @@ def inspect_excels(
             }
         )
 
+    # Stock sheets carry only codes; a product named by description is reachable
+    # through the code column of its order rows.
+    for ln in lines:
+        if not ln["product_id"]:
+            continue
+        for k in [ln["product_name_raw"], *ln["alt_names"]]:
+            hit = stock_by_raw.get(norm_key(k))
+            if hit and hit["product_id"] is None:
+                hit.update(
+                    product_id=ln["product_id"],
+                    product_name=ln["product_name"],
+                    match="sipariş kodu",
+                    stock_key=ln["stock_key"],
+                )
+
     dues = [datetime.fromisoformat(ln["due_date"]) for ln in lines if ln["due_date"]]
     if t0 is None and dues:
         t0 = min(dues)
