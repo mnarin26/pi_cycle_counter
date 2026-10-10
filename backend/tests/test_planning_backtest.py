@@ -81,6 +81,29 @@ def test_inspect_matches_products_by_name_or_code_without_writing():
     assert db.query(Product).count() == n_products
 
 
+def test_inspect_prefers_product_with_mold_over_auto_created_name():
+    db, f = _seeded()
+    # a live order import auto-creates a mold-less product under the Excel description
+    db.add(Product(name="YENI_ORTA_MENTESE_TAPASI"))
+    db.flush()
+    rep = inspect_excels(db, orders_xlsx(), stock_xlsx())
+    by_raw = {p["product_name_raw"]: p for p in rep["products"]}
+    assert by_raw["YENI_ORTA_MENTESE_TAPASI"]["product_id"] == f["products"]["A"].id
+
+
+def test_stock_code_reaches_product_named_by_description_via_order_code():
+    db, f = _seeded()
+    f["products"]["A"].name = "YENI_ORTA_MENTESE_TAPASI"
+    db.flush()
+    rep = inspect_excels(db, orders_xlsx(), stock_xlsx())
+    by_raw = {p["product_name_raw"]: p for p in rep["products"]}
+    assert by_raw["YENI_ORTA_MENTESE_TAPASI"]["product_id"] == f["products"]["A"].id
+    assert by_raw["YENI_ORTA_MENTESE_TAPASI"]["stock"] == 500
+    row = next(s for s in rep["stock_rows"] if s["product_name_raw"] == "5723410100")
+    assert row["product_id"] == f["products"]["A"].id and row["match"] == "sipariş kodu"
+    assert all(s["product_name_raw"] != "5723410100" for s in rep["unused_stock"])
+
+
 def test_inspect_warns_when_headerless_stock_row_is_skipped():
     db, f = _seeded()
     rep = inspect_excels(db, orders_xlsx(), stock_xlsx())

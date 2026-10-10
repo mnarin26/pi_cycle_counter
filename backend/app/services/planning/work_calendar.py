@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 
-from app.services.planning.prefs import PlanPrefs
+from app.services.planning.prefs import LineRule, PlanPrefs
 from app.services.shifts import ShiftDef
 from app.services.time_windows import DISPLAY_TZ
 
@@ -22,15 +22,10 @@ def _is_night(s: ShiftDef) -> bool:
     return s.start.hour < 6 or s.start.hour >= 22
 
 
-def pattern_shifts(shifts: list[ShiftDef], pattern: str) -> list[ShiftDef]:
-    ordered = sorted(shifts, key=lambda s: (s.start.hour, s.start.minute))
-    if pattern == "3x8" or len(ordered) <= 1:
-        return ordered
-    non_night = [s for s in ordered if not _is_night(s)] or ordered
-    if pattern == "2x8":
-        return non_night[:2]
-    noon = [s for s in non_night if s.start <= time(12) < (s.end if s.end > s.start else _END_OF_DAY)]
-    return (noon or non_night)[:1]
+def day_order(shifts: list[ShiftDef]) -> list[ShiftDef]:
+    """Shifts in the order a limited daily budget fills them: day shifts first
+    (by start time), night shifts last."""
+    return sorted(shifts, key=lambda s: (_is_night(s), s.start.hour, s.start.minute))
 
 
 def _shift_span(day: date, s: ShiftDef) -> tuple[datetime, datetime]:
@@ -74,55 +69,81 @@ def _intersect(a: list[Interval], b: list[Interval]) -> list[Interval]:
 
 
 class WorkCalendar:
+    """Production/changeover intervals from the production-settings shifts.
+
+    A `LineRule` narrows one order line's calendar: `hours_per_day` keeps that
+    many hours per local day (day shifts first, the last one cut short) and its
+    weekend values override the plan-wide defaults.
+    """
+
     def __init__(self, prefs: PlanPrefs, shifts: list[ShiftDef], start: datetime, days: int = 150):
         self.prefs = prefs
         self.start = start
-        self.shifts = pattern_shifts(shifts, prefs.work_pattern)
+        self.shifts = day_order(shifts)
         self.night_ids = {s.id for s in self.shifts if _is_night(s)}
         self._cache: dict[tuple, list[Interval]] = {}
         first = start.astimezone(DISPLAY_TZ).date() - timedelta(days=1)
         self.days = [first + timedelta(days=i) for i in range(days + 2)]
         self.closed = set(prefs.closed_days)
 
-    def has_soft_rules(self, manual: bool) -> bool:
+    def _weekend(self, rule: LineRule | None) -> tuple[str, str]:
         p = self.prefs
         return (
-            p.saturday == "avoid"
-            or p.sunday == "avoid"
+            (rule.saturday if rule and rule.saturday else p.saturday),
+            (rule.sunday if rule and rule.sunday else p.sunday),
+        )
+
+    def has_soft_rules(self, manual: bool, rule: LineRule | None = None) -> bool:
+        p = self.prefs
+        sat, sun = self._weekend(rule)
+        return (
+            sat == "avoid"
+            or sun == "avoid"
             or (manual and p.manual_not_night == "soft")
             or p.changeover_daytime == "soft"
         )
 
-    def _day_blocked(self, day: date, strict: bool) -> bool:
+    def _day_blocked(self, day: date, strict: bool, rule: LineRule | None) -> bool:
         if day.isoformat() in self.closed:
             return True
         wd = day.weekday()
-        mode = self.prefs.saturday if wd == 5 else self.prefs.sunday if wd == 6 else "work"
+        sat, sun = self._weekend(rule)
+        mode = sat if wd == 5 else sun if wd == 6 else "work"
         return mode == "off" or (strict and mode == "avoid")
 
-    def production(self, *, manual: bool, strict: bool) -> list[Interval]:
-        key = ("prod", manual, strict)
+    def production(self, *, manual: bool, strict: bool, rule: LineRule | None = None) -> list[Interval]:
+        key = ("prod", manual, strict, rule.cache_key() if rule else None)
         if key in self._cache:
             return self._cache[key]
         lvl = self.prefs.manual_not_night
         skip_night = manual and (lvl == "hard" or (strict and lvl == "soft"))
+        budget_h = rule.hours_per_day if rule else None
         raw: list[Interval] = []
         for day in self.days:
-            if self._day_blocked(day, strict):
+            if self._day_blocked(day, strict, rule):
                 continue
+            left = budget_h * 3600.0 if budget_h is not None else None
             for s in self.shifts:
                 if skip_night and s.id in self.night_ids:
                     continue
-                raw.append(_shift_span(day, s))
+                a, b = _shift_span(day, s)
+                if left is not None:
+                    if left <= 0:
+                        break
+                    span = (b - a).total_seconds()
+                    if span > left:
+                        b = a + timedelta(seconds=left)
+                    left -= min(span, left)
+                raw.append((a, b))
         out = [iv for iv in _merge(raw) if iv[1] > self.start]
         self._cache[key] = out
         return out
 
-    def changeover(self, *, manual: bool, strict: bool) -> list[Interval]:
-        key = ("co", manual, strict)
+    def changeover(self, *, manual: bool, strict: bool, rule: LineRule | None = None) -> list[Interval]:
+        key = ("co", manual, strict, rule.cache_key() if rule else None)
         if key in self._cache:
             return self._cache[key]
-        base = self.production(manual=manual, strict=strict)
+        base = self.production(manual=manual, strict=strict, rule=rule)
         lvl = self.prefs.changeover_daytime
         if lvl == "hard" or (strict and lvl == "soft"):
             a, b = self.prefs.window_minutes()
@@ -139,22 +160,24 @@ class WorkCalendar:
         self._cache[key] = base
         return base
 
-    def relaxed_labels(self, a: datetime, b: datetime, *, manual: bool) -> list[str]:
+    def relaxed_labels(self, a: datetime, b: datetime, *, manual: bool, rule: LineRule | None = None) -> list[str]:
         """Which soft preferences a relaxed [a, b] work span actually broke."""
         out: list[str] = []
         p = self.prefs
+        sat, sun = self._weekend(rule)
         cur = a.astimezone(DISPLAY_TZ).date()
         last = b.astimezone(DISPLAY_TZ).date()
         while cur <= last:
             wd = cur.weekday()
-            if wd == 5 and p.saturday == "avoid" and "Cumartesi kullanıldı" not in out:
+            if wd == 5 and sat == "avoid" and "Cumartesi kullanıldı" not in out:
                 out.append("Cumartesi kullanıldı")
-            if wd == 6 and p.sunday == "avoid" and "Pazar kullanıldı" not in out:
+            if wd == 6 and sun == "avoid" and "Pazar kullanıldı" not in out:
                 out.append("Pazar kullanıldı")
             cur += timedelta(days=1)
         if manual and p.manual_not_night == "soft" and self.night_ids:
-            strict = self.production(manual=True, strict=True)
-            if worked_between(strict, a, b) < worked_between(self.production(manual=True, strict=False), a, b):
+            strict = self.production(manual=True, strict=True, rule=rule)
+            relaxed = self.production(manual=True, strict=False, rule=rule)
+            if worked_between(strict, a, b) < worked_between(relaxed, a, b):
                 out.append("manuel kalıp gece vardiyasında çalıştı")
         return out
 

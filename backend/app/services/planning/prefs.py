@@ -19,7 +19,6 @@ PRIORITIES = ("due", "min_changeover", "shortest", "low_risk")
 SPLIT_MODES = ("no", "yes", "if_late")
 RISK_MODES = ("avoid", "ignore")
 CYCLE_SOURCES = ("history", "target")
-WORK_PATTERNS = ("3x8", "2x8", "1x8")
 WEEKEND_MODES = ("work", "avoid", "off")
 RULE_LEVELS = ("off", "soft", "hard")
 
@@ -30,9 +29,27 @@ PRIORITY_LABELS = {
     "low_risk": "En düşük risk",
 }
 SPLIT_LABELS = {"no": "Bölme yok", "yes": "Bölünebilir", "if_late": "Sadece termine yetişmiyorsa böl"}
-PATTERN_LABELS = {"3x8": "3 vardiya (7/24)", "2x8": "2 vardiya", "1x8": "Tek vardiya"}
 WEEKEND_LABELS = {"work": "Çalışılır", "avoid": "Mümkünse çalışma", "off": "Çalışılmaz"}
 LEVEL_LABELS = {"off": "Farketmez", "soft": "Mümkünse", "hard": "Kesin kural"}
+
+
+@dataclass
+class LineRule:
+    """Per order-line calendar override (key = plan line key, e.g. "o:12" / "x:3").
+
+    `hours_per_day` None → the line works all shift hours from production
+    settings; `saturday`/`sunday` None → the plan-wide weekend default.
+    """
+
+    hours_per_day: float | None = None
+    saturday: str | None = None
+    sunday: str | None = None
+
+    def is_empty(self) -> bool:
+        return self.hours_per_day is None and self.saturday is None and self.sunday is None
+
+    def cache_key(self) -> tuple:
+        return (self.hours_per_day, self.saturday, self.sunday)
 
 
 @dataclass
@@ -48,14 +65,18 @@ class PlanPrefs:
     warn_stock_zero: bool = True
     cycle_source: str = "history"
     changeover: bool = True
-    # calendar / shifts
-    work_pattern: str = "3x8"
+    # calendar — working hours come from production shift settings; weekend
+    # values are defaults that a line rule may override
     saturday: str = "work"
     sunday: str = "work"
     manual_not_night: str = "off"
     changeover_daytime: str = "off"
     changeover_window: str = "08:00-17:00"
     closed_days: list[str] = field(default_factory=list)
+    line_rules: dict[str, LineRule] = field(default_factory=dict)
+
+    def rule_for(self, line_key: str | None) -> LineRule | None:
+        return self.line_rules.get(line_key) if line_key else None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -94,8 +115,36 @@ def _int_list(src: dict, key: str) -> list[int]:
     return sorted({int(x) for x in raw})
 
 
+def _line_rules(src: dict) -> dict[str, LineRule]:
+    raw = src.get("line_rules") or {}
+    if not isinstance(raw, dict):
+        raise ValueError("line_rules nesne olmalı")
+    out: dict[str, LineRule] = {}
+    for key, r in raw.items():
+        if not isinstance(r, dict):
+            raise ValueError(f"{key}: sipariş kuralı nesne olmalı")
+        h = r.get("hours_per_day")
+        hours = None
+        if h not in (None, ""):
+            hours = float(h)
+            if not 0.5 <= hours <= 24:
+                raise ValueError(f"{key}: günlük çalışma saati 0,5–24 arasında olmalı")
+        rule = LineRule(
+            hours_per_day=hours,
+            saturday=_choice(r, "saturday", WEEKEND_MODES, "work") if r.get("saturday") else None,
+            sunday=_choice(r, "sunday", WEEKEND_MODES, "work") if r.get("sunday") else None,
+        )
+        if not rule.is_empty():
+            out[str(key)] = rule
+    return out
+
+
 def prefs_from_dict(raw: dict[str, Any] | None) -> PlanPrefs | None:
-    """Validate user input. `None`/empty → None (legacy engine)."""
+    """Validate user input. `None` → None (legacy engine).
+
+    Unknown keys are ignored, so prefs saved by older versions (e.g. the removed
+    global `work_pattern`) still load.
+    """
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -113,13 +162,13 @@ def prefs_from_dict(raw: dict[str, Any] | None) -> PlanPrefs | None:
         warn_stock_zero=bool(raw.get("warn_stock_zero", d.warn_stock_zero)),
         cycle_source=_choice(raw, "cycle_source", CYCLE_SOURCES, d.cycle_source),
         changeover=bool(raw.get("changeover", d.changeover)),
-        work_pattern=_choice(raw, "work_pattern", WORK_PATTERNS, d.work_pattern),
         saturday=_choice(raw, "saturday", WEEKEND_MODES, d.saturday),
         sunday=_choice(raw, "sunday", WEEKEND_MODES, d.sunday),
         manual_not_night=_choice(raw, "manual_not_night", RULE_LEVELS, d.manual_not_night),
         changeover_daytime=_choice(raw, "changeover_daytime", RULE_LEVELS, d.changeover_daytime),
         changeover_window=str(raw.get("changeover_window") or d.changeover_window),
         closed_days=sorted({str(x)[:10] for x in (raw.get("closed_days") or [])}),
+        line_rules=_line_rules(raw),
     )
     a, b = p.window_minutes()
     if b <= a:
@@ -140,9 +189,18 @@ def describe_prefs(p: PlanPrefs | None) -> list[str]:
         f"Sipariş bölme: {SPLIT_LABELS[p.split]}",
         "Aynı ürün birlikte üretilir" if p.group_same_product else "Aynı ürün siparişleri ayrı planlanır",
         "Sık arıza yapan makinelerden kaçınılır" if p.risky_machines == "avoid" else "Makine arıza geçmişi dikkate alınmaz",
-        f"Çalışma düzeni: {PATTERN_LABELS[p.work_pattern]}",
+        "Çalışma saatleri: Ayarlar'daki vardiyalar",
         f"Cumartesi: {WEEKEND_LABELS[p.saturday]} · Pazar: {WEEKEND_LABELS[p.sunday]}",
     ]
+    if p.line_rules:
+        n_hours = sum(1 for r in p.line_rules.values() if r.hours_per_day is not None)
+        n_week = sum(1 for r in p.line_rules.values() if r.saturday or r.sunday)
+        bits = []
+        if n_hours:
+            bits.append(f"{n_hours} siparişte günlük saat sınırı")
+        if n_week:
+            bits.append(f"{n_week} siparişte özel hafta sonu")
+        out.append("Siparişe özel: " + ", ".join(bits))
     if p.manual_not_night != "off":
         out.append(f"Manuel kalıp gece vardiyasına konmaz ({LEVEL_LABELS[p.manual_not_night]})")
     if p.changeover_daytime != "off":

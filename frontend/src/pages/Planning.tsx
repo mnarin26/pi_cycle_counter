@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPatch, apiPost, apiUpload } from "../api/client";
+import { BacktestTab } from "./planning/BacktestTab";
+import { PlanResultView } from "./planning/PlanResultView";
+import { PrefsPanel } from "./planning/PrefsPanel";
+import type { PlanPrefs, PlanResult, PrefsDefaults } from "./planning/types";
+import { fromLocalInput } from "./planning/types";
 
 type OrderRow = {
   id: number;
@@ -14,13 +19,15 @@ type OrderRow = {
   net_need: number | null;
 };
 
-type StockRow = { product_id: number; product_name: string; qty: number };
+type StockRow = { product_id: number; product_name: string; qty: number; min_stock: number | null };
 type PlanSlot = {
   id: number;
   order_line_id: number | null;
   product_id: number | null;
   mold_id: number | null;
+  mold_name?: string | null;
   machine_id: number | null;
+  machine_name?: string | null;
   suggested_start: string | null;
   suggested_end: string | null;
   qty_planned: number;
@@ -32,6 +39,8 @@ type PlanDetail = {
   created_at: string | null;
   status?: string;
   stale_reason?: string | null;
+  prefs?: PlanPrefs | null;
+  result?: PlanResult | null;
   slots: PlanSlot[];
 };
 type CompareRow = {
@@ -74,7 +83,10 @@ function formatPlanWhen(iso: string | null | undefined): string {
 }
 
 export function PlanningPage() {
-  const [tab, setTab] = useState<"orders" | "stock" | "plan" | "stats">("orders");
+  const [tab, setTab] = useState<"orders" | "stock" | "plan" | "stats" | "backtest">("orders");
+  const [defaults, setDefaults] = useState<PrefsDefaults | null>(null);
+  const [prefs, setPrefs] = useState<PlanPrefs | null>(null);
+  const [prefsOpen, setPrefsOpen] = useState(false);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [stock, setStock] = useState<StockRow[]>([]);
   const [plan, setPlan] = useState<PlanDetail | null>(null);
@@ -96,6 +108,19 @@ export function PlanningPage() {
     const r = await apiGet<{ rows: StatRow[] }>("/api/planning/mold-machine-stats?days=30");
     setStats(r.rows);
   }, []);
+
+  async function saveMinStock(s: StockRow, raw: string) {
+    const v = raw.trim() === "" ? null : Math.max(0, Math.round(Number(raw)));
+    if (v !== null && !Number.isFinite(v)) return;
+    if ((v || null) === (s.min_stock || null)) return;
+    try {
+      await apiPatch(`/api/products/${s.product_id}`, { min_stock: v });
+      await refreshStock();
+      await refreshCurrentPlan();
+    } catch (e) {
+      setErr(parseApiError(e));
+    }
+  }
 
   const loadPlan = useCallback(async (detail: PlanDetail) => {
     setPlan(detail);
@@ -119,6 +144,15 @@ export function PlanningPage() {
   useEffect(() => {
     void refreshCurrentPlan().catch(() => {});
   }, [refreshCurrentPlan]);
+
+  useEffect(() => {
+    void apiGet<PrefsDefaults>("/api/planning/prefs/defaults")
+      .then((d) => {
+        setDefaults(d);
+        setPrefs(d.prefs);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     setErr(null);
@@ -232,11 +266,13 @@ export function PlanningPage() {
     await refreshCurrentPlan();
   }
 
-  async function generatePlan() {
+  async function generatePlan(withPrefs: boolean) {
     setBusy(true);
     setErr(null);
     try {
-      const p = await apiPost<PlanDetail>("/api/planning/plans/generate");
+      const body = withPrefs && prefs ? { prefs: { ...prefs, start_at: fromLocalInput(prefs.start_at ?? "") } } : undefined;
+      const p = await apiPost<PlanDetail>("/api/planning/plans/generate", body);
+      setPrefsOpen(false);
       await loadPlan(p);
       setMsg(`Aktif plan güncellendi · ${formatPlanWhen(p.created_at)}`);
       setTab("plan");
@@ -252,6 +288,7 @@ export function PlanningPage() {
     ["stock", "Stok"],
     ["plan", "Plan önerisi"],
     ["stats", "Kalıp×Makine"],
+    ["backtest", "Geçmiş deneme"],
   ];
 
   const planStale = plan?.status === "stale";
@@ -276,11 +313,57 @@ export function PlanningPage() {
           type="button"
           className="ml-auto rounded bg-emerald-700 px-3 py-2 text-sm text-white disabled:opacity-50"
           disabled={busy}
-          onClick={() => void generatePlan()}
+          onClick={() => {
+            if (!prefsOpen) void refreshOrders().catch(() => {});
+            setPrefsOpen((v) => !v);
+          }}
         >
           {busy ? "…" : planStale ? "Planı yenile" : "Plan önerisi üret"}
         </button>
       </div>
+      {prefsOpen && (
+        <div className="space-y-2 rounded border border-emerald-800/60 bg-slate-900/80 p-3">
+          <div className="text-sm text-slate-200">
+            Plan hesaplanmadan önce tercihler — değiştirmezseniz önerilen varsayılanlarla üretilir.
+          </div>
+          {prefs && (
+            <PrefsPanel
+              value={prefs}
+              onChange={setPrefs}
+              defaults={defaults}
+              lines={orders
+                .filter((o) => o.status === "open")
+                .map((o) => ({
+                  key: `o:${o.id}`,
+                  label: o.product_name ?? o.product_name_raw,
+                  due: o.due_date,
+                  qty: o.qty,
+                }))}
+            />
+          )}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded bg-emerald-700 px-3 py-2 text-sm text-white disabled:opacity-50"
+              disabled={busy || !prefs}
+              onClick={() => void generatePlan(true)}
+            >
+              Tercihlerle üret
+            </button>
+            <button
+              type="button"
+              className="rounded bg-slate-700 px-3 py-2 text-sm text-white disabled:opacity-50"
+              disabled={busy}
+              onClick={() => void generatePlan(false)}
+            >
+              Tercihsiz üret (önceki davranış)
+            </button>
+            <button type="button" className="rounded px-3 py-2 text-sm text-slate-400" onClick={() => setPrefsOpen(false)}>
+              Vazgeç
+            </button>
+          </div>
+        </div>
+      )}
       {planStale && (
         <div className="rounded border border-amber-700/60 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
           Sipariş/stok değişti — plan güncel değil
@@ -363,10 +446,26 @@ export function PlanningPage() {
               }}
             />
           </label>
+          <p className="text-xs text-slate-400">
+            Asgari stok: planlayıcı bu kadarını stokta tutar, siparişlere yalnızca fazlasını kullanır. Boş = sınır yok.
+          </p>
           <ul className="space-y-1 text-sm">
             {stock.map((s) => (
-              <li key={s.product_id} className="rounded border border-slate-700 px-3 py-2">
-                {s.product_name}: <span className="font-semibold text-sky-300">{s.qty}</span>
+              <li key={s.product_id} className="flex flex-wrap items-center gap-2 rounded border border-slate-700 px-3 py-2">
+                <span>
+                  {s.product_name}: <span className="font-semibold text-sky-300">{s.qty}</span>
+                </span>
+                <label className="ml-auto flex items-center gap-1 text-xs text-slate-400">
+                  Asgari stok
+                  <input
+                    type="number"
+                    min={0}
+                    className="w-24 rounded bg-slate-800 px-2 py-0.5 text-slate-100"
+                    defaultValue={s.min_stock ?? ""}
+                    placeholder="—"
+                    onBlur={(e) => void saveMinStock(s, e.target.value)}
+                  />
+                </label>
               </li>
             ))}
           </ul>
@@ -382,6 +481,7 @@ export function PlanningPage() {
               <h3 className="font-medium text-slate-200">
                 {planStale ? "Bayat plan" : "Aktif plan"} · {formatPlanWhen(plan.created_at)}
               </h3>
+              {plan.result && <PlanResultView result={plan.result} />}
               <div className="overflow-x-auto rounded border border-slate-700">
                 <table className="min-w-full text-left text-sm">
                   <thead className="bg-slate-800 text-slate-300">
@@ -397,8 +497,8 @@ export function PlanningPage() {
                   <tbody>
                     {plan.slots.map((s) => (
                       <tr key={s.id} className="border-t border-slate-800">
-                        <td className="px-3 py-2">{s.machine_id ?? "—"}</td>
-                        <td className="px-3 py-2">{s.mold_id ?? "—"}</td>
+                        <td className="px-3 py-2">{s.machine_name ?? s.machine_id ?? "—"}</td>
+                        <td className="px-3 py-2">{s.mold_name ?? s.mold_id ?? "—"}</td>
                         <td className="px-3 py-2">{s.qty_planned}</td>
                         <td className="px-3 py-2">
                           {s.suggested_start?.replace("T", " ").slice(0, 16) || "—"}
@@ -441,6 +541,8 @@ export function PlanningPage() {
           )}
         </div>
       )}
+
+      {tab === "backtest" && <BacktestTab defaults={defaults} />}
 
       {tab === "stats" && (
         <div className="overflow-x-auto rounded border border-slate-700">

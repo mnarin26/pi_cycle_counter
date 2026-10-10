@@ -135,6 +135,7 @@ def list_stock_balances(db: Session) -> list[dict]:
                 "product_id": p.id,
                 "product_name": p.name,
                 "qty": current_stock(db, p.id),
+                "min_stock": p.min_stock,
             }
         )
     return out

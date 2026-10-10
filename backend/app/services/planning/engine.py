@@ -75,7 +75,9 @@ def mold_machine_stats(db: Session, *, days: int = 30, as_of: datetime | None = 
         run_ratio = work / span if span > 0 else 0.0
         target = None
         if mold:
-            target = mold.target_cycle_s or (mold.avg_cycle_s if mold.avg_cycle_s > 0 else None)
+            target = mold.target_cycle_s
+            if not target and as_of is None and mold.avg_cycle_s > 0:
+                target = mold.avg_cycle_s
         avg_cycle = None
         if b["camera_cycles"] > 0 and work > 0:
             avg_cycle = work / b["camera_cycles"]

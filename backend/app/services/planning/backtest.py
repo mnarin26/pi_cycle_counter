@@ -18,7 +18,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import OrderImport, OrderLine, PlanRun, Product
+from app.db.models import Mold, OrderImport, OrderLine, PlanRun, Product
 from app.services.planning.excel_format import _col_to_index, get_excel_format
 from app.services.planning.excel_orders import parse_orders_xlsx
 from app.services.planning.excel_stock import parse_stock_xlsx
@@ -46,27 +46,46 @@ def _first_token(name: str) -> str:
 
 
 class ProductMatcher:
-    """Read-only Excel → products matcher (exact name, then product code)."""
+    """Read-only Excel → products matcher (exact name, then product code).
+
+    Live order imports auto-create products by full name, so one Excel row can
+    hit both a mold-less name product and a coded product with molds; a
+    candidate that has a mold wins.
+    """
 
     def __init__(self, db: Session):
         self.by_name: dict[str, Product] = {}
         self.by_code: dict[str, Product] = {}
-        for p in db.query(Product).all():
-            self.by_name.setdefault(norm_key(p.name), p)
+        self.with_mold = {
+            pid for (pid,) in db.query(Mold.product_id).filter(Mold.product_id.isnot(None), Mold.status != "ignored")
+        }
+        for p in db.query(Product).order_by(Product.id).all():
+            self._put(self.by_name, norm_key(p.name), p)
             code = _first_token(p.name)
             if code:
-                self.by_code.setdefault(code, p)
+                self._put(self.by_code, code, p)
+
+    def _put(self, index: dict[str, Product], key: str, p: Product) -> None:
+        cur = index.get(key)
+        if cur is None or (cur.id not in self.with_mold and p.id in self.with_mold):
+            index[key] = p
 
     def match(self, keys: list[str]) -> tuple[Product | None, str]:
         clean = [norm_key(k) for k in keys if norm_key(k)]
+        found: list[tuple[Product, str]] = []
         for k in clean:
             if k in self.by_name:
-                return self.by_name[k], "ad"
+                found.append((self.by_name[k], "ad"))
         for k in clean:
             tok = k.split(" ")[0]
             if tok in self.by_code:
-                return self.by_code[tok], "kod"
-        return None, "yok"
+                found.append((self.by_code[tok], "kod"))
+        if not found:
+            return None, "yok"
+        for p, how in found:
+            if p.id in self.with_mold:
+                return p, how
+        return found[0]
 
 
 def detect_t0(ws) -> tuple[datetime | None, str | None]:
@@ -178,6 +197,21 @@ def inspect_excels(
                 "customer": r.get("customer"),
             }
         )
+
+    # Stock sheets carry only codes; a product named by description is reachable
+    # through the code column of its order rows.
+    for ln in lines:
+        if not ln["product_id"]:
+            continue
+        for k in [ln["product_name_raw"], *ln["alt_names"]]:
+            hit = stock_by_raw.get(norm_key(k))
+            if hit and hit["product_id"] is None:
+                hit.update(
+                    product_id=ln["product_id"],
+                    product_name=ln["product_name"],
+                    match="sipariş kodu",
+                    stock_key=ln["stock_key"],
+                )
 
     dues = [datetime.fromisoformat(ln["due_date"]) for ln in lines if ln["due_date"]]
     if t0 is None and dues:
@@ -386,6 +420,14 @@ def run_backtest(
                 qty, conf = stock_as_of(db, int(ln.product_id), t0)
                 stock[ln.skey()] = qty
                 stock_conf[ln.skey()] = conf
+        if plan_prefs is not None:
+            floor_ids = [pid for (pid,) in db.query(Product.id).filter(Product.min_stock.isnot(None), Product.min_stock > 0)]
+            for pid in floor_ids:
+                key = f"p:{pid}"
+                if key not in stock:
+                    qty, conf = stock_as_of(db, pid, t0)
+                    stock[key] = qty
+                    stock_conf[key] = conf
         report["stock_source"] = "ledger"
         low = sorted({k for k, v in stock_conf.items() if v != "high"})
         if low:

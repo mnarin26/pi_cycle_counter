@@ -589,8 +589,10 @@ def _gantt_and_changeovers(db, plan, slots, t0, window_end, product_ids, machine
                     "start": _aware(s.suggested_start).isoformat(),
                     "end": _aware(s.suggested_end).isoformat(),
                     "prod_start": meta.get("prod_start"),
-                    "label": f"{mold_names.get(s.mold_id, '')} · {s.qty_planned}",
+                    "label": f"{mold_names.get(s.mold_id, '')} · {s.qty_planned}"
+                    + (" · asgari stok" if meta.get("refill") else ""),
                     "line_keys": meta.get("line_keys") or [s.line_key],
+                    "refill": meta.get("refill"),
                 }
             )
         actual = []
