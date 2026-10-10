@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { PlanPrefs, PrefsDefaults } from "./types";
+import { LineRules } from "./LineRules";
+import type { PlanPrefs, PrefsDefaults, RuleLine } from "./types";
 
 type Opt<T extends string> = Array<[T, string]>;
 
@@ -52,11 +53,13 @@ export function PrefsPanel({
   onChange,
   defaults,
   showStart = true,
+  lines = [],
 }: {
   value: PlanPrefs;
   onChange: (p: PlanPrefs) => void;
   defaults: PrefsDefaults | null;
   showStart?: boolean;
+  lines?: RuleLine[];
 }) {
   const [closedDraft, setClosedDraft] = useState("");
   const set = <K extends keyof PlanPrefs>(k: K, v: PlanPrefs[K]) => onChange({ ...value, [k]: v });
@@ -158,19 +161,26 @@ export function PrefsPanel({
 
       <div className="space-y-3">
         <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Takvim ve vardiya</div>
+        <div className="space-y-1">
+          <div className="text-sm text-slate-200">Çalışma saatleri</div>
+          <div className="text-xs text-slate-400">
+            Ayarlar'daki vardiyalar kullanılır{shiftText ? `: ${shiftText}` : ""}. Siparişe göre «günde X saat» aşağıdan
+            verilebilir.
+          </div>
+        </div>
         <Choice
-          label="Çalışma düzeni"
-          hint={shiftText ? `Vardiyalar: ${shiftText}` : undefined}
-          value={value.work_pattern}
-          onChange={(v) => set("work_pattern", v)}
-          options={[
-            ["3x8", "3 vardiya (7/24)"],
-            ["2x8", "2 vardiya"],
-            ["1x8", "Tek vardiya"],
-          ]}
+          label="Cumartesi (varsayılan)"
+          hint="Siparişe özel seçim yoksa geçerli"
+          value={value.saturday}
+          onChange={(v) => set("saturday", v)}
+          options={WEEKEND}
         />
-        <Choice label="Cumartesi" value={value.saturday} onChange={(v) => set("saturday", v)} options={WEEKEND} />
-        <Choice label="Pazar" value={value.sunday} onChange={(v) => set("sunday", v)} options={WEEKEND} />
+        <Choice
+          label="Pazar (varsayılan)"
+          value={value.sunday}
+          onChange={(v) => set("sunday", v)}
+          options={WEEKEND}
+        />
         <Choice
           label="Manuel kalıpları gece vardiyasına koyma"
           value={value.manual_not_night}
@@ -263,6 +273,12 @@ export function PrefsPanel({
           </details>
         )}
       </div>
+      <LineRules
+        lines={lines}
+        value={value.line_rules ?? {}}
+        onChange={(r) => set("line_rules", r)}
+        shiftText={shiftText}
+      />
     </div>
   );
 }

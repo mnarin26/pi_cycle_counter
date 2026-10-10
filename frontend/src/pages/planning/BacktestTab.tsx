@@ -214,7 +214,20 @@ export function BacktestTab({ defaults }: { defaults: PrefsDefaults | null }) {
               Tercihleri uygula (kapalıysa standart plan)
             </label>
           </div>
-          {usePrefs && prefs && <PrefsPanel value={prefs} onChange={setPrefs} defaults={defaults} showStart={false} />}
+          {usePrefs && prefs && (
+            <PrefsPanel
+              value={prefs}
+              onChange={setPrefs}
+              defaults={defaults}
+              showStart={false}
+              lines={report.lines.map((l) => ({
+                key: l.key,
+                label: l.product_name ?? l.product_name_raw,
+                due: l.due_date,
+                qty: l.qty,
+              }))}
+            />
+          )}
           <button
             type="button"
             className="rounded bg-emerald-700 px-4 py-2 text-sm text-white disabled:opacity-50"

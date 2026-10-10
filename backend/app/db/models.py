@@ -95,6 +95,8 @@ class Product(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
+    # Planner keeps this many pieces in stock (only the excess serves orders); NULL = no floor.
+    min_stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     molds: Mapped[list["Mold"]] = relationship(back_populates="product")

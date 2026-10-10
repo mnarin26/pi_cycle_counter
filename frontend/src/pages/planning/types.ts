@@ -10,14 +10,25 @@ export type PlanPrefs = {
   warn_stock_zero: boolean;
   cycle_source: "history" | "target";
   changeover: boolean;
-  work_pattern: "3x8" | "2x8" | "1x8";
   saturday: "work" | "avoid" | "off";
   sunday: "work" | "avoid" | "off";
   manual_not_night: "off" | "soft" | "hard";
   changeover_daytime: "off" | "soft" | "hard";
   changeover_window: string;
   closed_days: string[];
+  line_rules: Record<string, LineRule>;
 };
+
+export type WeekendMode = "work" | "avoid" | "off";
+
+export type LineRule = {
+  hours_per_day: number | null;
+  saturday: WeekendMode | null;
+  sunday: WeekendMode | null;
+};
+
+/** One order line as shown in the per-line working-hours editor. */
+export type RuleLine = { key: string; label: string; due: string | null; qty: number };
 
 export type PrefsDefaults = {
   prefs: PlanPrefs;
@@ -73,6 +84,13 @@ export type InspectReport = {
     line_count: number;
     total_qty: number;
     stock: number | null;
+  }>;
+  lines: Array<{
+    key: string;
+    product_name_raw: string;
+    product_name: string | null;
+    qty: number;
+    due_date: string | null;
   }>;
   unused_stock: Array<{ product_name_raw: string; qty: number }>;
   warnings: string[];

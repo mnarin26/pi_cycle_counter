@@ -265,16 +265,81 @@ def test_manual_mold_not_at_night_hard(plant):
     assert cal.production(manual=False, strict=False)[0][1] - cal.production(manual=False, strict=False)[0][0] > timedelta(days=5)
 
 
-def test_closed_day_and_two_shift_pattern(plant):
+def test_no_global_work_pattern_calendar_uses_shift_settings(plant):
     db, f = plant
     ctx = gather_context(db, as_of=T0)
-    cal = WorkCalendar(prefs_from_dict({"work_pattern": "2x8", "closed_days": ["2026-09-11"]}), ctx.shifts, T0)
+    # prefs saved by older versions still carry work_pattern; it is ignored
+    prefs = prefs_from_dict({"work_pattern": "2x8", "closed_days": ["2026-09-11"]})
+    assert not hasattr(prefs, "work_pattern")
+    cal = WorkCalendar(prefs, ctx.shifts, T0)
     iv = cal.production(manual=False, strict=False)
     day = datetime(2026, 9, 11, tzinfo=DISPLAY_TZ)
     assert worked_between(iv, day, day + timedelta(days=1)) == 0
     sat = datetime(2026, 9, 12, tzinfo=DISPLAY_TZ)
-    assert worked_between(iv, sat, sat + timedelta(days=1)) == 16 * 3600  # 08–24
-    assert worked_between(iv, sat, sat + timedelta(hours=8)) == 0
+    assert worked_between(iv, sat, sat + timedelta(days=1)) == 24 * 3600  # all configured shifts
+
+
+def test_line_hours_per_day_fills_day_shifts_first(plant):
+    db, f = plant
+    ctx = gather_context(db, as_of=T0)
+    prefs = prefs_from_dict({"line_rules": {"a": {"hours_per_day": 8}, "c": {"hours_per_day": 12}}})
+    cal = WorkCalendar(prefs, ctx.shifts, T0)
+    day = datetime(2026, 9, 14, tzinfo=DISPLAY_TZ)
+    eight = cal.production(manual=False, strict=False, rule=prefs.rule_for("a"))
+    assert worked_between(eight, day, day + timedelta(days=1)) == 8 * 3600
+    assert worked_between(eight, day + timedelta(hours=8), day + timedelta(hours=16)) == 8 * 3600
+    twelve = cal.production(manual=False, strict=False, rule=prefs.rule_for("c"))
+    assert worked_between(twelve, day + timedelta(hours=8), day + timedelta(hours=20)) == 12 * 3600
+    # a line without a rule keeps the full shift calendar
+    full = cal.production(manual=False, strict=False, rule=prefs.rule_for("zzz"))
+    assert worked_between(full, day, day + timedelta(days=1)) == 24 * 3600
+
+
+def test_line_hours_per_day_only_slows_that_line(plant):
+    db, f = plant
+    lines = [_line(f, "a", "A", 3000, 6), _line(f, "c", "C", 1200, 6)]
+    base = _plan(db, lines)
+    capped = _plan(db, lines, line_rules={"a": {"hours_per_day": 2}})
+    slot_a = next(s for s in _prod_slots(capped) if "a" in s["meta"]["line_keys"])
+    slot_c = next(s for s in _prod_slots(capped) if "c" in s["meta"]["line_keys"])
+    assert slot_a["meta"]["hours_per_day"] == 2 and slot_c["meta"]["hours_per_day"] is None
+    assert "günde en fazla 2 saat" in slot_a["reason"]
+    # ~4.4 h of work at 2 h/day spans several days; the other line is unchanged
+    assert _aware(slot_a["suggested_end"]) - _aware(slot_a["suggested_start"]) > timedelta(days=1)
+    assert _line_by_key(capped, "a")["eta"] > _line_by_key(base, "a")["eta"]
+    assert _line_by_key(capped, "c")["eta"] == _line_by_key(base, "c")["eta"]
+    assert any("Siparişe özel" in x for x in capped["prefs_summary"])
+
+
+def test_lines_with_different_rules_are_not_grouped(plant):
+    db, f = plant
+    lines = [_line(f, "a1", "A", 1000, 3), _line(f, "a2", "A", 1000, 4)]
+    grouped = _plan(db, lines)
+    assert len(_prod_slots(grouped)) == 1
+    apart = _plan(db, lines, line_rules={"a2": {"hours_per_day": 6}})
+    assert len(_prod_slots(apart)) == 2
+
+
+def test_line_weekend_rule_overrides_global_default(plant):
+    db, f = plant
+    ctx = gather_context(db, as_of=T0)
+    prefs = prefs_from_dict({"sunday": "work", "line_rules": {"a": {"sunday": "off"}}})
+    cal = WorkCalendar(prefs, ctx.shifts, T0)
+    sun = datetime(2026, 9, 13, tzinfo=DISPLAY_TZ)
+    own = cal.production(manual=False, strict=False, rule=prefs.rule_for("a"))
+    other = cal.production(manual=False, strict=False, rule=prefs.rule_for("b"))
+    assert worked_between(own, sun, sun + timedelta(days=1)) == 0
+    assert worked_between(other, sun, sun + timedelta(days=1)) == 24 * 3600
+
+
+def test_line_rule_validation():
+    with pytest.raises(ValueError):
+        prefs_from_dict({"line_rules": {"a": {"hours_per_day": 30}}})
+    with pytest.raises(ValueError):
+        prefs_from_dict({"line_rules": {"a": {"saturday": "maybe"}}})
+    p = prefs_from_dict({"line_rules": {"a": {"hours_per_day": ""}, "b": {"hours_per_day": "7.5"}}})
+    assert list(p.line_rules) == ["b"] and p.line_rules["b"].hours_per_day == 7.5
+    assert p.to_dict()["line_rules"]["b"]["hours_per_day"] == 7.5
 
 
 def test_default_calendar_is_continuous(plant):
@@ -282,6 +347,86 @@ def test_default_calendar_is_continuous(plant):
     cal = WorkCalendar(PlanPrefs(), get_shift_defs(db), T0)
     first, end = consume(cal.production(manual=False, strict=False), T0, 7 * 24 * 3600)
     assert first == T0 and end == T0 + timedelta(days=7)
+
+
+# ---------- min stock ----------
+
+
+def test_min_stock_is_held_back_from_orders(plant):
+    db, f = plant
+    pb = f["products"]["B"]
+    pb.min_stock = 50
+    db.commit()
+    res = _plan(db, [_line(f, "b1", "B", 30, 3)], {f"p:{pb.id}": 70})
+    ln = _line_by_key(res, "b1")
+    assert ln["stock_used"] == 20 and ln["need"] == 10
+    assert sum(s["qty_planned"] for s in _prod_slots(res)) == 10
+    assert any("asgari stok" in w for w in res["warnings"])
+
+
+def test_min_stock_above_stock_means_everything_is_produced(plant):
+    db, f = plant
+    pb = f["products"]["B"]
+    pb.min_stock = 100
+    db.commit()
+    res = _plan(db, [_line(f, "b1", "B", 30, 3)], {f"p:{pb.id}": 70})
+    assert _line_by_key(res, "b1")["need"] == 30
+    assert any("asgari stok seviyesinde veya altında" in w for w in res["warnings"])
+
+
+def test_min_stock_ignored_by_legacy_engine(plant):
+    from app.services.planning.plan_engine import compute_plan
+
+    db, f = plant
+    pb = f["products"]["B"]
+    lines = [_line(f, "b1", "B", 30, 3)]
+    before = compute_plan(gather_context(db, as_of=T0), lines, {f"p:{pb.id}": 70}, None)
+    pb.min_stock = 50
+    db.commit()
+    after = compute_plan(gather_context(db, as_of=T0), lines, {f"p:{pb.id}": 70}, None)
+    assert before["slots"] == after["slots"]
+
+
+# ---------- cycle source ----------
+
+
+def test_cycle_without_history_uses_target_not_mold_average(plant):
+    db, f = plant
+    kc = f["molds"]["C"]
+    m1, m2 = f["machines"][0], f["machines"][1]
+    kc.avg_cycle_s = 99.0  # running average (would include post-T0 cycles)
+    db.commit()
+    # K-C has history only on M2 → force M1 (no history there)
+    res = _plan(db, [_line(f, "c", "C", 600, 6)], exclude_machine_ids=[m2.id])
+    slot = _prod_slots(res)[0]
+    assert slot["machine_id"] == m1.id
+    assert slot["meta"]["cycle_s"] == 30.0  # target
+    assert "hedef çevrimi 30 sn" in slot["reason"]
+
+
+def test_cycle_without_history_or_target_never_uses_average_in_backtest(plant):
+    db, f = plant
+    kc = f["molds"]["C"]
+    m2 = f["machines"][1]
+    kc.avg_cycle_s = 99.0
+    kc.target_cycle_s = None
+    db.commit()
+    res = _plan(db, [_line(f, "c", "C", 600, 6)], exclude_machine_ids=[m2.id])
+    assert _prod_slots(res)[0]["meta"]["cycle_s"] == 30.0
+    # live (no T0) has no look-ahead problem → the mold average is a last resort
+    live = compute_plan_a2(gather_context(db), [_line(f, "c", "C", 600, 6)], {},
+                           prefs_from_dict({"exclude_machine_ids": [m2.id]}))
+    assert _prod_slots(live)[0]["meta"]["cycle_s"] == 99.0
+
+
+def test_cycle_source_history_prefers_history_when_present(plant):
+    db, f = plant
+    m1 = f["machines"][0]
+    res = _plan(db, [_line(f, "c", "C", 600, 6)], exclude_machine_ids=[m1.id])
+    slot = _prod_slots(res)[0]
+    assert slot["meta"]["cycle_s"] == 31.0
+    tgt = _plan(db, [_line(f, "c", "C", 600, 6)], exclude_machine_ids=[m1.id], cycle_source="target")
+    assert _prod_slots(tgt)[0]["meta"]["cycle_s"] == 30.0
 
 
 # ---------- downtime risk ----------
@@ -344,3 +489,20 @@ def test_live_plan_with_prefs_stores_prefs_and_result():
     result = json.loads(plan.result_json)
     assert result["kpis"]["lines"] == 5
     assert {ln["status"] for ln in result["lines"]} <= {"stock", "on_time", "risky", "late", "unplanned"}
+
+
+def test_patch_product_min_stock_marks_live_plan_stale():
+    from app.api.routers.products import ProductPatch, patch_product
+
+    db = make_session()
+    now = datetime.now(timezone.utc)
+    f = seed_factory(db, now)
+    add_open_orders(db, f, now)
+    db.commit()
+    plan = build_plan(db)
+    pb = f["products"]["B"]
+    out = patch_product(pb.id, ProductPatch(min_stock=40), db=db, user=None)
+    assert out.min_stock == 40
+    db.refresh(plan)
+    assert plan.stale_reason == "Asgari stok değişti"
+    assert patch_product(pb.id, ProductPatch(min_stock=0), db=db, user=None).min_stock is None

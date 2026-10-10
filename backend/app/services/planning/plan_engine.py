@@ -22,6 +22,7 @@ from app.db.models import (
     OrderLine,
     PlanRun,
     PlanSlot,
+    Product,
 )
 from app.services.planning import effective_cavity
 from app.services.planning.engine import (
@@ -67,6 +68,7 @@ class PlanContext:
     current_mold: dict[int, int]
     risk: dict[int, dict]
     shifts: list = field(default_factory=list)
+    min_stock: dict[int, int] = field(default_factory=dict)
 
 
 def _aware(dt: datetime | None) -> datetime | None:
@@ -124,6 +126,10 @@ def gather_context(db: Session, *, as_of: datetime | None = None, start: datetim
         current_mold=current,
         risk=machine_downtime_risk(db, ref),
         shifts=get_shift_defs(db),
+        min_stock={
+            int(p.id): int(p.min_stock)
+            for p in db.query(Product).filter(Product.min_stock.isnot(None), Product.min_stock > 0).all()
+        },
     )
 
 
@@ -241,7 +247,7 @@ def compute_plan_legacy(ctx: PlanContext, lines: list[LineIn], stock: dict[str, 
                 cycle_s = float(st["avg_cycle_s"])
             elif mold.target_cycle_s:
                 cycle_s = float(mold.target_cycle_s)
-            elif mold.avg_cycle_s and mold.avg_cycle_s > 0:
+            elif ctx.as_of is None and mold.avg_cycle_s and mold.avg_cycle_s > 0:
                 cycle_s = float(mold.avg_cycle_s)
             else:
                 cycle_s = 30.0

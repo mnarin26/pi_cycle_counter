@@ -19,7 +19,7 @@ from typing import Any
 from app.db.models import Mold, MoldMachineCapability
 from app.services.planning import effective_cavity
 from app.services.planning.plan_engine import STATS_DAYS, LineIn, PlanContext, _score, _slot
-from app.services.planning.prefs import PlanPrefs, describe_prefs
+from app.services.planning.prefs import LineRule, PlanPrefs, describe_prefs
 from app.services.planning.work_calendar import (
     Interval,
     WorkCalendar,
@@ -35,6 +35,7 @@ DEFAULT_GROUP_WINDOW_DAYS = 7
 RISKY_SCORE = 0.5
 TIGHT_DUE_DAYS = 5
 RISKY_MARGIN_H = 24.0
+DEFAULT_CYCLE_S = 30.0
 
 # per priority: late (per h), risk, soft rule, changeover (per h), finish (per h)
 WEIGHTS: dict[str, dict[str, float]] = {
@@ -98,6 +99,7 @@ class Job:
     lines: list[LineState]
     qty: int
     deadline: datetime | None
+    rule: LineRule | None = None
 
 
 @dataclass
@@ -155,11 +157,18 @@ class Planner:
         return [(int(c.machine_id), c) for c in caps if int(c.machine_id) in allowed]
 
     def cycle_for(self, mold: Mold, st: dict | None) -> float:
+        """History (mold×machine, before T0) or target; without history → target.
+
+        The mold's running `avg_cycle_s` is never used in a backtest (it includes
+        cycles after T0); live it is only a last resort when no target is set.
+        """
         hist = float(st["avg_cycle_s"]) if st and st.get("avg_cycle_s") else None
         target = float(mold.target_cycle_s) if mold.target_cycle_s else None
-        learned = float(mold.avg_cycle_s) if mold.avg_cycle_s and mold.avg_cycle_s > 0 else None
-        order = (hist, target, learned) if self.prefs.cycle_source == "history" else (target, hist, learned)
-        return next((v for v in order if v), 30.0)
+        order = (hist, target) if self.prefs.cycle_source == "history" else (target, hist)
+        v = next((x for x in order if x), None)
+        if v is None and self.ctx.as_of is None and mold.avg_cycle_s and mold.avg_cycle_s > 0:
+            v = float(mold.avg_cycle_s)
+        return v or DEFAULT_CYCLE_S
 
     def changeover_minutes(self, state: State, mold: Mold, mid: int) -> int:
         if not self.prefs.changeover:
@@ -179,6 +188,7 @@ class Planner:
         cap: MoldMachineCapability | None,
         qty: int,
         deadline: datetime | None,
+        rule: LineRule | None = None,
     ) -> Option | None:
         st = self.ctx.stats.get((mold.id, mid))
         cavity = effective_cavity(mold)
@@ -187,17 +197,17 @@ class Planner:
         t = max(self.start, state.machine_free.get(mid, self.start), state.mold_free.get(int(mold.id), self.start))
         co_min = self.changeover_minutes(state, mold, mid)
         prod_s = max(1, math.ceil(qty / cavity)) * cycle_s
-        variants = (True, False) if self.cal.has_soft_rules(manual) else (False,)
+        variants = (True, False) if self.cal.has_soft_rules(manual, rule) else (False,)
         found: list[tuple[bool, datetime, datetime, datetime, list[Interval]]] = []
         for strict in variants:
             if co_min > 0:
-                cs = fit_contiguous(self.cal.changeover(manual=manual, strict=strict), t, co_min * 60)
+                cs = fit_contiguous(self.cal.changeover(manual=manual, strict=strict, rule=rule), t, co_min * 60)
                 if cs is None:
                     continue
                 ce = cs + timedelta(minutes=co_min)
             else:
                 cs = ce = t
-            iv = self.cal.production(manual=manual, strict=strict)
+            iv = self.cal.production(manual=manual, strict=strict, rule=rule)
             r = consume(iv, ce, prod_s)
             if r is None:
                 continue
@@ -213,9 +223,9 @@ class Planner:
         is_strict, cs, ps, end, iv = pick
         relaxed: list[str] = []
         if not is_strict and len(variants) == 2:
-            relaxed = self.cal.relaxed_labels(cs, end, manual=manual)
+            relaxed = self.cal.relaxed_labels(cs, end, manual=manual, rule=rule)
             if co_min > 0 and self.prefs.changeover_daytime == "soft":
-                strict_co = self.cal.changeover(manual=manual, strict=True)
+                strict_co = self.cal.changeover(manual=manual, strict=True, rule=rule)
                 if fit_contiguous(strict_co, cs, co_min * 60) != cs:
                     relaxed.append("kalıp değişimi gündüz saatleri dışına kondu")
         late_h = max(0.0, (end - deadline).total_seconds() / 3600.0) if deadline else 0.0
@@ -248,7 +258,7 @@ class Planner:
         out: list[Option] = []
         for mold in self.molds_for(job.product_id):
             for mid, cap in self.pairs(mold):
-                o = self.place(state, mold, mid, cap, qty or job.qty, job.deadline)
+                o = self.place(state, mold, mid, cap, qty or job.qty, job.deadline, job.rule)
                 if o:
                     out.append(o)
         out.sort(key=lambda o: (-o.score, o.cap.priority if o.cap else 99, o.mold.id, o.mid))
@@ -278,7 +288,7 @@ class Planner:
             step = min(chunk, left)
             best_i, best_opt = None, None
             for i, p in enumerate(parts):
-                cand = self.place(state, p.mold, p.mid, p.cap, alloc[i] + step, job.deadline)
+                cand = self.place(state, p.mold, p.mid, p.cap, alloc[i] + step, job.deadline, job.rule)
                 if cand and (best_opt is None or cand.end < best_opt.end):
                     best_i, best_opt = i, cand
             if best_i is None:
@@ -294,6 +304,7 @@ class Planner:
     def allocate_stock(self, lines: list[LineIn], stock: dict[str, int]) -> tuple[list[LineState], list[str]]:
         states = [LineState(line=ln, deadline=deadline_of(ln.due)) for ln in lines]
         warnings: list[str] = []
+        stock = self._usable_stock(states, stock, warnings)
         if not self.prefs.stock_allocation:
             for s in states:
                 stk = int(stock.get(s.line.skey(), 0))
@@ -324,16 +335,44 @@ class Planner:
                     warnings.append(f"{label}: stok siparişlerle sıfıra iniyor ({fmt_qty(initial)} → 0)")
         return states, warnings
 
+    def _usable_stock(self, states: list[LineState], stock: dict[str, int], warnings: list[str]) -> dict[str, int]:
+        """Hold back each product's `min_stock`; only the excess serves orders."""
+        mins = self.ctx.min_stock
+        if not mins:
+            return stock
+        out = dict(stock)
+        labels = {s.line.skey(): s.line.product_label for s in states}
+        for key, label in labels.items():
+            if not key.startswith("p:"):
+                continue
+            floor = mins.get(int(key[2:]))
+            if not floor:
+                continue
+            have = int(stock.get(key, 0))
+            out[key] = max(0, have - floor)
+            if have <= floor:
+                warnings.append(
+                    f"{label}: stok ({fmt_qty(have)}) asgari stok seviyesinde veya altında "
+                    f"(asgari {fmt_qty(floor)}) — siparişler üretimden karşılanır"
+                )
+            else:
+                warnings.append(
+                    f"{label}: {fmt_qty(floor)} adet asgari stok olarak ayrıldı, siparişlere {fmt_qty(have - floor)} adet kullanıldı"
+                )
+        return out
+
     def make_jobs(self, states: list[LineState], group: bool) -> list[Job]:
         jobs: list[Job] = []
         window = timedelta(days=GROUP_WINDOW_DAYS.get(self.prefs.priority, DEFAULT_GROUP_WINDOW_DAYS))
-        open_by_product: dict[int, Job] = {}
+        open_by_product: dict[tuple, Job] = {}
         far = datetime.max.replace(tzinfo=timezone.utc)
         for s in sorted(states, key=lambda s: (s.deadline or far, s.line.key)):
             if s.need <= 0 or not s.line.product_id:
                 continue
             pid = int(s.line.product_id)
-            cur = open_by_product.get(pid) if group else None
+            rule = self.prefs.rule_for(s.line.key)
+            gkey = (pid, rule.cache_key() if rule else None)
+            cur = open_by_product.get(gkey) if group else None
             if cur and (
                 cur.deadline is None
                 or s.deadline is None
@@ -342,9 +381,9 @@ class Planner:
                 cur.lines.append(s)
                 cur.qty += s.need
                 continue
-            job = Job(product_id=pid, lines=[s], qty=s.need, deadline=s.deadline)
+            job = Job(product_id=pid, lines=[s], qty=s.need, deadline=s.deadline, rule=rule)
             jobs.append(job)
-            open_by_product[pid] = job
+            open_by_product[gkey] = job
         if self.prefs.priority == "shortest":
             jobs.sort(key=lambda j: -self._rough_hours(j))
         return jobs
@@ -485,7 +524,12 @@ class Planner:
                 h += f" (hedef {float(st['target_cycle_s']):.0f} sn)"
             bits.append(h)
         else:
-            bits.append(f"Bu makinede geçmiş kaydı yok; çevrim {p.cycle_s:.0f} sn varsayıldı")
+            if p.mold.target_cycle_s:
+                bits.append(f"Bu makinede geçmiş kaydı yok; kalıp hedef çevrimi {p.cycle_s:.0f} sn kullanıldı")
+            elif p.cycle_s == DEFAULT_CYCLE_S and (self.ctx.as_of is not None or not p.mold.avg_cycle_s):
+                bits.append(f"Bu makinede geçmiş kaydı ve kalıp hedef çevrimi yok; {p.cycle_s:.0f} sn varsayıldı")
+            else:
+                bits.append(f"Bu makinede geçmiş kaydı ve hedef çevrim yok; kalıbın ortalama çevrimi {p.cycle_s:.0f} sn kullanıldı")
         if p.cap is not None:
             bits.append(f"Makine önceliği {p.cap.priority}")
         if p.co_min > 0:
@@ -495,6 +539,8 @@ class Planner:
         r = ctx.risk.get(p.mid)
         if r and r.get("score", 0) >= 0.3:
             bits.append(f"Dikkat: makine son 30 günde {r['stops_30d']} kez durdu ({r['hours_30d']} sa)")
+        if job.rule and job.rule.hours_per_day is not None:
+            bits.append(f"Bu sipariş günde en fazla {job.rule.hours_per_day:g} saat çalışır")
         if p.relaxed:
             bits.append("Termine yetişmek için " + ", ".join(p.relaxed))
         if job.deadline:
@@ -526,6 +572,7 @@ class Planner:
                 "late_h": round(p.late_h, 2),
                 "deadline": job.deadline.isoformat() if job.deadline else None,
                 "manual": (p.mold.work_mode or "auto") == "manual",
+                "hours_per_day": job.rule.hours_per_day if job.rule else None,
             },
         )
 
@@ -578,8 +625,12 @@ def _what_if(ctx, lines, stock, prefs: PlanPrefs, start, base_late: int) -> list
                     sunday="work" if prefs.sunday == "off" else prefs.sunday),
             "Hafta sonu çalışılmadığı için",
         ))
-    if prefs.work_pattern != "3x8":
-        trials.append((replace(prefs, work_pattern="3x8"), "Vardiya sayısı az olduğu için"))
+    if any(r.hours_per_day is not None for r in prefs.line_rules.values()):
+        no_cap = {k: replace(r, hours_per_day=None) for k, r in prefs.line_rules.items()}
+        trials.append((
+            replace(prefs, line_rules={k: r for k, r in no_cap.items() if not r.is_empty()}),
+            "Siparişe özel günlük saat sınırları yüzünden",
+        ))
     if prefs.manual_not_night == "hard":
         trials.append((replace(prefs, manual_not_night="soft"), "Manuel kalıplar geceye konmadığı için"))
     if prefs.exclude_machine_ids:

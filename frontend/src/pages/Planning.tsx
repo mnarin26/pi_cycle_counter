@@ -19,7 +19,7 @@ type OrderRow = {
   net_need: number | null;
 };
 
-type StockRow = { product_id: number; product_name: string; qty: number };
+type StockRow = { product_id: number; product_name: string; qty: number; min_stock: number | null };
 type PlanSlot = {
   id: number;
   order_line_id: number | null;
@@ -108,6 +108,19 @@ export function PlanningPage() {
     const r = await apiGet<{ rows: StatRow[] }>("/api/planning/mold-machine-stats?days=30");
     setStats(r.rows);
   }, []);
+
+  async function saveMinStock(s: StockRow, raw: string) {
+    const v = raw.trim() === "" ? null : Math.max(0, Math.round(Number(raw)));
+    if (v !== null && !Number.isFinite(v)) return;
+    if ((v || null) === (s.min_stock || null)) return;
+    try {
+      await apiPatch(`/api/products/${s.product_id}`, { min_stock: v });
+      await refreshStock();
+      await refreshCurrentPlan();
+    } catch (e) {
+      setErr(parseApiError(e));
+    }
+  }
 
   const loadPlan = useCallback(async (detail: PlanDetail) => {
     setPlan(detail);
@@ -300,7 +313,10 @@ export function PlanningPage() {
           type="button"
           className="ml-auto rounded bg-emerald-700 px-3 py-2 text-sm text-white disabled:opacity-50"
           disabled={busy}
-          onClick={() => setPrefsOpen((v) => !v)}
+          onClick={() => {
+            if (!prefsOpen) void refreshOrders().catch(() => {});
+            setPrefsOpen((v) => !v);
+          }}
         >
           {busy ? "…" : planStale ? "Planı yenile" : "Plan önerisi üret"}
         </button>
@@ -310,7 +326,21 @@ export function PlanningPage() {
           <div className="text-sm text-slate-200">
             Plan hesaplanmadan önce tercihler — değiştirmezseniz önerilen varsayılanlarla üretilir.
           </div>
-          {prefs && <PrefsPanel value={prefs} onChange={setPrefs} defaults={defaults} />}
+          {prefs && (
+            <PrefsPanel
+              value={prefs}
+              onChange={setPrefs}
+              defaults={defaults}
+              lines={orders
+                .filter((o) => o.status === "open")
+                .map((o) => ({
+                  key: `o:${o.id}`,
+                  label: o.product_name ?? o.product_name_raw,
+                  due: o.due_date,
+                  qty: o.qty,
+                }))}
+            />
+          )}
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
@@ -416,10 +446,26 @@ export function PlanningPage() {
               }}
             />
           </label>
+          <p className="text-xs text-slate-400">
+            Asgari stok: planlayıcı bu kadarını stokta tutar, siparişlere yalnızca fazlasını kullanır. Boş = sınır yok.
+          </p>
           <ul className="space-y-1 text-sm">
             {stock.map((s) => (
-              <li key={s.product_id} className="rounded border border-slate-700 px-3 py-2">
-                {s.product_name}: <span className="font-semibold text-sky-300">{s.qty}</span>
+              <li key={s.product_id} className="flex flex-wrap items-center gap-2 rounded border border-slate-700 px-3 py-2">
+                <span>
+                  {s.product_name}: <span className="font-semibold text-sky-300">{s.qty}</span>
+                </span>
+                <label className="ml-auto flex items-center gap-1 text-xs text-slate-400">
+                  Asgari stok
+                  <input
+                    type="number"
+                    min={0}
+                    className="w-24 rounded bg-slate-800 px-2 py-0.5 text-slate-100"
+                    defaultValue={s.min_stock ?? ""}
+                    placeholder="—"
+                    onBlur={(e) => void saveMinStock(s, e.target.value)}
+                  />
+                </label>
               </li>
             ))}
           </ul>

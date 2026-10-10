@@ -322,6 +322,13 @@ def init_db() -> None:
         if slot_cols:
             _add_column_if_missing(conn, "plan_slots", slot_cols, "line_key", "line_key VARCHAR(64)")
             _add_column_if_missing(conn, "plan_slots", slot_cols, "meta_json", "meta_json TEXT")
+        product_cols = set()
+        try:
+            product_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(products)")).fetchall()}
+        except Exception:
+            product_cols = set()
+        if product_cols:
+            _add_column_if_missing(conn, "products", product_cols, "min_stock", "min_stock INTEGER")
     # Outside the migration txn — never block startup if SQLite is busy (bot/WAL).
     try:
         with engine.connect() as conn:
