@@ -32,6 +32,7 @@ from app.services.planning.engine import (
     open_downtime_machine_ids,
 )
 from app.services.planning.plan_state import supersede_open_plans
+from app.services.planning.prefs import PlanPrefs
 from app.services.planning.stock import current_stock
 
 STATS_DAYS = 45
@@ -281,8 +282,15 @@ def compute_plan_legacy(ctx: PlanContext, lines: list[LineIn], stock: dict[str, 
     return {"slots": slots, "lines": [], "warnings": [], "explanations": [], "kpis": {}}
 
 
-def compute_plan(ctx: PlanContext, lines: list[LineIn], stock: dict[str, int]) -> dict[str, Any]:
-    return compute_plan_legacy(ctx, lines, stock)
+def compute_plan(
+    ctx: PlanContext, lines: list[LineIn], stock: dict[str, int], prefs: "PlanPrefs | None" = None
+) -> dict[str, Any]:
+    """No prefs → legacy engine (unchanged behavior); prefs → A2 engine."""
+    if prefs is None:
+        return compute_plan_legacy(ctx, lines, stock)
+    from app.services.planning.plan_a2 import compute_plan_a2
+
+    return compute_plan_a2(ctx, lines, stock, prefs)
 
 
 def write_plan_run(
@@ -310,7 +318,7 @@ def write_plan_run(
     has_extras = any(result.get(k) for k in ("lines", "warnings", "explanations", "kpis"))
     if has_extras:
         plan.result_json = json.dumps(
-            {k: result.get(k) for k in ("lines", "warnings", "explanations", "kpis", "prefs_summary")},
+            {k: result.get(k) for k in ("lines", "warnings", "explanations", "kpis", "prefs_summary", "plan_start")},
             ensure_ascii=False,
             default=str,
         )
@@ -337,13 +345,26 @@ def write_plan_run(
     return plan
 
 
-def build_plan(db: Session, *, created_by: str | None = None, note: str | None = None) -> PlanRun:
+def build_plan(
+    db: Session,
+    *,
+    created_by: str | None = None,
+    note: str | None = None,
+    prefs: "PlanPrefs | None" = None,
+) -> PlanRun:
     """Live plan: open order_lines + ledger stock → new `active` plan (old ones superseded)."""
     ctx = gather_context(db)
     lines = open_order_lines(db)
-    result = compute_plan(ctx, lines, live_stock(db, lines))
+    result = compute_plan(ctx, lines, live_stock(db, lines), prefs)
     supersede_open_plans(db)
-    plan = write_plan_run(db, result, status="active", created_by=created_by, note=note)
+    plan = write_plan_run(
+        db,
+        result,
+        status="active",
+        created_by=created_by,
+        note=note,
+        prefs=prefs.to_dict() if prefs is not None else None,
+    )
     db.commit()
     db.refresh(plan)
     return plan

@@ -28,6 +28,7 @@ from app.services.planning.excel_stock import parse_stock_xlsx
 from app.services.planning.mold_runs import count_diff_info
 from app.services.planning.plan_engine import build_plan
 from app.services.planning.plan_state import BACKTEST, get_current_plan, mark_active_plans_stale
+from app.services.planning.prefs import PlanPrefs, prefs_from_dict
 from app.services.planning.stock import (
     add_movement,
     current_stock,
@@ -315,13 +316,43 @@ def get_mold_machine_stats(
     return {"days": days, "rows": mold_machine_stats(db, days=days)}
 
 
+class GenerateBody(BaseModel):
+    prefs: dict | None = None
+
+
 @router.post("/plans/generate")
 def generate_plan(
+    body: GenerateBody | None = None,
     db: Session = Depends(get_db),
     user=Depends(require_planning),
 ):
-    plan = build_plan(db, created_by=user.display_name)
+    try:
+        prefs = prefs_from_dict(body.prefs) if body and body.prefs is not None else None
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e)) from e
+    plan = build_plan(db, created_by=user.display_name, prefs=prefs)
     return _plan_detail(db, plan)
+
+
+@router.get("/prefs/defaults")
+def prefs_defaults(db: Session = Depends(get_db), user=Depends(require_planning)):
+    from app.services.shifts import get_shift_defs
+
+    return {
+        "prefs": PlanPrefs().to_dict(),
+        "shifts": [
+            {"id": s.id, "name": s.name, "start": s.start.strftime("%H:%M"), "end": s.end.strftime("%H:%M")}
+            for s in get_shift_defs(db)
+        ],
+        "machines": [
+            {"id": m.id, "name": m.name}
+            for m in db.query(Machine).filter(Machine.enabled.is_(True)).order_by(Machine.id).all()
+        ],
+        "molds": [
+            {"id": m.id, "name": m.name or f"Kalıp #{m.id}", "product_id": m.product_id, "work_mode": m.work_mode}
+            for m in db.query(Mold).filter(Mold.status != "ignored", Mold.product_id.isnot(None)).order_by(Mold.id).all()
+        ],
+    }
 
 
 @router.get("/plans/current")
