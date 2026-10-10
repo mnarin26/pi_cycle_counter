@@ -81,6 +81,16 @@ def test_inspect_matches_products_by_name_or_code_without_writing():
     assert db.query(Product).count() == n_products
 
 
+def test_inspect_prefers_product_with_mold_over_auto_created_name():
+    db, f = _seeded()
+    # a live order import auto-creates a mold-less product under the Excel description
+    db.add(Product(name="YENI_ORTA_MENTESE_TAPASI"))
+    db.flush()
+    rep = inspect_excels(db, orders_xlsx(), stock_xlsx())
+    by_raw = {p["product_name_raw"]: p for p in rep["products"]}
+    assert by_raw["YENI_ORTA_MENTESE_TAPASI"]["product_id"] == f["products"]["A"].id
+
+
 def test_inspect_warns_when_headerless_stock_row_is_skipped():
     db, f = _seeded()
     rep = inspect_excels(db, orders_xlsx(), stock_xlsx())
