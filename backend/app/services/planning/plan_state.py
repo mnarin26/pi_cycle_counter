@@ -1,10 +1,17 @@
-"""Active / stale plan lifecycle helpers."""
+"""Active / stale plan lifecycle helpers.
+
+`backtest` runs are counterfactual experiments: they are never marked stale,
+never superseded and never returned as the current plan.
+"""
 
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
 from app.db.models import PlanRun
+
+BACKTEST = "backtest"
+LIVE_STATUSES = ("active", "stale", "superseded")
 
 
 def mark_active_plans_stale(db: Session, reason: str) -> int:
