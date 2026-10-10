@@ -63,7 +63,7 @@ export function LineRules({
       <div className="mt-2 space-y-2">
         <p className="text-xs text-slate-400">
           «Günde X saat» o siparişin üretimini günde X saatle sınırlar (önce gündüz vardiyası doldurulur). Boş bırakılan
-          siparişler Ayarlar'daki vardiya saatlerinde çalışır{shiftText ? ` (${shiftText})` : ""}. Hafta sonu
+          siparişler Ayarlar'daki vardiyalar boyunca (tam vardiya) çalışır{shiftText ? ` (${shiftText})` : ""}. Hafta sonu
           «Varsayılan» ise yukarıdaki Cumartesi/Pazar seçimi geçerlidir.
         </p>
         <div className="flex flex-wrap items-center gap-2">

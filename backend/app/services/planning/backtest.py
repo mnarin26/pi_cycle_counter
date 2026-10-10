@@ -420,6 +420,14 @@ def run_backtest(
                 qty, conf = stock_as_of(db, int(ln.product_id), t0)
                 stock[ln.skey()] = qty
                 stock_conf[ln.skey()] = conf
+        if plan_prefs is not None:
+            floor_ids = [pid for (pid,) in db.query(Product.id).filter(Product.min_stock.isnot(None), Product.min_stock > 0)]
+            for pid in floor_ids:
+                key = f"p:{pid}"
+                if key not in stock:
+                    qty, conf = stock_as_of(db, pid, t0)
+                    stock[key] = qty
+                    stock_conf[key] = conf
         report["stock_source"] = "ledger"
         low = sorted({k for k, v in stock_conf.items() if v != "high"})
         if low:

@@ -130,7 +130,14 @@ export type CompareRow = {
   summary: { planned: string; actual: string; risk: string };
 };
 
-export type GanttBar = { start: string; end: string; label: string; prod_start?: string | null; relevant?: boolean };
+export type GanttBar = {
+  start: string;
+  end: string;
+  label: string;
+  prod_start?: string | null;
+  relevant?: boolean;
+  refill?: "refill" | "refill_after" | null;
+};
 export type GanttRow = {
   machine_id: number;
   machine_name: string;

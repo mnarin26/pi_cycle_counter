@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
@@ -69,6 +69,7 @@ class PlanContext:
     risk: dict[int, dict]
     shifts: list = field(default_factory=list)
     min_stock: dict[int, int] = field(default_factory=dict)
+    product_names: dict[int, str] = field(default_factory=dict)
 
 
 def _aware(dt: datetime | None) -> datetime | None:
@@ -113,6 +114,7 @@ def gather_context(db: Session, *, as_of: datetime | None = None, start: datetim
         .all()
     ):
         caps.setdefault(int(c.mold_id), []).append(c)
+    floors = db.query(Product).filter(Product.min_stock.isnot(None), Product.min_stock > 0).all()
     return PlanContext(
         now=now,
         as_of=_aware(as_of),
@@ -126,10 +128,8 @@ def gather_context(db: Session, *, as_of: datetime | None = None, start: datetim
         current_mold=current,
         risk=machine_downtime_risk(db, ref),
         shifts=get_shift_defs(db),
-        min_stock={
-            int(p.id): int(p.min_stock)
-            for p in db.query(Product).filter(Product.min_stock.isnot(None), Product.min_stock > 0).all()
-        },
+        min_stock={int(p.id): int(p.min_stock) for p in floors},
+        product_names={int(p.id): p.name for p in floors},
     )
 
 
@@ -154,11 +154,13 @@ def open_order_lines(db: Session) -> list[LineIn]:
     ]
 
 
-def live_stock(db: Session, lines: list[LineIn]) -> dict[str, int]:
+def live_stock(db: Session, lines: list[LineIn], extra_product_ids: Iterable[int] = ()) -> dict[str, int]:
     out: dict[str, int] = {}
     for ln in lines:
         if ln.product_id and ln.skey() not in out:
             out[ln.skey()] = current_stock(db, int(ln.product_id))
+    for pid in extra_product_ids:
+        out.setdefault(f"p:{int(pid)}", current_stock(db, int(pid)))
     return out
 
 
@@ -361,7 +363,9 @@ def build_plan(
     """Live plan: open order_lines + ledger stock → new `active` plan (old ones superseded)."""
     ctx = gather_context(db)
     lines = open_order_lines(db)
-    result = compute_plan(ctx, lines, live_stock(db, lines), prefs)
+    # min-stock products without open orders still need their stock for refill
+    extra = ctx.min_stock.keys() if prefs is not None else ()
+    result = compute_plan(ctx, lines, live_stock(db, lines, extra), prefs)
     supersede_open_plans(db)
     plan = write_plan_run(
         db,

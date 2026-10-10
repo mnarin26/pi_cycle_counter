@@ -50,6 +50,13 @@ export function PlanResultView({ result }: { result: PlanResult }) {
         <Kpi label="Toplam süre" value={`${k.makespan_h ?? 0} sa`} sub={`bitiş ${fmtDate(String(k.plan_end ?? ""))}`} />
         <Kpi label="Kalıp değişimi" value={String(k.changeovers ?? 0)} sub={`${k.changeover_min ?? 0} dk`} />
         <Kpi label="Üretilecek" value={fmtQty(Number(k.planned_qty ?? 0))} sub={`${k.machines_used ?? 0} makine`} />
+        {Number(k.refill_qty ?? 0) > 0 && (
+          <Kpi
+            label="Asgari stok tamamla"
+            value={fmtQty(Number(k.refill_qty))}
+            sub={`${k.refill_now ?? 0} hemen · ${k.refill_after ?? 0} plan sonuna`}
+          />
+        )}
       </div>
       <Notes warnings={result.warnings} explanations={result.explanations} />
       <div className="overflow-x-auto rounded border border-slate-700">

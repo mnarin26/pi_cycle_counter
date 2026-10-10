@@ -100,6 +100,9 @@ class Job:
     qty: int
     deadline: datetime | None
     rule: LineRule | None = None
+    # "order" | "refill" (min-stock top-up, early) | "refill_after" (after plan end)
+    kind: str = "order"
+    refill: dict | None = None
 
 
 @dataclass
@@ -361,6 +364,29 @@ class Planner:
                 )
         return out
 
+    def refill_needs(self, stock: dict[str, int]) -> list[dict]:
+        """Products whose stock (before orders) is below `min_stock`.
+
+        Orders never get the held-back floor, so after the orders the stock is
+        still `have`; topping it up takes `floor - have`. Products whose stock is
+        unknown (not in the input) are skipped.
+        """
+        out = []
+        for pid, floor in sorted(self.ctx.min_stock.items()):
+            key = f"p:{pid}"
+            if key not in stock:
+                continue
+            have = max(0, int(stock[key]))
+            if have < floor:
+                out.append({
+                    "product_id": pid,
+                    "label": self.ctx.product_names.get(pid, f"Ürün #{pid}"),
+                    "qty": floor - have,
+                    "have": have,
+                    "floor": floor,
+                })
+        return out
+
     def make_jobs(self, states: list[LineState], group: bool) -> list[Job]:
         jobs: list[Job] = []
         window = timedelta(days=GROUP_WINDOW_DAYS.get(self.prefs.priority, DEFAULT_GROUP_WINDOW_DAYS))
@@ -395,17 +421,51 @@ class Planner:
             best = h if best is None else min(best, h)
         return best or 0.0
 
-    def run(self, lines: list[LineIn], stock: dict[str, int], *, group: bool) -> dict[str, Any]:
+    def _refill_job(self, need: dict, kind: str) -> Job:
+        return Job(product_id=need["product_id"], lines=[], qty=need["qty"], deadline=None, kind=kind, refill=need)
+
+    def run(
+        self,
+        lines: list[LineIn],
+        stock: dict[str, int],
+        *,
+        group: bool,
+        refill_now: frozenset[int] = frozenset(),
+        refill_after: frozenset[int] = frozenset(),
+    ) -> dict[str, Any]:
+        """Order jobs; `refill_now` min-stock top-ups go first (stock is short now),
+        `refill_after` ones are queued after the last planned work."""
         states, warnings = self.allocate_stock(lines, stock)
         state = State(
             machine_free={mid: self.start for mid in self.machines},
             mold_free={},
             mounted=dict(self.ctx.current_mold),
         )
-        jobs = self.make_jobs(states, group)
+        needs = {n["product_id"]: n for n in self.refill_needs(stock)}
+        jobs = [self._refill_job(needs[pid], "refill") for pid in sorted(refill_now) if pid in needs]
+        jobs += self.make_jobs(states, group)
+        later = [self._refill_job(needs[pid], "refill_after") for pid in sorted(refill_after) if pid in needs]
         slots: list[dict[str, Any]] = []
         job_parts: list[tuple[Job, list[Option]]] = []
-        for job in jobs:
+        refill_failed: list[str] = []
+        plan_end: datetime | None = None
+        for job in jobs + later:
+            if job.kind == "refill_after" and plan_end is None:
+                plan_end = max((p.end for _, ps in job_parts for p in ps), default=self.start)
+                for mid in state.machine_free:
+                    state.machine_free[mid] = max(state.machine_free[mid], plan_end)
+            if job.kind != "order":
+                opts = self.options(state, job)
+                if not opts:
+                    refill_failed.append(job.refill["label"])
+                    continue
+                p = opts[0]
+                state.machine_free[p.mid] = p.end
+                state.mold_free[int(p.mold.id)] = p.end
+                state.mounted[p.mid] = int(p.mold.id)
+                job_parts.append((job, [p]))
+                slots.append(self._slot(job, p, 1, 1, plan_end=plan_end))
+                continue
             opts = self.options(state, job)
             if not opts:
                 why = "Bu ürüne bağlı kalıp yok" if not self.ctx.molds_by_product.get(job.product_id) else (
@@ -456,6 +516,8 @@ class Planner:
             "states": states,
             "job_parts": job_parts,
             "warnings": warnings,
+            "refill_failed": refill_failed,
+            "group": group,
         }
 
     def _line_etas(self, job: Job, parts: list[Option]) -> None:
@@ -508,11 +570,22 @@ class Planner:
                 s.status = "on_time"
                 s.reason = f"Tahmini bitiş {fmt_dt(s.eta)} · termin {fmt_day(s.deadline)}"
 
-    def _slot(self, job: Job, p: Option, i: int, n: int) -> dict[str, Any]:
+    def _slot(self, job: Job, p: Option, i: int, n: int, plan_end: datetime | None = None) -> dict[str, Any]:
         ctx = self.ctx
         mname = ctx.machine_names.get(p.mid, f"#{p.mid}")
         kname = ctx.mold_names.get(int(p.mold.id), f"#{p.mold.id}")
         bits = [f"{mname} · {kname} kalıbı, {fmt_qty(p.qty)} adet"]
+        if job.refill:
+            r = job.refill
+            bits.append(
+                f"Asgari stok tamamla: stok {fmt_qty(r['have'])}, asgari {fmt_qty(r['floor'])} → {fmt_qty(r['qty'])} adet"
+            )
+            if job.kind == "refill_after":
+                bits.append(
+                    f"Termine yetişsin diye plan sonuna kondu (sipariş işleri {fmt_dt(plan_end)} bitiyor)"
+                )
+            else:
+                bits.append("Siparişlerin terminini bozmadığı için hemen planlandı")
         if n > 1:
             bits[0] += f" (bölünmüş iş {i}/{n})"
         if len(job.lines) > 1:
@@ -548,7 +621,13 @@ class Planner:
             bits.append(f"Tahmini bitiş {fmt_dt(p.end)}; termin {fmt_day(job.deadline)} — {when}")
         else:
             bits.append(f"Tahmini bitiş {fmt_dt(p.end)}")
-        first = job.lines[0].line
+        first = job.lines[0].line if job.lines else LineIn(
+            key=f"refill:{job.product_id}",
+            product_id=job.product_id,
+            product_label=job.refill["label"] if job.refill else "",
+            qty=job.qty,
+            due=None,
+        )
         return _slot(
             first,
             mold_id=int(p.mold.id),
@@ -573,6 +652,7 @@ class Planner:
                 "deadline": job.deadline.isoformat() if job.deadline else None,
                 "manual": (p.mold.work_mode or "auto") == "manual",
                 "hours_per_day": job.rule.hours_per_day if job.rule else None,
+                "refill": job.kind if job.refill else None,
             },
         )
 
@@ -610,6 +690,55 @@ def _execute(ctx: PlanContext, lines: list[LineIn], stock: dict[str, int], prefs
                 + (f", {saved} kalıp değişimi daha az" if saved > 0 else "")
             )
     return chosen, notes
+
+
+def _hurts_orders(base: dict[str, Any], trial: dict[str, Any]) -> bool:
+    """True when `trial` makes an order line late, or an already-late one later."""
+    before = {s.line.key: s for s in base["states"]}
+    for s in trial["states"]:
+        b = before.get(s.line.key)
+        if b is None or s.status not in ("late",):
+            continue
+        if b.status != "late":
+            return True
+        if s.eta and b.eta and s.eta > b.eta + timedelta(minutes=1):
+            return True
+    return False
+
+
+def _with_refill(ctx, lines, stock, prefs: PlanPrefs, start, base: dict[str, Any]):
+    """Add min-stock top-ups: early when no order gets (more) late, else after plan end."""
+    needs = Planner(ctx, prefs, start).refill_needs(stock)
+    if not needs:
+        return base, [], []
+    now: set[int] = set()
+    for n in needs:
+        trial = Planner(ctx, prefs, start).run(
+            lines, stock, group=base["group"], refill_now=frozenset(now | {n["product_id"]})
+        )
+        trial["start"] = start
+        if not _hurts_orders(base, trial):
+            now.add(n["product_id"])
+    after = frozenset(n["product_id"] for n in needs) - now
+    final = Planner(ctx, prefs, start).run(
+        lines, stock, group=base["group"], refill_now=frozenset(now), refill_after=after
+    )
+    final["start"] = start
+    failed = set(final["refill_failed"])
+    labels = {n["product_id"]: n["label"] for n in needs}
+    notes: list[str] = []
+    early = [labels[p] for p in sorted(now) if labels[p] not in failed]
+    late = [labels[p] for p in sorted(after) if labels[p] not in failed]
+    if early:
+        notes.append("Asgari stok tamamlama hemen planlandı (terminler bozulmuyor): " + ", ".join(early))
+    if late:
+        notes.append(
+            "Asgari stok tamamlama plan sonuna kondu — hemen üretmek siparişleri geciktirirdi: " + ", ".join(late)
+        )
+    warnings = []
+    if failed:
+        warnings.append("Asgari stok tamamlanamıyor (uygun kalıp/makine yok): " + ", ".join(sorted(failed)))
+    return final, notes, warnings
 
 
 def _what_if(ctx, lines, stock, prefs: PlanPrefs, start, base_late: int) -> list[str]:
@@ -651,9 +780,11 @@ def compute_plan_a2(
     if start < ctx.now and ctx.as_of is None:
         start = ctx.now
     run, notes = _execute(ctx, lines, stock, prefs, start)
-    states: list[LineState] = run["states"]
     late = _late_count(run)
     notes += _what_if(ctx, lines, stock, prefs, start, late)
+    run, refill_notes, refill_warnings = _with_refill(ctx, lines, stock, prefs, start, run)
+    notes += refill_notes
+    states: list[LineState] = run["states"]
     relaxed_used = sorted({r for _, parts in run["job_parts"] for p in parts for r in p.relaxed})
     if relaxed_used:
         notes.append("“Mümkünse” tercihleri termin için esnetildi: " + ", ".join(relaxed_used))
@@ -665,7 +796,7 @@ def compute_plan_a2(
     if splits:
         notes.append(f"{splits} iş birden fazla kalıp/makineye bölündü (termin için)")
 
-    warnings = list(run["warnings"])
+    warnings = list(run["warnings"]) + refill_warnings
     unmatched = sorted({s.line.product_label for s in states if not s.line.product_id and s.need > 0})
     if unmatched:
         warnings.append(f"{len(unmatched)} ürün sistemde eşleşmedi: " + ", ".join(unmatched[:6]) + ("…" if len(unmatched) > 6 else ""))
@@ -674,6 +805,7 @@ def compute_plan_a2(
         warnings.append(f"{overdue} siparişin termini plan başlangıcından önce")
 
     parts_all = [p for _, parts in run["job_parts"] for p in parts]
+    refill_parts = [(j, p) for j, parts in run["job_parts"] if j.refill for p in parts]
     counts = {k: sum(1 for s in states if s.status == k) for k in STATUS_LABELS}
     dated = [s for s in states if s.status in ("on_time", "risky", "late") and s.deadline]
     kpis = {
@@ -688,7 +820,10 @@ def compute_plan_a2(
         "plan_end": max(p.end for p in parts_all).isoformat() if parts_all else None,
         "changeovers": sum(1 for p in parts_all if p.co_min > 0),
         "changeover_min": sum(p.co_min for p in parts_all),
-        "planned_qty": sum(p.qty for p in parts_all),
+        "planned_qty": sum(p.qty for j, parts in run["job_parts"] if not j.refill for p in parts),
+        "refill_qty": sum(p.qty for _, p in refill_parts),
+        "refill_now": sum(1 for j, _ in refill_parts if j.kind == "refill"),
+        "refill_after": sum(1 for j, _ in refill_parts if j.kind == "refill_after"),
         "stock_used": sum(s.stock_used for s in states),
         "machines_used": len({p.mid for p in parts_all}),
         "splits": splits,

@@ -387,6 +387,74 @@ def test_min_stock_ignored_by_legacy_engine(plant):
     assert before["slots"] == after["slots"]
 
 
+def test_min_stock_refill_planned_early_when_orders_stay_on_time(plant):
+    db, f = plant
+    pb, pc = f["products"]["B"], f["products"]["C"]
+    pc.min_stock = 200  # C has no open order; stock 0
+    db.commit()
+    lines = [_line(f, "b1", "B", 30, 3)]
+    base = _plan(db, lines, {f"p:{pb.id}": 0})
+    res = _plan(db, lines, {f"p:{pb.id}": 0, f"p:{pc.id}": 0})
+    refill = [s for s in _prod_slots(res) if s["meta"]["refill"]]
+    assert len(refill) == 1
+    r = refill[0]
+    assert r["product_id"] == pc.id and r["qty_planned"] == 200 and r["order_line_id"] is None
+    assert r["meta"]["refill"] == "refill" and r["meta"]["line_keys"] == []
+    assert "Asgari stok tamamla" in r["reason"] and "hemen planlandı" in r["reason"]
+    assert _line_by_key(res, "b1")["status"] == _line_by_key(base, "b1")["status"]
+    assert res["kpis"]["refill_qty"] == 200 and res["kpis"]["refill_now"] == 1
+    assert any("hemen planlandı" in x for x in res["explanations"])
+
+
+def test_min_stock_refill_moved_after_plan_end_when_it_would_make_orders_late(plant):
+    db, f = plant
+    pa = f["products"]["A"]
+    m2 = f["machines"][1]
+    pa.min_stock = 40000  # ~58 h on the only allowed machine
+    db.commit()
+    kw = dict(split="no", exclude_machine_ids=[m2.id], exclude_mold_ids=[f["molds"]["A2"].id])
+    lines = [_line(f, "a1", "A", 3000, 1)]
+    base = _plan(db, lines, {}, **kw)
+    res = _plan(db, lines, {f"p:{pa.id}": 0}, **kw)
+    order = next(s for s in _prod_slots(res) if not s["meta"]["refill"])
+    refill = next(s for s in _prod_slots(res) if s["meta"]["refill"])
+    assert refill["meta"]["refill"] == "refill_after" and refill["qty_planned"] == 40000
+    assert _aware(refill["suggested_start"]) >= _aware(order["suggested_end"])
+    assert "plan sonuna kondu" in refill["reason"]
+    # order slot is exactly where it was without min stock
+    assert _line_by_key(res, "a1")["status"] == _line_by_key(base, "a1")["status"] == "on_time"
+    assert _line_by_key(res, "a1")["eta"] == _line_by_key(base, "a1")["eta"]
+    assert res["kpis"]["refill_after"] == 1
+    assert any("plan sonuna kondu" in x for x in res["explanations"])
+
+
+def test_min_stock_refill_skipped_when_stock_unknown_or_enough(plant):
+    db, f = plant
+    pb, pc = f["products"]["B"], f["products"]["C"]
+    pb.min_stock = 50
+    pc.min_stock = 10
+    db.commit()
+    # B: 70 ≥ 50 → nothing to top up; C: stock not in the input → unknown, skipped
+    res = _plan(db, [_line(f, "b1", "B", 10, 3)], {f"p:{pb.id}": 70})
+    assert not [s for s in _prod_slots(res) if s["meta"]["refill"]]
+
+
+def test_no_product_level_hours_default(plant):
+    db, f = plant
+    # only line rules exist; a product-keyed setting is not a preference
+    p = prefs_from_dict({"product_hours": {str(f["products"]["A"].id): 4}, "line_rules": {"a1": {"hours_per_day": 4}}})
+    assert not hasattr(p, "product_hours") and "product_hours" not in p.to_dict()
+    lines = [_line(f, "a1", "A", 3000, 6), _line(f, "a2", "A", 3000, 9)]
+    res = _plan(db, lines, line_rules={"a1": {"hours_per_day": 4}})
+    by_key = {k: s for s in _prod_slots(res) for k in s["meta"]["line_keys"]}
+    assert by_key["a1"]["meta"]["hours_per_day"] == 4
+    # same product, no line rule → full shift calendar (continuous 24 h)
+    a2 = by_key["a2"]
+    assert a2["meta"]["hours_per_day"] is None
+    span = _aware(a2["suggested_end"]) - datetime.fromisoformat(a2["meta"]["prod_start"])
+    assert span <= timedelta(hours=5)
+
+
 # ---------- cycle source ----------
 
 

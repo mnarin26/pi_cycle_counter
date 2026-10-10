@@ -73,7 +73,9 @@ export function Gantt({ start, end, rows }: { start: string; end: string; rows: 
                     />
                   ))}
                   {lane === "planned"
-                    ? r.planned.map((b, i) => <Bar key={i} bar={b} start={s} end={e} cls="bg-sky-600 text-white" />)
+                    ? r.planned.map((b, i) => (
+                        <Bar key={i} bar={b} start={s} end={e} cls={b.refill ? "bg-amber-600 text-white" : "bg-sky-600 text-white"} />
+                      ))
                     : [
                         ...r.downtimes.map((b, i) => (
                           <Bar key={`d${i}`} bar={{ ...b, label: `Duruş: ${b.label}` }} start={s} end={e} cls="bg-red-700/80 text-white" />
@@ -95,6 +97,7 @@ export function Gantt({ start, end, rows }: { start: string; end: string; rows: 
         ))}
         <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-slate-400">
           <span><span className="mr-1 inline-block h-2 w-3 rounded bg-sky-600" />Planlanan</span>
+          <span><span className="mr-1 inline-block h-2 w-3 rounded bg-amber-600" />Asgari stok tamamlama</span>
           <span><span className="mr-1 inline-block h-2 w-3 rounded bg-emerald-600" />Gerçekleşen (bu siparişler)</span>
           <span><span className="mr-1 inline-block h-2 w-3 rounded bg-slate-600" />Gerçekleşen (diğer işler)</span>
           <span><span className="mr-1 inline-block h-2 w-3 rounded bg-red-700" />Duruş</span>

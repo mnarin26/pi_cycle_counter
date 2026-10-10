@@ -139,3 +139,23 @@ def test_replan_suggests_alternative_after_downtime():
     assert c["meets_due"] is True
     assert datetime.fromisoformat(c["finish"]) > at
     assert "yetişirdi" in c["text"] and "önce biterdi" in c["text"]
+
+
+def test_backtest_with_min_stock_refill_compares_without_errors():
+    db = make_session()
+    f = seed_factory(db, T0)
+    pa, pc = f["products"]["A"], f["products"]["C"]
+    pc.min_stock = 300
+    imp = OrderImport(filename="liste.xlsx", row_count=1, created_at=T0)
+    db.add(imp)
+    db.flush()
+    db.add(OrderLine(import_id=imp.id, product_name_raw=pa.name, product_id=pa.id, qty=3000,
+                     due_date=T0 + timedelta(days=2)))
+    db.commit()
+    bt = run_backtest(db, import_id=imp.id, as_of=T0, prefs={})
+    refill = [s for s in db.query(PlanSlot).filter(PlanSlot.plan_run_id == bt.id) if s.line_key == f"refill:{pc.id}"]
+    assert len(refill) == 1 and refill[0].qty_planned == 300
+    cmp = compare_backtest(db, bt.id, now=NOW)
+    assert len(cmp["rows"]) == 1  # refill is not an order row
+    bars = [b for row in cmp["gantt"]["rows"] for b in row["planned"] if b["refill"]]
+    assert len(bars) == 1 and "asgari stok" in bars[0]["label"]
